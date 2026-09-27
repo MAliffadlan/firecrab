@@ -46,7 +46,7 @@ Keep host privileges small: the API stays unprivileged; only `firecrab-net-helpe
 
 ## Prerequisites
 
-- **Linux** with `/dev/kvm` (needed to boot guests; unit tests mostly do not need it)
+- **Linux** with `/dev/kvm` for the direct host workflow below (unit tests mostly do not need it); macOS and Windows use microManager as described below.
 - **Rust** matching [`rust-toolchain.toml`](rust-toolchain.toml) (currently 1.96.0 with `clippy`, `rustfmt`, `llvm-tools`)
 - **Node.js 22+** and npm (dashboard)
 - Common host tools for full local runs: `ip`, `nft`, `dnsmasq`, `mkfs.ext4`, Firecracker (or use `./install.sh`)
@@ -55,7 +55,7 @@ You do not need a full install for pure Rust unit tests or frontend lint/build.
 
 ## Develop from source
 
-Run the API from the **repository root** so relative paths (`data/`, `images/`) resolve correctly. Use three processes:
+On Linux, run the API from the **repository root** so relative paths (`data/`, `images/`) resolve correctly. Use three processes:
 
 ```sh
 # Terminal 1 — privileged network helper
@@ -81,6 +81,31 @@ FIRECRAB_STATIC_ROOT="$PWD/firecrab-frontend/dist" cargo run -p firecrab-api
 ```
 
 More dashboard notes: [public-docs/dashboard.md](public-docs/dashboard.md).
+
+### microManager checkout workflow (macOS and Windows)
+
+Build the host CLI from the checkout. On macOS, also build and sign its native helper:
+
+```sh
+# macOS, from the repository root
+cargo build -p firecrab-cli --locked
+scripts/build-micromanager-macos.sh target/debug/firecrab-micromanager-macos
+./target/debug/firecrab service start
+./target/debug/firecrab service debug --logs --tail 100
+curl -fsS http://127.0.0.1:5523/api/host
+```
+
+```powershell
+# Windows PowerShell, from the repository root
+cargo build -p firecrab-cli --locked
+.\target\debug\firecrab.exe service start
+.\target\debug\firecrab.exe service debug --logs --tail 100
+Invoke-RestMethod http://127.0.0.1:5523/api/host
+```
+
+`service start` requires an installed microManager service. On a new host, run the checkout CLI's `service install` instead; it provisions and starts the managed guest and API. Later, `cargo run -p firecrab-cli -- service start` builds and runs the same start command. `service debug` only observes state and never starts a stopped guest. Use `service stop` to shut it down. See the [macOS](public-docs/micromanager-macos.md#develop-from-a-checkout) and [Windows](public-docs/micromanager-windows.md#develop-from-a-checkout) guides for installation and console details.
+
+These commands assume Cargo's default `target/` directory; adjust the executable paths if `CARGO_TARGET_DIR` is set. They build the host CLI and start the Firecrab API already installed inside the managed guest. Editing `firecrab-api/` in the checkout does not change that guest binary.
 
 ### Build and install a local release
 
