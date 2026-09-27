@@ -51,7 +51,6 @@ curl -fsS http://127.0.0.1:5523/api/host
 `cargo run -p firecrab-cli -- service start` is the build-and-run equivalent of the start command. On a new host, use `./target/debug/firecrab service install` instead; installation provisions the guest and starts the API. To replace installed CLI/helper binaries with checkout builds, use `./target/debug/firecrab service reinstall`; it stops and reprovisions the management VM while preserving managed data. `service debug` is read-only, so a `launchd agent not loaded` result means to run `service start`. `service run` is a foreground serial console for the VM and does not create the Mac's localhost API tunnel. Stop the resident service with `./target/debug/firecrab service stop` when finished.
 
 Building `firecrab-cli` does not rebuild the Firecrab API inside Debian. `service start` runs the guest API binary installed by microManager, not edited `firecrab-api/` source from this checkout.
-If `CARGO_TARGET_DIR` is set, use `$CARGO_TARGET_DIR/debug/firecrab` and build the signed helper beside it at `$CARGO_TARGET_DIR/debug/firecrab-micromanager-macos`.
 
 ## Install lifecycle
 

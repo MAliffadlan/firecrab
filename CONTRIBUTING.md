@@ -105,7 +105,7 @@ Invoke-RestMethod http://127.0.0.1:5523/api/host
 
 `service start` requires an installed microManager service. On a new host, run the checkout CLI's `service install` instead; it provisions and starts the managed guest and API. Later, `cargo run -p firecrab-cli -- service start` builds and runs the same start command. `service debug` only observes state and never starts a stopped guest. Use `service stop` to shut it down. See the [macOS](public-docs/micromanager-macos.md#develop-from-a-checkout) and [Windows](public-docs/micromanager-windows.md#develop-from-a-checkout) guides for installation and console details.
 
-These commands assume Cargo's default `target/` directory; adjust the executable paths if `CARGO_TARGET_DIR` is set. They build the host CLI and start the Firecrab API already installed inside the managed guest. Editing `firecrab-api/` in the checkout does not change that guest binary.
+These commands build the host CLI and start the Firecrab API already installed inside the managed guest. Editing `firecrab-api/` in the checkout does not change that guest binary.
 
 ### Build and install a local release
 
