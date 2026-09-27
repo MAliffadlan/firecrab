@@ -120,6 +120,16 @@ A net-helper that keeps L2 rules in per-VM `netdev` tables and keeps dnsmasq off
 
 ## Validation and troubleshooting
 
+For a failed install or start, collect a host-side snapshot before retrying:
+
+```powershell
+firecrab service debug
+firecrab service debug --logs --tail 100
+firecrab service debug --json
+```
+
+`debug` reports host capability checks and fixes, the scheduled task, WSL distribution and guest services, localhost API, provisioning phase/failure marker, and available logs. `--logs` adds a bounded provisioning-log excerpt and the running guest's Firecrab systemd journal; `--tail` accepts 1–1000 lines and requires `--logs` (default 200). Diagnostics do not start a stopped distribution or change its scheduled task. When WSL is stopped, KVM and nested virtualization checks are marked as unverified, and the guest journal is unavailable, while host-side provisioning evidence remains visible. The report omits credential files and redacts recognized secrets in log excerpts; inspect a log locally before sharing it. `firecrab service run` opens an interactive root console and can start the managed distribution.
+
 A successful install records these guest gates in `runtime\provisioned`:
 
 - Debian 13 and systemd are running in `firecrab-debian`.

@@ -115,6 +115,16 @@ A provisioning schema change replaces only the OS disk; the ext4 data disk is de
 ## Validation and troubleshooting
 
 `doctor` checks host capability, while `validate` checks the prepared kernel, initrd, OS/data separation, resources, and VZ configuration.
+For an install or start failure, collect one host-side snapshot before changing the service:
+
+```sh
+firecrab service debug
+firecrab service debug --logs --tail 100
+firecrab service debug --json
+```
+
+`debug` reports host capability checks and fixes, the launchd agent, management VM services, localhost API, provisioning phase/failure marker, and available logs. `--logs` adds a bounded excerpt of each log and the running guest's Firecrab systemd journal; `--tail` accepts 1–1000 lines and requires `--logs` (default 200). The command does not start or stop the management VM. When the VM is stopped, guest journal output is unavailable, but the host-side markers and logs remain visible. The report omits credential files and redacts recognized secrets in log excerpts; inspect a log locally before sharing it. For an interactive serial console, stop the launchd service and use `firecrab service run`.
+
 If the guest finishes provisioning but its VM does not power off within two minutes, `install` stops the provisioning VM and continues from the recorded markers.
 A successful install additionally records these guest gates in `runtime/provisioned`:
 
