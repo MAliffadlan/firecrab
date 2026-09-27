@@ -170,7 +170,29 @@ pub fn guest_finished(prepared: &PreparedLayout) -> bool {
 }
 
 pub fn guest_result(prepared: &PreparedLayout) -> Result<Option<String>, Error> {
-    let failed = prepared.provision_marker.with_file_name("provision.failed");
+    guest_result_at(&prepared.provision_marker)
+}
+
+pub fn require_guest_provisioned(managed_home: &Path) -> Result<(), Error> {
+    let marker = managed_home.join("runtime/provisioned");
+    if guest_result_at(&marker)?.is_some() {
+        return Ok(());
+    }
+    let phase = marker.with_file_name("provision.phase");
+    let phase = fs::read_to_string(&phase).unwrap_or_default();
+    let phase = phase.trim();
+    let detail = if phase.is_empty() {
+        "guest provisioning has not completed".to_string()
+    } else {
+        format!("guest provisioning stopped during {phase}")
+    };
+    Err(Error::GuestProvision(format!(
+        "{detail}; run `firecrab service reinstall` to rebuild the Debian system disk (persistent data is preserved)"
+    )))
+}
+
+fn guest_result_at(provision_marker: &Path) -> Result<Option<String>, Error> {
+    let failed = provision_marker.with_file_name("provision.failed");
     if failed.is_file() {
         let detail = fs::read_to_string(&failed)
             .map_err(|source| io_error("read provisioning failure", &failed, source))?;
@@ -179,16 +201,11 @@ pub fn guest_result(prepared: &PreparedLayout) -> Result<Option<String>, Error> 
             detail.trim()
         )));
     }
-    if !prepared.provision_marker.is_file() {
+    if !provision_marker.is_file() {
         return Ok(None);
     }
-    let result = fs::read_to_string(&prepared.provision_marker).map_err(|source| {
-        io_error(
-            "read provisioning marker",
-            &prepared.provision_marker,
-            source,
-        )
-    })?;
+    let result = fs::read_to_string(provision_marker)
+        .map_err(|source| io_error("read provisioning marker", provision_marker, source))?;
     let expected_schema = format!("schema={PROVISION_SCHEMA}");
     for required in [
         expected_schema.as_str(),
@@ -203,8 +220,7 @@ pub fn guest_result(prepared: &PreparedLayout) -> Result<Option<String>, Error> 
             )));
         }
     }
-    let managed_home = prepared
-        .provision_marker
+    let managed_home = provision_marker
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| Error::GuestProvision("marker has no managed parent".to_string()))?;
@@ -245,17 +261,24 @@ fn validate_arm64_image(path: &Path) -> Result<(), Error> {
 fn reset_failed_system(system: &Path, runtime: &Path) -> Result<(), Error> {
     let failed = runtime.join("provision.failed");
     let provisioned = runtime.join("provisioned");
+    let incomplete = runtime.join("provision.phase").is_file() && !provisioned.is_file();
     let outdated = provisioned.is_file()
         && !fs::read_to_string(&provisioned)
             .unwrap_or_default()
             .lines()
             .any(|line| line == format!("schema={PROVISION_SCHEMA}"));
-    if !failed.is_file() && !outdated {
+    if !failed.is_file() && !outdated && !incomplete {
         return Ok(());
     }
     report!(
         "[RESET] {} Debian system disk; persistent data is preserved",
-        if outdated { "outdated" } else { "failed" }
+        if outdated {
+            "outdated"
+        } else if failed.is_file() {
+            "failed"
+        } else {
+            "incomplete"
+        }
     );
     for path in [
         system.join("debian-system.raw"),
@@ -521,8 +544,8 @@ phase() {{ echo "$1" >"$phase_file"; sync; }}
 finish() {{
   rc=$?
   set +e
-  cp -f "$log" "$share/runtime/guest-provision.log"
   if [ "$rc" -ne 0 ]; then echo "$rc" >"$failed"; fi
+  cp -f "$log" "$share/runtime/guest-provision.log"
   sync
   systemctl poweroff --no-block || poweroff -f
 }}
@@ -946,6 +969,7 @@ mod tests {
             ssh_private_key: runtime.join("manager_ed25519"),
         };
         assert!(guest_result(&prepared).unwrap().is_some());
+        require_guest_provisioned(directory.path()).unwrap();
 
         fs::write(
             &prepared.provision_marker,
@@ -956,6 +980,32 @@ mod tests {
             guest_result(&prepared),
             Err(Error::GuestProvision(_))
         ));
+    }
+
+    #[test]
+    fn incomplete_provisioning_blocks_start_and_rebuilds_only_system_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let system = directory.path().join("system");
+        let runtime = directory.path().join("runtime");
+        let data = directory.path().join("data");
+        for path in [&system, &runtime, &data] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(system.join("debian-system.raw"), b"incomplete OS").unwrap();
+        fs::write(data.join("firecrab-data.raw"), b"persistent data").unwrap();
+        fs::write(runtime.join("provision.phase"), b"firecrab\n").unwrap();
+
+        let error = require_guest_provisioned(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("stopped during firecrab"));
+        assert!(error.to_string().contains("service reinstall"));
+
+        reset_failed_system(&system, &runtime).unwrap();
+        assert!(!system.join("debian-system.raw").exists());
+        assert!(!runtime.join("provision.phase").exists());
+        assert_eq!(
+            fs::read(data.join("firecrab-data.raw")).unwrap(),
+            b"persistent data"
+        );
     }
 
     #[test]

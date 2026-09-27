@@ -457,6 +457,7 @@ fn render_plist(paths: &DaemonPaths) -> String {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>
+  <key>ExitTimeOut</key><integer>45</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>{log}</string>
   <key>StandardErrorPath</key><string>{log}</string>
@@ -717,6 +718,7 @@ mod tests {
         assert!(plist.contains(LABEL));
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
+        assert!(plist.contains("<key>ExitTimeOut</key><integer>45</integer>"));
         assert!(plist.contains("<key>ProcessType</key><string>Background</string>"));
     }
 

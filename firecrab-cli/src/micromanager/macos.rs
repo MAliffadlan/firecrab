@@ -150,6 +150,10 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
 
 fn run_start() -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
+    let paths = daemon::paths(&layout)?;
+    if paths.plist.is_file() && paths.wrapper.is_file() {
+        provision::require_guest_provisioned(&layout.managed_home)?;
+    }
     let status = daemon::start(&layout)?;
     print_daemon_status(&status);
     Ok(i32::from(!status.success()))
@@ -242,6 +246,11 @@ fn run_debug(options: debug::Options) -> Result<i32, Error> {
             report.guest = debug::Probe::unavailable("service status unavailable");
             report.api = debug::Probe::unavailable("service status unavailable");
         }
+    }
+    if let Err(error) = provision::require_guest_provisioned(&layout.managed_home) {
+        report.guest = debug::Probe::fail(error.to_string());
+        report.api =
+            debug::Probe::fail("guest provisioning is incomplete; the local API cannot start");
     }
     if options.json {
         report!("{}", serde_json::to_string_pretty(&report)?);
