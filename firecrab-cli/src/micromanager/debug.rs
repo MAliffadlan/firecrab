@@ -79,6 +79,7 @@ pub struct Capability {
     pub checks: Vec<CapabilityCheck>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Deserialize)]
 struct DoctorSummary {
     ready: bool,
@@ -93,6 +94,7 @@ impl Capability {
         }
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
         let summary: DoctorSummary = serde_json::from_str(text)?;
         Ok(Self::from_checks(summary.ready, summary.checks))
