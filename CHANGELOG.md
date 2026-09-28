@@ -8,6 +8,7 @@ Sections are **Added**, **Changed**, **Deprecated**, **Fixed**, and **Improved**
 | Version | Date | Work |
 | --- | --- | --- |
 | [Unreleased](#unreleased) | — | — |
+| [0.3.0](#030---2026-09-28) | 2026-09-28 | [#210], [#266], [#287], [#290], [#294], [#295], [#297], [#312] |
 | [0.2.2](#022---2026-09-15) | 2026-09-15 | [#269], [#270], [#272], [88ba35d], [729bb47] |
 | [0.2.1](#021---2026-09-14) | 2026-09-14 | [#262], [#263], [#264], [#265] |
 | [0.2.0](#020---2026-09-03) | 2026-09-03 | [#146], [#178], [#183], [#184], [#186], [#176], [#190], [#198], [#131], [#188], [#194], [#208], [#232], [#254], [45790c3], [1ffba72], [1a44619], [73d5fe1], [76f6ef3] |
@@ -18,6 +19,35 @@ Sections are **Added**, **Changed**, **Deprecated**, **Fixed**, and **Improved**
 ## [Unreleased]
 
 Entries land here as work merges, and move under the next version heading when that release is cut.
+
+### Added
+
+- None.
+
+### Changed
+
+- None.
+
+### Deprecated
+
+- None.
+
+### Fixed
+
+- None.
+
+### Improved
+
+- None.
+
+## [0.3.0] - 2026-09-28
+
+firecrab adds microManager on macOS and Windows, SPDX SBOMs for OCI imports,
+native init support for imported guests, and host platform diagnostics.
+
+microManager still provisions verified Firecrab v0.2.2 guest artifacts. On WSL2,
+that pinned guest cannot yet start MicroVMs; the net-helper fixes below will
+reach it when a newer guest bundle is pinned.
 
 ### Added
 
@@ -38,10 +68,21 @@ Entries land here as work merges, and move under the next version heading when t
   mirror, digest, and size on a terminal and ask first (`--yes` skips it),
   then draw a progress gauge; an interrupted download resumes on the next
   run ([#266]).
+- Windows x86_64 and ARM64 CLIs can manage a Debian WSL2 distribution with a
+  per-user scheduled task, localhost API, and the same install, doctor, and
+  service commands. The x86_64 path has been validated in a Windows 11 lab;
+  ARM64 installation remains unverified on native hardware ([#295]).
+- `firecrab service debug` reports host capability, service, guest, API,
+  provisioning, and log state without starting a stopped guest. It supports
+  JSON output and bounded log excerpts on macOS and Windows ([#312]).
+- OCI imports generate SPDX SBOMs from guest package databases ([#210]).
+- The host API exposes platform information for Linux, macOS, and Windows
+  hosts ([#297]).
 
 ### Changed
 
-- None.
+- OCI imports preserve supported native init systems and use the BusyBox
+  fallback only when no supported native init is available ([#290]).
 
 ### Deprecated
 
@@ -58,10 +99,16 @@ Entries land here as work merges, and move under the next version heading when t
   the provisioning guest never powers off; the management guest no longer boots
   degraded by the packaged `dnsmasq.service`; and status output no longer
   panics when stdout is non-blocking ([#266]).
+- The net-helper keeps per-VM L2 rules in `netdev` tables and binds dnsmasq
+  only to MicroNetwork bridges, avoiding WSL2's missing nftables `bridge`
+  family and loopback DNS listener collision ([#294]).
+- Host disk usage is measured on the filesystem containing the VM directory
+  ([34193f5]).
 
 ### Improved
 
-- None.
+- The dashboard Host view identifies the reported host OS with its platform
+  icon ([#297]).
 
 ## [0.2.2] - 2026-09-15
 
@@ -417,7 +464,10 @@ network helper.
 - Changelog validation is part of the documentation CI job so a release
   cannot drop a required section.
 
-[Unreleased]: https://github.com/SteelCrab/firecrab/compare/v0.2.2...main
+[Unreleased]: https://github.com/SteelCrab/firecrab/compare/v0.3.0...main
+[0.3.0]: https://github.com/SteelCrab/firecrab/releases/tag/v0.3.0
+[0.2.2]: https://github.com/SteelCrab/firecrab/releases/tag/v0.2.2
+[0.2.1]: https://github.com/SteelCrab/firecrab/releases/tag/v0.2.1
 [0.2.0]: https://github.com/SteelCrab/firecrab/releases/tag/v0.2.0
 [0.1.2]: https://github.com/SteelCrab/firecrab/releases/tag/v0.1.2
 [0.1.1]: https://github.com/SteelCrab/firecrab/releases/tag/v0.1.1
@@ -452,6 +502,7 @@ network helper.
 [#194]: https://github.com/SteelCrab/firecrab/pull/194
 [#198]: https://github.com/SteelCrab/firecrab/pull/198
 [#208]: https://github.com/SteelCrab/firecrab/pull/208
+[#210]: https://github.com/SteelCrab/firecrab/pull/210
 [#232]: https://github.com/SteelCrab/firecrab/pull/232
 [#254]: https://github.com/SteelCrab/firecrab/pull/254
 [#262]: https://github.com/SteelCrab/firecrab/pull/262
@@ -462,7 +513,14 @@ network helper.
 [#269]: https://github.com/SteelCrab/firecrab/pull/269
 [#270]: https://github.com/SteelCrab/firecrab/pull/270
 [#272]: https://github.com/SteelCrab/firecrab/pull/272
+[#287]: https://github.com/SteelCrab/firecrab/pull/287
+[#290]: https://github.com/SteelCrab/firecrab/pull/290
+[#294]: https://github.com/SteelCrab/firecrab/pull/294
+[#295]: https://github.com/SteelCrab/firecrab/pull/295
+[#297]: https://github.com/SteelCrab/firecrab/pull/297
+[#312]: https://github.com/SteelCrab/firecrab/pull/312
 [88ba35d]: https://github.com/SteelCrab/firecrab/commit/88ba35d
+[34193f5]: https://github.com/SteelCrab/firecrab/commit/34193f5
 [729bb47]: https://github.com/SteelCrab/firecrab/commit/729bb47
 [1ffba72]: https://github.com/SteelCrab/firecrab/commit/1ffba72
 [8bcc2af]: https://github.com/SteelCrab/firecrab/commit/8bcc2af
