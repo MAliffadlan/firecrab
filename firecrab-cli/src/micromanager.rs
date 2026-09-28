@@ -3,6 +3,7 @@
 //! Each host has its own backend module; everything they share lives beside them.
 
 mod artifact;
+mod debug;
 mod host_platform;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -100,6 +101,18 @@ pub enum Command {
     },
     /// Show and validate the managed Debian VM configuration.
     Validate,
+    /// Diagnose the managed VM without changing its state.
+    Debug {
+        /// Emit a machine-readable diagnostic report.
+        #[arg(long)]
+        json: bool,
+        /// Include bounded excerpts from available logs.
+        #[arg(long)]
+        logs: bool,
+        /// Number of lines from each log (requires --logs; maximum 1000).
+        #[arg(long, requires = "logs", value_parser = clap::value_parser!(u16).range(1..=1000))]
+        tail: Option<u16>,
+    },
     /// Run the managed Debian VM in the foreground with its console attached.
     Run,
     /// Serve running VMs' TCP port forwards on 127.0.0.1; run by the macOS daemon.
@@ -188,5 +201,22 @@ mod tests {
 
         let install = TestCli::try_parse_from(["test", "install"]).unwrap();
         assert!(matches!(install.command, Command::Install { yes: false }));
+    }
+
+    #[test]
+    fn debug_log_tail_is_explicit_and_bounded() {
+        let parsed =
+            TestCli::try_parse_from(["test", "debug", "--json", "--logs", "--tail", "50"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Debug {
+                json: true,
+                logs: true,
+                tail: Some(50)
+            }
+        ));
+        assert!(TestCli::try_parse_from(["test", "debug", "--tail", "50"]).is_err());
+        assert!(TestCli::try_parse_from(["test", "debug", "--logs", "--tail", "0"]).is_err());
+        assert!(TestCli::try_parse_from(["test", "debug", "--logs", "--tail", "1001"]).is_err());
     }
 }

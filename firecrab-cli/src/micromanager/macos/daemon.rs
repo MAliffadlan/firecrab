@@ -457,6 +457,7 @@ fn render_plist(paths: &DaemonPaths) -> String {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>
+  <key>ExitTimeOut</key><integer>45</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>{log}</string>
   <key>StandardErrorPath</key><string>{log}</string>
@@ -654,13 +655,18 @@ mod tests {
             .spawn()
             .unwrap();
         let first = wait_for("the first ready marker", || read_marker(&paths.ready));
+        wait_for("the first tunnel invocation", || {
+            (fs::read_to_string(&tunnels).ok()?.lines().count() == 1).then_some(())
+        });
         signal(&first["tunnel_pid"], "-KILL");
         let second = wait_for("a reconnected tunnel", || {
             read_marker(&paths.ready).filter(|marker| marker["tunnel_pid"] != first["tunnel_pid"])
         });
 
         assert_eq!(second["vm_pid"], first["vm_pid"], "the VM keeps running");
-        assert_eq!(fs::read_to_string(&tunnels).unwrap().lines().count(), 2);
+        wait_for("the second tunnel invocation", || {
+            (fs::read_to_string(&tunnels).ok()?.lines().count() == 2).then_some(())
+        });
         assert!(
             wrapper.try_wait().unwrap().is_none(),
             "the wrapper keeps supervising"
@@ -717,6 +723,7 @@ mod tests {
         assert!(plist.contains(LABEL));
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
+        assert!(plist.contains("<key>ExitTimeOut</key><integer>45</integer>"));
         assert!(plist.contains("<key>ProcessType</key><string>Background</string>"));
     }
 

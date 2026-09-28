@@ -30,6 +30,21 @@ Every WSL2 distribution shares one kernel, so either one answers for `/dev/kvm`.
 A host with WSL but no distribution reports `WARNING`; `install` imports its own distribution and checks it there.
 `kvm_intel` loads about 25 seconds after a cold WSL2 start, so a missing `/dev/kvm` during that window is a `WARNING`, not a failure.
 
+## Develop from a checkout
+
+On a Windows host, open PowerShell in the repository root and build the CLI. If microManager is already installed, start its scheduled task with the checkout CLI; this keeps the managed WSL distribution running while its Firecrab API and net-helper serve the localhost API:
+
+```powershell
+cargo build -p firecrab-cli --locked
+.\target\debug\firecrab.exe service start
+.\target\debug\firecrab.exe service debug --logs --tail 100
+Invoke-RestMethod http://127.0.0.1:5523/api/host
+```
+
+`cargo run -p firecrab-cli -- service start` also builds and runs the CLI. On a new host, run `.\target\debug\firecrab.exe service install` instead; installation imports and provisions the managed distribution and starts the API. `service debug` only reports status and never starts a stopped distribution. `service run` opens a root console in that distribution, while `service start` is the resident API path. Stop the scheduled task and managed distribution with `.\target\debug\firecrab.exe service stop` when finished. Windows `service reinstall` reprovisions the guest but does not copy the checkout CLI into the user's installed binary path; continue invoking the checkout executable to test CLI changes.
+
+Building `firecrab-cli` does not rebuild the Firecrab API inside Debian. `service start` runs the guest API binary installed by microManager, not edited `firecrab-api/` source from this checkout.
+
 ## Install lifecycle
 
 ```powershell
@@ -119,6 +134,16 @@ The pinned Firecrab v0.2.2 net-helper needs the first for per-VM L2 rules and co
 A net-helper that keeps L2 rules in per-VM `netdev` tables and keeps dnsmasq off `lo` runs the shared QA list on WSL2; the pinned release moves once one ships.
 
 ## Validation and troubleshooting
+
+For a failed install or start, collect a host-side snapshot before retrying:
+
+```powershell
+firecrab service debug
+firecrab service debug --logs --tail 100
+firecrab service debug --json
+```
+
+`debug` reports host capability checks and fixes, the scheduled task, WSL distribution and guest services, localhost API, provisioning phase/failure marker, and available logs. `--logs` adds a bounded provisioning-log excerpt and the running guest's Firecrab systemd journal; `--tail` accepts 1–1000 lines and requires `--logs` (default 200). Diagnostics do not start a stopped distribution or change its scheduled task. When WSL is stopped, KVM and nested virtualization checks are marked as unverified, and the guest journal is unavailable, while host-side provisioning evidence remains visible. The report omits credential files and redacts recognized secrets in log excerpts; inspect a log locally before sharing it. `firecrab service run` opens an interactive root console and can start the managed distribution.
 
 A successful install records these guest gates in `runtime\provisioned`:
 

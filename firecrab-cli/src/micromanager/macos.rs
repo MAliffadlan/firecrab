@@ -11,7 +11,7 @@ use std::process::{Child, Command as ProcessCommand, ExitStatus};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Command, report};
+use super::{Command, debug, report};
 
 const HELPER_NAME: &str = "firecrab-micromanager-macos";
 const HELPER_ENV: &str = "FIRECRAB_MICROMANAGER_HELPER";
@@ -46,6 +46,8 @@ pub enum Error {
     ProvisionExit(std::process::ExitStatus),
     #[error("EFI provisioning helper stopped without a success or failure marker")]
     MissingProvisionMarker,
+    #[error("could not render the debug report: {0}")]
+    Render(#[from] serde_json::Error),
     #[error(
         "could not launch macOS microManager helper {path}: {source}; reinstall the macOS CLI or set {HELPER_ENV}"
     )]
@@ -64,6 +66,7 @@ pub fn run(command: Command) -> Result<i32, Error> {
         Command::Start => run_start(),
         Command::Stop => run_stop(),
         Command::Status => run_status(),
+        Command::Debug { json, logs, tail } => run_debug(debug::Options::new(json, logs, tail)),
         Command::ForwardPorts {
             manager,
             key,
@@ -147,6 +150,10 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
 
 fn run_start() -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
+    let paths = daemon::paths(&layout)?;
+    if paths.plist.is_file() && paths.wrapper.is_file() {
+        provision::require_guest_provisioned(&layout.managed_home)?;
+    }
     let status = daemon::start(&layout)?;
     print_daemon_status(&status);
     Ok(i32::from(!status.success()))
@@ -165,6 +172,185 @@ fn run_status() -> Result<i32, Error> {
     print_daemon_status(&status);
     print_log_paths(&layout);
     Ok(i32::from(!status.success()))
+}
+
+fn run_debug(options: debug::Options) -> Result<i32, Error> {
+    let layout = lifecycle::Layout::from_process_env()?;
+    let mut report = debug::DebugReport::new(
+        "macos",
+        &layout.managed_home,
+        options,
+        &[
+            ("daemon", "daemon.log"),
+            ("console", "vm-console.log"),
+            ("provision", "guest-provision.log"),
+        ],
+    );
+    report.capability = host_capability(&layout);
+    match daemon::status(&layout) {
+        Ok(status) => {
+            let installed = daemon::paths(&layout)
+                .is_ok_and(|paths| paths.plist.is_file() && paths.wrapper.is_file());
+            report.service = if !installed {
+                debug::Probe::fail(
+                    "managed launchd files are missing; run `firecrab service install`",
+                )
+            } else if status.loaded {
+                debug::Probe::pass("launchd agent loaded")
+            } else {
+                debug::Probe::fail("launchd agent not loaded; run `firecrab service start`")
+            };
+            report.api = if installed && status.ready && status.api_reachable {
+                debug::Probe::pass("http://127.0.0.1:5523/")
+            } else {
+                debug::Probe::fail(
+                    "local API is not ready for this managed home; inspect daemon and console logs",
+                )
+            };
+            if installed && status.loaded && status.ready {
+                let ip = status.detail.as_deref().and_then(manager_ip);
+                report.guest = match ip {
+                    Some(ip) => guest_units(&layout, ip),
+                    None => debug::Probe::unavailable("daemon-ready has no valid management IP"),
+                };
+                if options.logs {
+                    report.logs.push(debug::LogSource::guest(
+                        "guest journal: firecrab-api + firecrab-net-helper",
+                        ip.map_or_else(
+                            || Err("management IP unavailable".to_string()),
+                            |ip| guest_command(
+                                &layout,
+                                ip,
+                                &format!(
+                                    "journalctl --no-pager --output=short-iso -n {} -u firecrab-api -u firecrab-net-helper",
+                                    options.tail
+                                ),
+                            ),
+                        ),
+                        options.tail,
+                    ));
+                }
+            } else {
+                report.guest = debug::Probe::unavailable("management VM is not ready");
+                if options.logs {
+                    report.logs.push(debug::LogSource::guest(
+                        "guest journal: firecrab-api + firecrab-net-helper",
+                        Err("management VM is not running and was not started".to_string()),
+                        options.tail,
+                    ));
+                }
+            }
+        }
+        Err(error) => {
+            report.service = debug::Probe::unavailable(error.to_string());
+            report.guest = debug::Probe::unavailable("service status unavailable");
+            report.api = debug::Probe::unavailable("service status unavailable");
+        }
+    }
+    if let Err(error) = provision::require_guest_provisioned(&layout.managed_home) {
+        report.guest = debug::Probe::fail(error.to_string());
+        report.api =
+            debug::Probe::fail("guest provisioning is incomplete; the local API cannot start");
+    }
+    if options.json {
+        report!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        report!("{}", report.render_human());
+    }
+    Ok(0)
+}
+
+fn host_capability(layout: &lifecycle::Layout) -> debug::Capability {
+    let sibling = helper_path(None, std::env::current_exe().ok().as_deref());
+    let helper = std::env::var_os(HELPER_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if layout.helper_path().is_file() {
+                layout.helper_path()
+            } else {
+                sibling
+            }
+        });
+    let output = match ProcessCommand::new(&helper)
+        .args(["doctor", "--json"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => {
+            return debug::Capability::unavailable(format!(
+                "could not run host capability helper {}: {error}",
+                helper.display()
+            ));
+        }
+    };
+    match debug::Capability::from_json(&String::from_utf8_lossy(&output.stdout)) {
+        Ok(capability) => capability,
+        Err(error) => debug::Capability::unavailable(format!(
+            "host capability helper returned no valid report: {error}"
+        )),
+    }
+}
+
+fn manager_ip(marker: &str) -> Option<std::net::IpAddr> {
+    marker
+        .lines()
+        .find_map(|line| line.strip_prefix("ip="))?
+        .parse()
+        .ok()
+}
+
+fn guest_units(layout: &lifecycle::Layout, ip: std::net::IpAddr) -> debug::Probe {
+    match guest_command(
+        layout,
+        ip,
+        "for unit in firecrab-api firecrab-net-helper; do systemctl is-active \"$unit\" || true; done",
+    ) {
+        Ok(states) => {
+            let mut states = states.lines();
+            let api = states.next().unwrap_or("unknown");
+            let helper = states.next().unwrap_or("unknown");
+            let detail = format!("firecrab-api={api}, firecrab-net-helper={helper}");
+            if api == "active" && helper == "active" {
+                debug::Probe::pass(detail)
+            } else {
+                debug::Probe::fail(detail)
+            }
+        }
+        Err(error) => debug::Probe::unavailable(error),
+    }
+}
+
+fn guest_command(
+    layout: &lifecycle::Layout,
+    ip: std::net::IpAddr,
+    command: &str,
+) -> Result<String, String> {
+    let runtime = layout.managed_home.join("runtime");
+    let key = runtime.join("manager_ed25519");
+    let known_hosts = runtime.join("known_hosts");
+    if !key.is_file() || !known_hosts.is_file() {
+        return Err("management SSH credentials are not ready".to_string());
+    }
+    let output = ProcessCommand::new("/usr/bin/ssh")
+        .arg("-i")
+        .arg(&key)
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"])
+        .args(["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"])
+        .args(["-o", "LogLevel=ERROR"])
+        .arg("-o")
+        .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
+        .arg(format!("root@{ip}"))
+        .arg(command)
+        .output()
+        .map_err(|error| format!("could not query management VM: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if output.status.success() {
+        Ok(stdout)
+    } else if !stdout.is_empty() {
+        Err(stdout)
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
 }
 
 fn print_log_paths(layout: &lifecycle::Layout) {
@@ -404,6 +590,7 @@ fn command_arguments(command: &Command) -> Vec<OsString> {
         | Command::Start
         | Command::Stop
         | Command::Status
+        | Command::Debug { .. }
         | Command::ForwardPorts { .. } => {
             unreachable!("lifecycle and relay commands do not invoke the native helper")
         }
@@ -424,6 +611,14 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[test]
+    fn debug_accepts_only_an_ip_from_the_ready_marker() {
+        assert_eq!(
+            manager_ip("vm_pid=42\nip=192.0.2.7\ntunnel_pid=43\n"),
+            Some("192.0.2.7".parse().unwrap())
+        );
+        assert_eq!(manager_ip("ip=bad address\n"), None);
+    }
     #[derive(Parser)]
     struct TestCli {
         #[command(subcommand)]
