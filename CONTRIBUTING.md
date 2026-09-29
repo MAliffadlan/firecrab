@@ -28,35 +28,35 @@ When several people work on similar features, SteelCrab will coordinate the merg
 **It is okay if maintenance pauses.**  
 If life makes it hard to keep a PR going, the maintainer may pick up the work, polish it, and land it. We understand personal circumstances. Showing up and contributing at all is already a big help — a stalled commit or PR does not make the effort meaningless.
 
-## 소개
+## What firecrab is
 
-firecrab은 Firecracker 기반의 단일 호스트 microVM 관리자입니다.
-API, 네트워크 helper, CLI, 대시보드로 구성됩니다.
-API의 호스트 권한은 최소화하고, 권한이 필요한 네트워크 작업은 helper가 담당합니다.
+firecrab is a single-host microVM manager built on Firecracker.
+It consists of an API, a network helper, a CLI, and a dashboard.
+The API keeps host privileges minimal; the helper handles network operations that need them.
 
-## 준비
+## Prerequisites
 
-- **공통:** 저장소에 지정된 Rust 툴체인, Node.js 22 이상, npm
-- **Linux:** 게스트 실행에는 /dev/kvm과 네트워크 도구가 필요합니다.
-- **macOS:** microManager를 사용하며 런타임 검증에는 중첩 가상화가 필요합니다.
-- **Windows:** WSL2의 microManager를 사용하며 런타임 검증에는 중첩 가상화가 필요합니다.
+- **Common:** The repository's Rust toolchain, Node.js 22 or later, and npm
+- **Linux:** Guest runtime tests require /dev/kvm and network tools.
+- **macOS:** Uses microManager; runtime validation requires nested virtualization.
+- **Windows:** Uses microManager in WSL2; runtime validation requires nested virtualization.
 
-단위 테스트와 프런트엔드 빌드만 한다면 전체 설치는 필요하지 않습니다.
+A full installation is unnecessary for unit tests and frontend builds.
 
-## 소스 환경 실행
+## Run from source
 
-저장소 루트에서 실행합니다.
+Run these commands from the repository root.
 
-**Linux:** 각 명령을 별도 터미널에서 실행합니다.
+**Linux:** Run each command in a separate terminal.
 
 ```sh
-# 터미널 1: 네트워크 helper
+# Terminal 1: network helper
 ./scripts/dev-net-helper.sh
 
-# 터미널 2: API
+# Terminal 2: API
 cargo run -p firecrab-api
 
-# 터미널 3: 대시보드
+# Terminal 3: dashboard
 npm run dev --prefix firecrab-frontend
 ```
 
@@ -75,11 +75,11 @@ cargo build -p firecrab-cli --locked
 .\target\debug\firecrab.exe service install
 ```
 
-이미 설치된 호스트에서는 service install 대신 service start를 사용합니다.
+On a host where the service is already installed, use service start instead of service install.
 
-## 테스트
+## Tests
 
-공통 점검 명령은 다음과 같습니다.
+Run the common checks:
 
 ```sh
 cargo fmt --all -- --check
@@ -91,7 +91,7 @@ npm run build --prefix firecrab-frontend
 python3 scripts/check-doc-links.py
 ```
 
-브라우저 E2E에서 게스트 부팅을 제외한 검사는 다음과 같습니다.
+Run browser E2E checks without guest boot:
 
 ```sh
 npm ci --prefix firecrab-e2e
@@ -99,11 +99,11 @@ npm run install-browsers --prefix firecrab-e2e
 FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e
 ```
 
-플랫폼별 시나리오, 수동 절차, 기대 결과와 정리 방법은 [한국어 TEST 문서](public-docs/TEST.ko.md)와 [영어 TEST 문서](public-docs/TEST.md)를 참고하세요.
+For platform scenarios, manual steps, expected results, and cleanup, see the [English TEST guide](public-docs/TEST.md) or [Korean TEST guide](public-docs/TEST.ko.md).
 
-## 커밋
+## Commits
 
-한 가지 변경을 설명하는 짧은 제목을 사용합니다.
+Use a short subject that describes one change. For example:
 
 ```text
 fix(api): …
@@ -111,25 +111,24 @@ docs: …
 ci: …
 ```
 
-## PR
+## Pull requests
 
-한 가지 주제에 집중하고 **무엇을 왜 바꿨는지**, 관련 Issue, 테스트 결과를 적어 [Pull Request](https://github.com/SteelCrab/firecrab/pulls)를 엽니다.
-적용한 TEST 항목은 PASS/FAILED/WARNING으로 기록해 주세요.
+Keep each [pull request](https://github.com/SteelCrab/firecrab/pulls) focused. Explain what changed and why, link related issues, and report test results.
+Record applicable TEST items as PASS, FAILED, or WARNING.
 
-## 이슈
+## Issues
 
-버그나 설치 실패는 재현 절차, 환경, 로그와 함께 [Issue](https://github.com/SteelCrab/firecrab/issues)로 알려주세요.
-가능하면 문제 하나당 Issue 하나를 사용합니다.
-민감한 보안 문제는 공개하지 말고 유지관리자에게 비공개로 전달해 주세요.
+Report bugs and installation failures in an [issue](https://github.com/SteelCrab/firecrab/issues) with reproduction steps, environment details, and logs.
+Prefer one problem per issue. Report sensitive security problems privately to the maintainers.
 
 ## CI
 
-[CI 워크플로](https://github.com/SteelCrab/firecrab/blob/main/.github/workflows/ci.yml)는 Rust, 프런트엔드, 문서, 설치기 검사와 가능한 자동 시나리오를 실행합니다.
+The [CI workflow](https://github.com/SteelCrab/firecrab/blob/main/.github/workflows/ci.yml) runs Rust, frontend, documentation, installer, and available automated scenario checks.
 
-macOS·Windows의 GitHub 호스팅 CI는 중첩 가상화를 제공하지 않아 직접적인 microVM 런타임 검증에는 수동 절차가 필요합니다.
-기여 내용에 따라 기여자가 직접 수행한 테스트 결과를 PR 댓글로 남길 수 있습니다.
-더 좋은 검증 방법이 있다면 Issue로 제안해 주세요. 함께 개선하겠습니다.
+GitHub-hosted macOS and Windows CI cannot provide nested virtualization, so direct microVM runtime validation requires manual steps.
+Depending on the contribution, contributors may post their manual test results in a PR comment.
+If you have a better way to validate these changes, propose it in an issue so we can improve the process together.
 
-## 라이선스
+## License
 
-기여 내용에는 프로젝트와 동일한 [Apache License, Version 2.0](./LICENSE)이 적용됩니다.
+Contributions are covered by the project's [Apache License, Version 2.0](./LICENSE).
