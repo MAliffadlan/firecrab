@@ -8,7 +8,7 @@ Sections are **Added**, **Changed**, **Deprecated**, **Fixed**, and **Improved**
 | Version | Date | Work |
 | --- | --- | --- |
 | [Unreleased](#unreleased) | — | — |
-| [0.3.0](#030---2026-09-28) | 2026-09-28 | [#210], [#266], [#287], [#290], [#294], [#295], [#297], [#312] |
+| [0.3.0](#030---2026-09-29) | 2026-09-29 | [#210], [#266], [#287], [#290], [#294], [#295], [#297], [#312] |
 | [0.2.2](#022---2026-09-15) | 2026-09-15 | [#269], [#270], [#272], [88ba35d], [729bb47] |
 | [0.2.1](#021---2026-09-14) | 2026-09-14 | [#262], [#263], [#264], [#265] |
 | [0.2.0](#020---2026-09-03) | 2026-09-03 | [#146], [#178], [#183], [#184], [#186], [#176], [#190], [#198], [#131], [#188], [#194], [#208], [#232], [#254], [45790c3], [1ffba72], [1a44619], [73d5fe1], [76f6ef3] |
@@ -40,7 +40,7 @@ Entries land here as work merges, and move under the next version heading when t
 
 - None.
 
-## [0.3.0] - 2026-09-28
+## [0.3.0] - 2026-09-29
 
 firecrab adds microManager on macOS and Windows, SPDX SBOMs for OCI imports,
 native init support for imported guests, and host platform diagnostics.
