@@ -213,6 +213,8 @@ FIRECRAB_STATIC_ROOT="$PWD/firecrab-frontend/dist" cargo run -p firecrab-api
 
 테스트:
 
+전체 항목별 체크리스트는 [한국어 테스트 문서](public-docs/TEST.ko.md) 또는 [영어 테스트 문서](public-docs/TEST.md)를 참고하세요.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

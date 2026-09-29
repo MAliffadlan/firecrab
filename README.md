@@ -270,6 +270,8 @@ FIRECRAB_STATIC_ROOT="$PWD/firecrab-frontend/dist" cargo run -p firecrab-api
 
 ## Tests
 
+For the complete item-by-item checklist, see [TEST.md](public-docs/TEST.md) or [한국어 테스트 체크리스트](public-docs/TEST.ko.md).
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

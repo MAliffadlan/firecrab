@@ -1,5 +1,7 @@
 # QA work list
 
+For a checkable test plan with command blocks, see the [English TEST checklist](TEST.md) or [Korean TEST checklist](TEST.ko.md).
+
 Use this list on **Linux**, **macOS**, and **Windows**.
 The product surface after the API is up is the same: `http://127.0.0.1:5523`.
 Mark every row `PASS`, `FAILED`, or `WARNING`.

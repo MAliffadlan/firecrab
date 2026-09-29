@@ -134,6 +134,7 @@ After installation, open the management dashboard at `http://127.0.0.1:5523/`.
 ## Checks before you open a PR
 
 Run what you can locally. CI will re-run the same gates on every pull request.
+Use the [English test checklist](public-docs/TEST.md) or [Korean test checklist](public-docs/TEST.ko.md) to choose applicable cases, record PASS/FAILED/WARNING, and confirm cleanup before opening a PR.
 
 ### Rust workspace
 
@@ -180,7 +181,7 @@ bash scripts/test-firecrab-release.sh
 bash scripts/test-install-cli.sh
 ```
 
-`check-doc-links.py` enforces published docs rules: English only, max **300 lines** per `public-docs/**/*.md` file except `api.md`, valid relative links, and no stale `docs/` paths in tracked sources.
+`check-doc-links.py` enforces published docs rules: English by default (with the Korean test checklist as an explicit exception), max **300 lines** per `public-docs/**/*.md` file except `api.md` and the two complete test checklists, valid relative links, and no stale `docs/` paths in tracked sources.
 
 `check-changelog.py` requires root [`CHANGELOG.md`](CHANGELOG.md) to document the workspace version with **Added**, **Changed**, **Deprecated**, **Fixed**, and **Improved**. A `v*` tag builds the GitHub Release body with `scripts/write-release-notes.py` (install URL, that changelog section, then contributor icons).
 
@@ -205,6 +206,7 @@ Keep bodies short (see [#55](https://github.com/SteelCrab/firecrab/issues/55), [
 3. Describe **what** changed and **why**. Link issues if any.
 4. Include tests for bug fixes and new API behavior when it is practical without nested KVM.
    OCI import UI changes should keep `FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e` green.
+   Use the [test checklist](public-docs/TEST.md) to report which applicable cases passed, failed, or were skipped.
 5. Keep the default security model in mind (see below).
 
 ### Commit messages
@@ -238,11 +240,11 @@ One logical change per commit is nice; a tidy PR history is more important than 
 
 | Kind | Where | Rules |
 | --- | --- | --- |
-| Published operator/developer English docs | `public-docs/` | Contents table, English, ≤300 lines except `api.md`, Related footers; use symlink aliases for alternate names |
+| Published operator/developer docs | `public-docs/` | English by default; `TEST.ko.md` is the Korean checklist. Keep ≤300 lines except `api.md` and the complete test checklists; use relative links. |
 | READMEs | `README.md`, `README.ko.md`, … | Keep install and develop paths accurate |
 | Private project notes | local `docs/` | **Gitignored** — not for PRs or the remote |
 
-Do not add large Korean vault-style trees under tracked paths. Prefer editing `public-docs/` for anything users should see.
+Keep the bilingual test checklists in `public-docs/` and update both when cases change. Prefer editing `public-docs/` for anything users should see.
 
 When you move or rename a public guide, update references in code comments, scripts, and READMEs — CI greps for `public-docs/…` paths.
 
