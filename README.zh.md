@@ -234,7 +234,7 @@ register、MicroNetwork IPv6、OCI DHCP boot）。各 spec 的 pass/skip 数量�
 register spec 已知的 leftover-catalog-row 问题（L3 `microregistry_local` 尚无 DELETE，
 上一次运行残留的行会导致 `beforeAll` 失败）见 [firecrab-e2e/README.md](firecrab-e2e/README.md)。
 提交 PR 前的完整检查列表（含 shellcheck、安装脚本冒烟测试、rustdoc）见
-[CONTRIBUTING.md](./CONTRIBUTING.md#checks-before-you-open-a-pr)。
+[TEST.md](public-docs/TEST.md)。
 
 更多开发说明和浏览器工作流见[网页仪表盘指南](public-docs/dashboard.md)。
 

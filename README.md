@@ -302,7 +302,7 @@ environment needs, and the register spec's known leftover-catalog-row gotcha (L3
 `microregistry_local` has no DELETE yet, so a stale row fails its `beforeAll`) are in
 [firecrab-e2e/README.md](firecrab-e2e/README.md). Full pre-PR gate list — shellcheck,
 installer smoke tests, rustdoc — is in
-[CONTRIBUTING.md](./CONTRIBUTING.md#checks-before-you-open-a-pr). See also the
+[TEST.md](public-docs/TEST.md). See also the
 [web dashboard guide](public-docs/dashboard.md).
 
 ## Documentation

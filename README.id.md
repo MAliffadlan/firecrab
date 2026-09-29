@@ -290,7 +290,7 @@ python3 scripts/check-changelog.py
 
 `cargo clippy` berjalan dengan `-D warnings` — satu peringatan saja akan menggagalkan CI.
 Daftar lengkap pemeriksaan sebelum membuka PR tercantum di
-[CONTRIBUTING.md](./CONTRIBUTING.md#checks-before-you-open-a-pr). Lihat juga
+[TEST.md](public-docs/TEST.md). Lihat juga
 [panduan dashboard web](public-docs/dashboard.md).
 
 ## Dokumentasi

@@ -245,7 +245,7 @@ register, MicroNetwork IPv6, OCI DHCP boot)를 함께 실행합니다. 스펙별
 아직 DELETE가 없어 이전 실행의 잔여 행이 `beforeAll`을 실패시킴)는
 [firecrab-e2e/README.md](firecrab-e2e/README.md)에 있습니다. PR 전 전체 점검 목록
 (shellcheck, 설치 스크립트 스모크 테스트, rustdoc 포함)은
-[CONTRIBUTING.md](./CONTRIBUTING.md#checks-before-you-open-a-pr)를 참고하세요.
+[TEST.ko.md](public-docs/TEST.ko.md)를 참고하세요.
 [웹 대시보드 가이드](public-docs/dashboard.md)도 참고하세요.
 
 ## 문서
