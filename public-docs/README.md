@@ -3,8 +3,8 @@
 firecrab runs Firecracker microVMs on one Linux host.
 This directory is the only public technical documentation.
 
-Every page is short English prose.
-Every page covers one topic.
+Guides use short English prose, and the test checklist is available in English and Korean.
+Each page covers one topic.
 
 ## Start here
 
@@ -34,6 +34,7 @@ Every page covers one topic.
 | Services and maintenance | [Operations](operations.md) |
 | Failure checks | [Troubleshooting](troubleshooting.md) |
 | Linux, macOS, and Windows QA list | [QA work list](qa.md) |
+| Complete test checklist | [English](TEST.md) · [Korean](TEST.ko.md) |
 | Clippy warning regression check | [Clippy warning gate](ci.md) |
 
 ## Name aliases
@@ -53,13 +54,13 @@ These symbolic links keep short names stable.
 
 ## Documentation rules
 
-- Write in clear English only.
+- Write guides in clear English; keep the two test checklists aligned in English and Korean.
 - Put one sentence on each source line.
-- Keep each real file at 170 lines or fewer, except [API](api.md).
+- Keep guides short; the API and complete test checklists may be longer when their coverage requires it.
 - Keep section order consistent: title, body, Related.
 - Use short paragraphs and relative Markdown links.
 - Prefer symbolic links for aliases instead of copy files.
-- Keep tasks, tests, bugs, and design notes out of this tree.
+- Keep project planning notes and bug logs out of this tree; maintain published test checklists here.
 
 Private project notes stay in local `docs/` and are not published.
 

@@ -30,136 +30,68 @@ If life makes it hard to keep a PR going, the maintainer may pick up the work, p
 
 ## What firecrab is
 
-firecrab is a **single-host**, self-installed microVM manager on [Firecracker](https://firecracker-microvm.github.io/). Contributors usually work on:
-
-| Area | Location |
-| --- | --- |
-| REST API, VM lifecycle, images, SQLite | `firecrab-api/` |
-| Shared request/response types | `firecrab-api-types/` |
-| Unix-socket protocol between API and helper | `firecrab-helper-protocol/` |
-| Privileged host networking (bridge, TAP, nft, dnsmasq) | `firecrab-net-helper/` |
-| Browser dashboard | `firecrab-frontend/` |
-| Host installer and doctor | `install.sh`, `scripts/` |
-| Published English docs | `public-docs/` |
-
-Keep host privileges small: the API stays unprivileged; only `firecrab-net-helper` owns network capabilities.
+firecrab is a single-host microVM manager built on Firecracker.
+It consists of an API, a network helper, a CLI, and a dashboard.
+The API keeps host privileges minimal; the helper handles network operations that need them.
 
 ## Prerequisites
 
-- **Linux** with `/dev/kvm` for the direct host workflow below (unit tests mostly do not need it); macOS and Windows use microManager as described below.
-- **Rust** matching [`rust-toolchain.toml`](rust-toolchain.toml) (currently 1.96.0 with `clippy`, `rustfmt`, `llvm-tools`)
-- **Node.js 22+** and npm (dashboard)
-- Common host tools for full local runs: `ip`, `nft`, `dnsmasq`, `mkfs.ext4`, Firecracker (or use `./install.sh`)
+- **Common:** The repository's Rust toolchain, Node.js 22 or later, and npm
+- **Linux:** Guest runtime tests require /dev/kvm and network tools.
+- **macOS:** Uses microManager; runtime validation requires nested virtualization.
+- **Windows:** Uses microManager in WSL2; runtime validation requires nested virtualization.
 
-You do not need a full install for pure Rust unit tests or frontend lint/build.
+A full installation is unnecessary for unit tests and frontend builds.
 
-## Develop from source
+## Run from source
 
-On Linux, run the API from the **repository root** so relative paths (`data/`, `images/`) resolve correctly. Use three processes:
+Run these commands from the repository root.
+
+**Linux:** Run each command in a separate terminal.
 
 ```sh
-# Terminal 1 — privileged network helper
+# Terminal 1: network helper
 ./scripts/dev-net-helper.sh
-# or:
-# cargo build -p firecrab-net-helper
-# sudo -u root -g "$(id -gn)" FIRECRAB_NET_HELPER_ALLOWED_UID="$(id -u)" \
-#   ./target/debug/firecrab-net-helper
 
-# Terminal 2 — API
+# Terminal 2: API
 cargo run -p firecrab-api
 
-# Terminal 3 — Vite dashboard → http://localhost:8080/
-npm install --prefix firecrab-frontend
+# Terminal 3: dashboard
 npm run dev --prefix firecrab-frontend
 ```
 
-Production-like (API serves the built SPA on `http://127.0.0.1:5523/`):
+**macOS:**
 
 ```sh
-npm run build --prefix firecrab-frontend
-FIRECRAB_STATIC_ROOT="$PWD/firecrab-frontend/dist" cargo run -p firecrab-api
-```
-
-More dashboard notes: [public-docs/dashboard.md](public-docs/dashboard.md).
-
-### microManager checkout workflow (macOS and Windows)
-
-Build the host CLI from the checkout. On macOS, also build and sign its native helper:
-
-```sh
-# macOS, from the repository root
 cargo build -p firecrab-cli --locked
 scripts/build-micromanager-macos.sh target/debug/firecrab-micromanager-macos
-./target/debug/firecrab service start
-./target/debug/firecrab service debug --logs --tail 100
-curl -fsS http://127.0.0.1:5523/api/host
+./target/debug/firecrab service install
 ```
+
+**Windows PowerShell:**
 
 ```powershell
-# Windows PowerShell, from the repository root
 cargo build -p firecrab-cli --locked
-.\target\debug\firecrab.exe service start
-.\target\debug\firecrab.exe service debug --logs --tail 100
-Invoke-RestMethod http://127.0.0.1:5523/api/host
+.\target\debug\firecrab.exe service install
 ```
 
-`service start` requires an installed microManager service. On a new host, run the checkout CLI's `service install` instead; it provisions and starts the managed guest and API. Later, `cargo run -p firecrab-cli -- service start` builds and runs the same start command. `service debug` only observes state and never starts a stopped guest. Use `service stop` to shut it down. See the [macOS](public-docs/micromanager-macos.md#develop-from-a-checkout) and [Windows](public-docs/micromanager-windows.md#develop-from-a-checkout) guides for installation and console details.
+On a host where the service is already installed, use service start instead of service install.
 
-These commands build the host CLI and start the Firecrab API already installed inside the managed guest. Editing `firecrab-api/` in the checkout does not change that guest binary.
+## Tests
 
-### Build and install a local release
-
-Build the required host binaries and the dashboard from the current checkout:
-
-```sh
-./scripts/ci-prepare-install-payload.sh
-```
-
-The script builds `firecrab-api`, `firecrab-net-helper`, and `firecrab` in the
-Cargo release profile, then creates `firecrab-frontend/dist` with npm.
-
-Install the prepared files from the repository root:
-
-```sh
-./install.sh --bin-dir target/release
-```
-
-Do not prefix `install.sh` with `sudo`.
-The installer requests privileges only for host operations that need them.
-When `firecrab-frontend/dist` exists, the installer detects it automatically,
-so `--dashboard-dir` is unnecessary.
-
-After installation, open the management dashboard at `http://127.0.0.1:5523/`.
-
-## Checks before you open a PR
-
-Run what you can locally. CI will re-run the same gates on every pull request.
-
-### Rust workspace
+Run the common checks:
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
-```
-
-Optional, closer to CI coverage:
-
-```sh
-cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
-```
-
-### Frontend
-
-```sh
 npm ci --prefix firecrab-frontend
 npm run lint --prefix firecrab-frontend
 npm run build --prefix firecrab-frontend
+python3 scripts/check-doc-links.py
 ```
 
-### OCI import browser E2E
-
-Isolated Playwright suite in `firecrab-e2e/`. It is not part of `cargo test --workspace`.
+Run browser E2E checks without guest boot:
 
 ```sh
 npm ci --prefix firecrab-e2e
@@ -167,104 +99,36 @@ npm run install-browsers --prefix firecrab-e2e
 FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e
 ```
 
-That covers inspect → import against a local registry fixture (no Docker Hub).
-The guest-boot half needs KVM, Firecracker, and `./scripts/dev-net-helper.sh`; see [firecrab-e2e/README.md](firecrab-e2e/README.md).
+For platform scenarios, manual steps, expected results, and cleanup, see the [English TEST guide](public-docs/TEST.md) or [Korean TEST guide](public-docs/TEST.ko.md).
 
-### Docs and installer scripts
+## Commits
 
-```sh
-python3 scripts/check-doc-links.py
-python3 scripts/check-changelog.py
-shellcheck install.sh scripts/firecrab-release.sh
-bash scripts/test-firecrab-release.sh
-bash scripts/test-install-cli.sh
-```
-
-`check-doc-links.py` enforces published docs rules: English only, max **300 lines** per `public-docs/**/*.md` file except `api.md`, valid relative links, and no stale `docs/` paths in tracked sources.
-
-`check-changelog.py` requires root [`CHANGELOG.md`](CHANGELOG.md) to document the workspace version with **Added**, **Changed**, **Deprecated**, **Fixed**, and **Improved**. A `v*` tag builds the GitHub Release body with `scripts/write-release-notes.py` (install URL, that changelog section, then contributor icons).
-
-## Issues
-
-Use the **Task** issue template (`.github/ISSUE_TEMPLATE/task.md`) when opening work items:
+Use a short subject that describes one change. For example:
 
 ```text
-## Summary
-## Motivation
-## Scope (MVP)
-## Acceptance
-## Notes
+fix(api): …
+docs: …
+ci: …
 ```
-
-Keep bodies short (see [#55](https://github.com/SteelCrab/firecrab/issues/55), [#56](https://github.com/SteelCrab/firecrab/issues/56), [#59](https://github.com/SteelCrab/firecrab/issues/59)). Prefer one concern per issue.
 
 ## Pull requests
 
-1. **Fork** (or use a branch on the main repo if you have write access).
-2. Prefer a **focused branch** and a **focused PR** — one concern per change when practical.
-3. Describe **what** changed and **why**. Link issues if any.
-4. Include tests for bug fixes and new API behavior when it is practical without nested KVM.
-   OCI import UI changes should keep `FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e` green.
-5. Keep the default security model in mind (see below).
+Keep each [pull request](https://github.com/SteelCrab/firecrab/pulls) focused. Explain what changed and why, link related issues, and report test results.
+Record applicable TEST items as PASS, FAILED, or WARNING.
 
-### Commit messages
+## Issues
 
-Prefer short, conventional subjects used on `main`:
+Report bugs and installation failures in an [issue](https://github.com/SteelCrab/firecrab/issues) with reproduction steps, environment details, and logs.
+Prefer one problem per issue. Report sensitive security problems privately to the maintainers.
 
-```text
-feat(api): …
-fix(net-helper): …
-feat(frontend): …
-docs: …
-ci: …
-chore: …
-```
+## CI
 
-One logical change per commit is nice; a tidy PR history is more important than perfect splitting.
+The [CI workflow](https://github.com/SteelCrab/firecrab/blob/main/.github/workflows/ci.yml) runs Rust, frontend, documentation, installer, and available automated scenario checks.
 
-### What CI runs
-
-| Job | On every PR | Notes |
-| --- | --- | --- |
-| Rust fmt, clippy, test + coverage | yes | Workspace-wide |
-| rustdoc + `check-doc-links.py` + `check-changelog.py` | yes | Doc links, public-docs shape, and changelog sections |
-| Installer shellcheck + install/uninstall smoke | yes | Guest boot skipped (`install.sh` never installs an image) |
-| Frontend lint + build | yes | Node 22 |
-| Multi-distro installer deps | yes | Debian, Fedora, Arch, openSUSE containers |
-| microManager macOS and Windows builds | yes | Hosted runners: build, unit tests, `doctor --json`; no nested virtualization, so no runtime E2E |
-| microManager PR report | yes | On PRs touching either platform, one comment with each job's steps and log tails, the commands to reproduce it, and the manual E2E commands |
-
-## Documentation
-
-| Kind | Where | Rules |
-| --- | --- | --- |
-| Published operator/developer English docs | `public-docs/` | Contents table, English, ≤300 lines except `api.md`, Related footers; use symlink aliases for alternate names |
-| READMEs | `README.md`, `README.ko.md`, … | Keep install and develop paths accurate |
-| Private project notes | local `docs/` | **Gitignored** — not for PRs or the remote |
-
-Do not add large Korean vault-style trees under tracked paths. Prefer editing `public-docs/` for anything users should see.
-
-When you move or rename a public guide, update references in code comments, scripts, and READMEs — CI greps for `public-docs/…` paths.
-
-## Security and scope notes
-
-- **Default bind is loopback** (`127.0.0.1:5523`). The control plane is meant for a trusted host or a carefully reverse-proxied deployment. Do not assume auth or multi-tenant isolation is present.
-- **No implicit “open to the LAN”** in contributions. If you expose the API, document the risk.
-- Prefer extending the **helper protocol** over giving the API new host privileges.
-- Avoid expanding into multi-host scheduling, full cloud IAM, or Jailer/VRF unless the change is explicitly agreed — those sit outside the current single-host MVP focus.
-
-Report sensitive security issues privately to the maintainers rather than opening a public issue with exploit detail.
+GitHub-hosted macOS and Windows CI cannot provide nested virtualization, so direct microVM runtime validation requires manual steps.
+Depending on the contribution, contributors may post their manual test results in a PR comment.
+If you have a better way to validate these changes, propose it in an issue so we can improve the process together.
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the same [Apache License, Version 2.0](./LICENSE) as the rest of the project.
-
-## Getting help
-
-- Architecture: [public-docs/architecture.md](public-docs/architecture.md)
-- API contracts: [public-docs/api.md](public-docs/api.md)
-- Install and doctor: [public-docs/installation.md](public-docs/installation.md)
-- Troubleshooting: [public-docs/troubleshooting.md](public-docs/troubleshooting.md)
-- GitHub Issues and pull request discussion on [SteelCrab/firecrab](https://github.com/SteelCrab/firecrab)
-
-Questions that unblock a PR are welcome in the PR itself.
+Contributions are covered by the project's [Apache License, Version 2.0](./LICENSE).

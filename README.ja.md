@@ -249,7 +249,7 @@ pass/skip 数、必要な環境、register spec の既知の leftover-catalog-ro
 `microregistry_local` にはまだ DELETE がなく、前回実行の残留行が `beforeAll` を失敗させる)は
 [firecrab-e2e/README.md](firecrab-e2e/README.md) にあります。PR 前の完全なチェック一覧
 (shellcheck、インストーラのスモークテスト、rustdoc を含む)は
-[CONTRIBUTING.md](./CONTRIBUTING.md#checks-before-you-open-a-pr) を参照してください。
+[TEST.md](public-docs/TEST.md) を参照してください。
 
 開発時の注意点とブラウザのワークフローは[Web ダッシュボードガイド](public-docs/dashboard.md)にあります。
 

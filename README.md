@@ -270,6 +270,8 @@ FIRECRAB_STATIC_ROOT="$PWD/firecrab-frontend/dist" cargo run -p firecrab-api
 
 ## Tests
 
+For the complete item-by-item checklist, see [TEST.md](public-docs/TEST.md) or [한국어 테스트 체크리스트](public-docs/TEST.ko.md).
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -300,7 +302,7 @@ environment needs, and the register spec's known leftover-catalog-row gotcha (L3
 `microregistry_local` has no DELETE yet, so a stale row fails its `beforeAll`) are in
 [firecrab-e2e/README.md](firecrab-e2e/README.md). Full pre-PR gate list — shellcheck,
 installer smoke tests, rustdoc — is in
-[CONTRIBUTING.md](./CONTRIBUTING.md#checks-before-you-open-a-pr). See also the
+[TEST.md](public-docs/TEST.md). See also the
 [web dashboard guide](public-docs/dashboard.md).
 
 ## Documentation
