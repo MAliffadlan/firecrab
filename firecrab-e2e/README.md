@@ -59,6 +59,19 @@ Full path (KVM, `firecracker` on `PATH`, live net helper):
 npm test --prefix firecrab-e2e
 ```
 
+On macOS, start the source-built services and use the management VM for the
+Linux OCI fixture and IPv6 SSH connection:
+
+```sh
+./target/debug/firecrab service dev
+FIRECRAB_MICROMANAGER_HOME="$HOME/Library/Application Support/Firecrab/micromanager" \
+  ./scripts/ci-qa-macos-e2e.sh browser
+```
+
+Chromium and frontend dependencies must be installed first. The browser runs
+on the Mac; guest boot and the registry run inside Debian. The fixture exits
+when its controlling SSH connection closes.
+
 MicroRegistry register ([#108](https://github.com/SteelCrab/firecrab/issues/108)), skip guest boot:
 
 ```sh
@@ -144,6 +157,8 @@ python3 scripts/oci-e2e-registry.py --port 15555
 | `FIRECRAB_OCI_DHCP_E2E_PORT` | `15557` | DHCP-boot spec registry port |
 | `FIRECRAB_E2E_BASE_URL` | `http://localhost:8080` | Dashboard origin |
 | `FIRECRAB_E2E_API_URL` | `http://127.0.0.1:5523` | API used for cleanup |
+| `FIRECRAB_QA_MANAGER_HOST` | unset | Management VM IP for OCI fixtures and IPv6 SSH |
+| `FIRECRAB_QA_MANAGER_KEY` | unset | Management VM key; set together with the host |
 
 - Suite does not infer `/dev/kvm`
 - Unset the skip flag only on a host that can boot a guest
