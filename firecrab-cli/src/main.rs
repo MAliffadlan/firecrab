@@ -579,10 +579,16 @@ mod tests {
             "stop",
             "status",
             "validate",
-            "run",
         ] {
             assert!(Cli::try_parse_from(["firecrab", "service", action]).is_ok());
         }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(Cli::try_parse_from(["firecrab", "service", "run"]).is_err());
+            assert!(Cli::try_parse_from(["firecrab", "service", "dev"]).is_ok());
+        }
+        #[cfg(target_os = "windows")]
+        assert!(Cli::try_parse_from(["firecrab", "service", "run"]).is_ok());
         assert!(Cli::try_parse_from(["firecrab", "service", "uninstall", "--purge"]).is_ok());
         assert!(Cli::try_parse_from(["firecrab", "service", "install", "--yes"]).is_ok());
         assert!(Cli::try_parse_from(["firecrab", "service", "reinstall", "--yes"]).is_ok());

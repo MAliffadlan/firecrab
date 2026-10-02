@@ -65,8 +65,11 @@ npm run dev --prefix firecrab-frontend
 ```sh
 cargo build -p firecrab-cli --locked
 scripts/build-micromanager-macos.sh target/debug/firecrab-micromanager-macos
-./target/debug/firecrab service install
+./target/debug/firecrab service dev
 ```
+
+For service commands and development options, see the
+[macOS guide](public-docs/micromanager-macos.md#develop-from-a-checkout).
 
 **Windows PowerShell:**
 
