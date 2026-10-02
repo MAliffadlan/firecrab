@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 @preconcurrency import Virtualization
 
@@ -124,8 +125,7 @@ enum ManagementVMConfiguration {
             readOnly: true
         )
 
-        let network = VZVirtioNetworkDeviceConfiguration()
-        network.attachment = VZNATNetworkDeviceAttachment()
+        let network = try makeNetwork(managedHomeURL: options.managedHomeURL)
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration()
         console.attachment = VZFileHandleSerialPortAttachment(
@@ -274,8 +274,7 @@ enum ManagementVMConfiguration {
             readOnly: false
         )
 
-        let network = VZVirtioNetworkDeviceConfiguration()
-        network.attachment = VZNATNetworkDeviceAttachment()
+        let network = try makeNetwork(managedHomeURL: options.managedHomeURL)
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration()
         console.attachment = VZFileHandleSerialPortAttachment(
@@ -309,6 +308,33 @@ enum ManagementVMConfiguration {
         configuration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
         try configuration.validate()
         return configuration
+    }
+
+    static func makeNetwork(managedHomeURL: URL) throws -> VZVirtioNetworkDeviceConfiguration {
+        let home = managedHomeURL.standardizedFileURL.resolvingSymlinksInPath()
+        let savedAddressURL = home.appendingPathComponent("runtime/network-mac-address")
+        let addressString: String
+        if FileManager.default.fileExists(atPath: savedAddressURL.path) {
+            addressString = try String(contentsOf: savedAddressURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            let digest = SHA256.hash(data: Data(home.path.utf8))
+            addressString = ([UInt8(0x02)] + Array(digest.prefix(5)))
+                .map { String(format: "%02x", $0) }.joined(separator: ":")
+        }
+        guard let address = VZMACAddress(string: addressString),
+            address.isLocallyAdministeredAddress, address.isUnicastAddress
+        else {
+            throw MicroManagerError.invalidArtifact(
+                "invalid management network MAC address: \(savedAddressURL.path)"
+            )
+        }
+        // Debian retains its DHCP client identity across boots. Changing the MAC
+        // on every start can leave the Mac routing that IP to the previous VM NIC.
+        let network = VZVirtioNetworkDeviceConfiguration()
+        network.macAddress = address
+        network.attachment = VZNATNetworkDeviceAttachment()
+        return network
     }
 }
 
