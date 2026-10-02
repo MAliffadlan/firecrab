@@ -1,5 +1,7 @@
 # QA work list
 
+For a checkable test plan with command blocks, see the [English TEST checklist](TEST.md) or [Korean TEST checklist](TEST.ko.md).
+
 Use this list on **Linux**, **macOS**, and **Windows**.
 The product surface after the API is up is the same: `http://127.0.0.1:5523`.
 Mark every row `PASS`, `FAILED`, or `WARNING`.
@@ -104,7 +106,7 @@ The path is on the Firecrab host (Linux, or the Debian guest on macOS/Windows).
 | I4 | kernel pair | `PUT /api/images/{alias}/kernel` | 409 `kernel_required` if cache missing |
 | I5 | OCI inspect | `GET /api/oci/inspect?reference=…` | none (no blobs) |
 | I6 | OCI import | `POST /api/oci/import` then poll `/import/{alias}` | `DELETE /api/images/{alias}` |
-| I7 | register | `POST /api/microregistry/register` for a custom installed alias | image delete in I6 |
+| I7 | register | `POST /api/microregistry/register` for a custom installed alias | delete disk, package, then `/api/microregistry/local/{alias}` |
 | I8 | Docker Hub | `GET` (no secret); optional `PUT` fake then `DELETE` | `configured=false` or prior login restored |
 | I9 | missing alias | `GET /api/images/does-not-exist` → 404 | none |
 | I10 | bootstrap | `POST /api/images/{alias}/bootstrap` | `DELETE /api/images/bootstrap/{id}` always drops the builder VM |

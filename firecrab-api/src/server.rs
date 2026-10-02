@@ -226,6 +226,10 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
             get(handlers::microregistry::get_microregistry_register),
         )
         .route(
+            "/api/microregistry/local/{alias}",
+            delete(handlers::microregistry::delete_local_registration),
+        )
+        .route(
             "/api/microregistry/docker-hub",
             get(handlers::microregistry::get_docker_hub_credential)
                 .put(handlers::microregistry::put_docker_hub_credential)

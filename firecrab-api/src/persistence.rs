@@ -1056,6 +1056,18 @@ impl Store {
         }
     }
 
+    /// Removes only the local row for this alias and architecture.
+    pub fn delete_microregistry_local(
+        &self,
+        alias: &str,
+        architecture: &str,
+    ) -> Result<bool, PersistenceError> {
+        Ok(self.lock().execute(
+            "DELETE FROM microregistry_local WHERE alias = ?1 AND architecture = ?2",
+            params![alias, architecture],
+        )? > 0)
+    }
+
     /// How many VMs still point at `storage_root` (id string).
     pub fn count_vms_with_storage_root(&self, storage_root: &str) -> Result<u32, PersistenceError> {
         let conn = self.lock();
@@ -2745,6 +2757,43 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(store.list_microregistry_local(None).unwrap(), [entry]);
+    }
+
+    #[test]
+    fn removing_a_local_registration_preserves_other_aliases_and_architectures() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(&directory.path().join("firecrab.db")).unwrap();
+        for (alias, arch) in [
+            ("custom", "x86_64"),
+            ("custom", "aarch64"),
+            ("other", "x86_64"),
+        ] {
+            store
+                .insert_microregistry_local(&local_catalog_entry(alias, arch))
+                .unwrap();
+        }
+        assert!(
+            store
+                .delete_microregistry_local("custom", "x86_64")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .delete_microregistry_local("custom", "x86_64")
+                .unwrap()
+        );
+        assert!(
+            store
+                .microregistry_local("custom", "aarch64")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .microregistry_local("other", "x86_64")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

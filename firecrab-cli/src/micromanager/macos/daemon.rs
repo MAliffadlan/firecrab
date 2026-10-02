@@ -57,6 +57,8 @@ pub enum Error {
     },
     #[error("management daemon did not become ready within {0} seconds")]
     ReadyTimeout(u64),
+    #[error("management VM did not stop within {0} seconds")]
+    StopTimeout(u64),
     #[error("invalid manager-ready marker: {0}")]
     InvalidMarker(String),
     #[error("microManager is not installed ({0} is missing); run `firecrab service install`")]
@@ -216,6 +218,9 @@ fn wait_ready(layout: &Layout, timeout: Duration) -> Result<Status, Error> {
 
 fn stop_if_loaded(layout: &Layout) -> Result<(), Error> {
     let paths = paths(layout)?;
+    let vm_pid = fs::read_to_string(&paths.ready)
+        .ok()
+        .and_then(|marker| vm_pid_from_marker(&marker));
     let domain = domain(layout)?;
     let service = format!("{domain}/{LABEL}");
     let loaded = ProcessCommand::new("/bin/launchctl")
@@ -230,22 +235,60 @@ fn stop_if_loaded(layout: &Layout) -> Result<(), Error> {
             &[domain.as_str(), paths.plist.to_string_lossy().as_ref()],
             false,
         )?;
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(40) {
-            let still_loaded = ProcessCommand::new("/bin/launchctl")
-                .args(["print", &service])
-                .output()
-                .map_err(|source| io_error("query stopped launchd service", &paths.plist, source))?
-                .status
-                .success();
-            if !still_loaded {
-                break;
-            }
-            thread::sleep(Duration::from_secs(1));
+    }
+    let started = Instant::now();
+    loop {
+        let still_loaded = ProcessCommand::new("/bin/launchctl")
+            .args(["print", &service])
+            .output()
+            .map_err(|source| io_error("query stopped launchd service", &paths.plist, source))?
+            .status
+            .success();
+        let vm_alive = vm_pid.is_some_and(|pid| {
+            ProcessCommand::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        });
+        if !still_loaded && !vm_alive {
+            break;
         }
+        if started.elapsed() >= Duration::from_secs(40) {
+            return Err(Error::StopTimeout(40));
+        }
+        thread::sleep(Duration::from_secs(1));
     }
     let _ = fs::remove_file(paths.ready);
     Ok(())
+}
+
+fn vm_pid_from_marker(marker: &str) -> Option<u32> {
+    marker
+        .lines()
+        .find_map(|line| line.strip_prefix("vm_pid="))?
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 1)
+}
+
+#[test]
+fn stopped_service_marker_requires_a_valid_vm_pid() {
+    assert_eq!(
+        vm_pid_from_marker("vm_pid=123\ntunnel_pid=456\nip=192.0.2.7\n"),
+        Some(123)
+    );
+    for marker in [
+        "",
+        "vm_pid=0",
+        "vm_pid=1",
+        "vm_pid=-1",
+        "vm_pid=abc",
+        "tunnel_pid=123",
+    ] {
+        assert_eq!(vm_pid_from_marker(marker), None);
+    }
 }
 
 fn launchctl(
@@ -457,6 +500,7 @@ fn render_plist(paths: &DaemonPaths) -> String {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>
+  <key>ExitTimeOut</key><integer>45</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>{log}</string>
   <key>StandardErrorPath</key><string>{log}</string>
@@ -654,13 +698,18 @@ mod tests {
             .spawn()
             .unwrap();
         let first = wait_for("the first ready marker", || read_marker(&paths.ready));
+        wait_for("the first tunnel invocation", || {
+            (fs::read_to_string(&tunnels).ok()?.lines().count() == 1).then_some(())
+        });
         signal(&first["tunnel_pid"], "-KILL");
         let second = wait_for("a reconnected tunnel", || {
             read_marker(&paths.ready).filter(|marker| marker["tunnel_pid"] != first["tunnel_pid"])
         });
 
         assert_eq!(second["vm_pid"], first["vm_pid"], "the VM keeps running");
-        assert_eq!(fs::read_to_string(&tunnels).unwrap().lines().count(), 2);
+        wait_for("the second tunnel invocation", || {
+            (fs::read_to_string(&tunnels).ok()?.lines().count() == 2).then_some(())
+        });
         assert!(
             wrapper.try_wait().unwrap().is_none(),
             "the wrapper keeps supervising"
@@ -717,6 +766,7 @@ mod tests {
         assert!(plist.contains(LABEL));
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
+        assert!(plist.contains("<key>ExitTimeOut</key><integer>45</integer>"));
         assert!(plist.contains("<key>ProcessType</key><string>Background</string>"));
     }
 

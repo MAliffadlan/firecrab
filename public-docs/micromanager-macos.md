@@ -36,6 +36,70 @@ cargo run -p firecrab-cli -- service doctor
 The build script uses SwiftPM and applies only the Virtualization entitlement.
 The default NAT network does not request the restricted bridged-network entitlement.
 
+## Develop from a checkout
+
+From the repository root, build the CLI and signed helper. If microManager is already installed, start its launchd service with the checkout CLI; this starts the management VM, guest API services, and the SSH tunnel to the Mac's localhost API together:
+
+```sh
+cargo build -p firecrab-cli --locked
+scripts/build-micromanager-macos.sh target/debug/firecrab-micromanager-macos
+./target/debug/firecrab service start
+./target/debug/firecrab service debug --logs --tail 100
+curl -fsS http://127.0.0.1:5523/api/host
+```
+
+`cargo run -p firecrab-cli -- service start` is the build-and-run equivalent of the start command. On a new host, use `./target/debug/firecrab service install` instead; installation provisions the guest and starts the API. To replace installed CLI/helper binaries with checkout builds, use `./target/debug/firecrab service reinstall`; it stops and reprovisions the management VM while preserving managed data. `service debug` is read-only, so a `launchd agent not loaded` result means to run `service start`. Stop the resident service with `./target/debug/firecrab service stop` when finished.
+
+Building `firecrab-cli` does not rebuild the Firecrab API inside Debian. `service start` runs the guest API binary installed by microManager, not edited `firecrab-api/` source from this checkout.
+
+### Run the API and network helper from local source
+
+See [Architecture](architecture.md#source-development-on-macos) for the source build and frontend proxy diagram.
+
+```sh
+cargo build -p firecrab-cli --locked
+scripts/build-micromanager-macos.sh target/debug/firecrab-micromanager-macos
+./target/debug/firecrab service dev
+```
+
+`service dev` installs the management VM when missing, starts the resident VM and
+API tunnel, uploads the current checkout, and builds `firecrab-api` and
+`firecrab-net-helper` inside Linux ARM64 Debian. It uses `rust-toolchain.toml`
+and `Cargo.lock`, installs compiler prerequisites on its first run, and caches
+Rust and Cargo artifacts on the persistent data disk. The Mac's `target/`, local
+root configuration, nested checkouts, and `.env` files are not uploaded.
+
+After the build succeeds, systemd runs both source-built binaries and the command
+checks guest and localhost API readiness. Open `http://127.0.0.1:5523/#/vms` as
+usual. Run `service dev` again after each source edit; it does not watch files.
+The resident API tunnel stays available during source development. Console login
+is not required; inspect guest logs with `service debug --logs`.
+
+```sh
+./target/debug/firecrab service dev --source /path/to/firecrab # Select checkout
+./target/debug/firecrab service dev --release                 # Optimized local build
+./target/debug/firecrab service dev --yes                     # Skip download prompt
+./target/debug/firecrab service debug --logs --tail 100       # Inspect logs
+./target/debug/firecrab service dev --restore                 # Return to installed binaries
+./target/debug/firecrab service dev --help                    # List options
+```
+
+`dev` builds local sources in debug mode; `--release` optimizes the same sources.
+`--restore` returns to the packaged API/helper from `service install` or the latest
+`service reinstall`, without rebuilding or undoing local edits. It cannot be
+combined with `--source`, `--release`, or `--yes`.
+
+The installed release binaries and other systemd settings remain in place. A
+build failure keeps the existing services running; failed deployment restores
+their previous executables. `--restore` removes only the development overrides
+and restarts the release binaries. Development overrides persist across
+`service stop`/`start`, until restored. The dashboard remains its installed build;
+frontend source development uses `npm run dev --prefix firecrab-frontend`.
+
+Guest service restart briefly interrupts API access and network-helper requests.
+Stop workloads before changing their runtime. A partially installed VM must first
+be repaired with `service reinstall`.
+
 ## Install lifecycle
 
 Build both sibling executables in a checkout, then install them for the current user.
@@ -79,6 +143,11 @@ Interactive processes such as Terminal can also reach every forward at the manag
 A host port another Mac process already holds is skipped and logged once in `runtime/daemon.log`, and port 5523 always belongs to the API.
 The relay restarts on its own after a crash without touching the VM; installs from before the relay pick it up with `firecrab service reinstall`.
 A dropped API tunnel (sleep, a network stall) reconnects without restarting the VM, so running microVMs survive it; after five failed reconnects the agent restarts both.
+
+`service stop` waits for the management VM process to exit before returning.
+If the guest cannot acknowledge shutdown within 20 seconds, the native helper
+stops its Virtualization.framework instance so a kernel panic cannot leave the
+disk images locked indefinitely. Failure to stop within 40 seconds is an error.
 `--purge` is deliberately destructive and refuses unsafe paths, symlinks, and roots whose final component is not `micromanager`.
 
 ## Validate and boot
@@ -99,15 +168,14 @@ Set `FIRECRAB_MICROMANAGER_HOME` only when a checkout or test needs a different 
 ```
 
 `validate` prints every managed setting and its `PASS`, `WARNING`, or `FAILED` status in one run.
-Neither command accepts kernel, disk, CPU, or memory options.
+`validate` does not accept kernel, disk, CPU, or memory options.
 
 ```sh
 firecrab service validate
-firecrab service run
 ```
 
 The launcher enables nested virtualization explicitly and uses VZ NAT for the outer Debian VM.
-`service start` is the normal resident path; `service run` is a foreground serial-console path for debugging while the launchd service is stopped.
+Use `service start` for the resident API and `service dev` to rebuild the guest API and network helper from local source.
 The guest publishes its DHCP address through a private virtiofs marker, and the daemon establishes the localhost SSH tunnel only after Firecrab API, net-helper, and SSH are active.
 Stop requests guest `systemctl poweroff`, then escalates from helper TERM to KILL after 30 seconds.
 A provisioning schema change replaces only the OS disk; the ext4 data disk is detected by label and never reformatted on reinstall.
@@ -115,6 +183,18 @@ A provisioning schema change replaces only the OS disk; the ext4 data disk is de
 ## Validation and troubleshooting
 
 `doctor` checks host capability, while `validate` checks the prepared kernel, initrd, OS/data separation, resources, and VZ configuration.
+For an install or start failure, collect one host-side snapshot before changing the service:
+
+```sh
+firecrab service debug
+firecrab service debug --logs --tail 100
+firecrab service debug --json
+```
+
+`debug` reports host capability checks and fixes, the launchd agent, management VM services, localhost API, provisioning phase/failure marker, and available logs. `--logs` adds a bounded excerpt of each log and the running guest's Firecrab systemd journal; `--tail` accepts 1–1000 lines and requires `--logs` (default 200). The command does not start or stop the management VM. When the VM is stopped, guest journal output is unavailable, but the host-side markers and logs remain visible. The report omits credential files and redacts recognized secrets in log excerpts; inspect a log locally before sharing it.
+
+If `service start` reports that guest provisioning stopped at a phase such as `firecrab`, the API inside Debian is not ready; starting the launchd agent again cannot finish the installation. Run `firecrab service reinstall` from a checkout with the signed helper beside the CLI. Reinstall rebuilds an incomplete Debian OS disk and keeps `data/firecrab-data.raw`. After it succeeds, check `firecrab service status` and `curl -fsS http://127.0.0.1:5523/api/host`. A VM process left running after `service stop` can keep both disk images busy; inspect running `firecrab-micromanager-macos` processes before retrying and preserve the data disk when recovering them.
+
 If the guest finishes provisioning but its VM does not power off within two minutes, `install` stops the provisioning VM and continues from the recorded markers.
 A successful install additionally records these guest gates in `runtime/provisioned`:
 

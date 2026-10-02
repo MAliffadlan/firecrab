@@ -290,7 +290,7 @@ On Windows, run `target\debug\firecrab.exe`; the `host`, `image`, `network`, and
 - `cargo run -p firecrab-cli -- doctor` works too; `cargo build` first is only for repeat runs without a rebuild each time.
 - Unit tests (`FakeCommandRunner`, no real host state touched): `cargo test -p firecrab-cli`.
 - `doctor`'s checks always read the real host it runs on — there is no way to point them at another machine or a fixture host.
-- More on running `firecrab-api`/`firecrab-net-helper`/the dashboard together: [CONTRIBUTING.md](../CONTRIBUTING.md#develop-from-source).
+- More on running `firecrab-api`/`firecrab-net-helper`/the dashboard together: [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Related
 

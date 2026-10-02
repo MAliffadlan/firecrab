@@ -294,6 +294,10 @@ Poll `GET /api/microregistry/register/{alias}`.
 `status` is `running`, then `succeeded` or `failed`.
 An unknown alias is `idle`.
 
+`DELETE /api/microregistry/local/{alias}` removes this host's local catalog
+registration (204; unknown alias 404; active register job 409). Use it after
+deleting the installed image and staged package to release a custom alias.
+
 Empty `alias` or `version` is `400`.
 Unknown, uninstalled, or `__microboot` is `404`.
 A public-catalog or existing local name is `409 alias_collision`.
@@ -302,7 +306,14 @@ A job already running for that alias is `409 register_in_progress`.
 Success writes a local `{alias}.tar.zst` and its SHA-256.
 Nothing is published remotely.
 GET then marks the row `downloadable`.
-`/package` and `/install` still accept only release aliases.
+After deleting the installed template, `POST /api/images/{alias}/install`
+reinstalls it from that local package without downloading. It verifies the
+registered SHA-256, alias, and version before extraction, then restores the
+packed kernel, initrd, rootfs, and boot arguments. Poll the usual
+`GET /api/images/{alias}/install`; local aliases also support package status GET.
+A missing local package is `409 package_required`. A modified package fails
+the install job without registering a template. Local registration does not
+publish a remote download source; package download POST is for release aliases.
 
 A foreign or unsupported kernel fails the job with no row and no archive.
 An unclassifiable kernel is accepted.

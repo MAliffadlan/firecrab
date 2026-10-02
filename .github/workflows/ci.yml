@@ -98,6 +98,9 @@ jobs:
           target/debug/firecrab --help
           target/debug/firecrab host list
 
+      - name: Source development deployment contract
+        run: python3 scripts/test-micromanager-dev.py
+
       - name: Verify hosted-runner diagnostic contract
         run: |
           rc=0
@@ -317,6 +320,7 @@ jobs:
             scripts/ci-qa-nginx.sh \
             scripts/ci-qa-ssh.sh \
             scripts/ci-qa-macos-e2e.sh \
+            scripts/micromanager/dev-macos-guest.sh \
             scripts/ci-m2-guest-boot.sh \
             scripts/verify-release-binary.sh \
             scripts/smoke-release-exec.sh scripts/test-smoke-release-exec.sh \

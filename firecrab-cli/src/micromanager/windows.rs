@@ -9,7 +9,7 @@ mod lifecycle;
 mod provision;
 mod wsl;
 
-use super::Command;
+use super::{Command, debug};
 use doctor::Status;
 use wsl::DISTRO_NAME;
 
@@ -47,12 +47,16 @@ pub fn run(command: Command) -> Result<i32, Error> {
         Command::Start => run_start(),
         Command::Stop => run_stop(),
         Command::Status => run_status(),
+        Command::Debug { json, logs, tail } => run_debug(debug::Options::new(json, logs, tail)),
         Command::Doctor { json } => run_doctor(json),
         Command::Validate => {
             run_validate(provision::host()?, &lifecycle::Layout::from_process_env()?)
         }
+        #[cfg(target_os = "windows")]
         Command::Run => run_foreground(),
         Command::ForwardPorts { .. } => Err(Error::MacosOnly("forward-ports")),
+        #[cfg(target_os = "macos")]
+        Command::Dev { .. } => Err(Error::MacosOnly("dev")),
     }
 }
 
@@ -130,6 +134,97 @@ fn run_status() -> Result<i32, Error> {
     let status = daemon::status();
     print_daemon_status(&status);
     Ok(i32::from(!status.success()))
+}
+
+fn run_debug(options: debug::Options) -> Result<i32, Error> {
+    let layout = lifecycle::Layout::from_process_env()?;
+    let report = collect_debug(&layout, options);
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", report.render_human());
+    }
+    Ok(0)
+}
+
+fn collect_debug(layout: &lifecycle::Layout, options: debug::Options) -> debug::DebugReport {
+    let mut report = debug::DebugReport::new(
+        "windows",
+        &layout.managed_home,
+        options,
+        &[("provision", "guest-provision.log")],
+    );
+    let capabilities = doctor::report(doctor::Inputs::debug());
+    report.capability = debug::Capability::from_checks(
+        capabilities.ready,
+        capabilities
+            .checks
+            .into_iter()
+            .map(|check| debug::CapabilityCheck {
+                id: check.id.to_string(),
+                status: match check.status {
+                    Status::Pass => "pass",
+                    Status::Warning => "warning",
+                    Status::Fail => "fail",
+                }
+                .to_string(),
+                detail: check.detail,
+                fix: check.fix,
+            })
+            .collect(),
+    );
+    let status = daemon::status();
+    let task_definition = layout.runtime().join("microManager-task.xml").is_file();
+    let distro_disk = layout.distro().join("ext4.vhdx").is_file();
+    report.service = match (task_definition, status.task) {
+        (false, _) => debug::Probe::fail(
+            "managed scheduled-task file missing; run `firecrab service install`",
+        ),
+        (true, daemon::TaskState::Enabled) => debug::Probe::pass("scheduled task enabled"),
+        (true, daemon::TaskState::Disabled) => {
+            debug::Probe::fail("scheduled task disabled; run `firecrab service start`")
+        }
+        (true, daemon::TaskState::Missing) => {
+            debug::Probe::fail("scheduled task missing; run `firecrab service install`")
+        }
+    };
+    report.guest = if !distro_disk {
+        debug::Probe::unavailable("managed WSL disk missing; inspect provisioning logs")
+    } else if status.ready {
+        debug::Probe::pass(
+            status
+                .detail
+                .unwrap_or_else(|| "guest services active".to_string()),
+        )
+    } else {
+        debug::Probe::fail(
+            status
+                .detail
+                .unwrap_or_else(|| "management VM not ready".to_string()),
+        )
+    };
+    report.api = if distro_disk && status.api_reachable {
+        debug::Probe::pass("http://127.0.0.1:5523/")
+    } else {
+        debug::Probe::fail("localhost API unreachable; inspect guest services and provisioning log")
+    };
+    if options.logs {
+        let journal = if distro_disk && wsl::is_running(DISTRO_NAME) {
+            wsl::root_shell(&format!(
+                "journalctl --no-pager --output=short-iso -n {} -u firecrab-api -u firecrab-net-helper",
+                options.tail
+            ))
+            .map_err(|error| error.to_string())
+        } else {
+            Err("managed distribution is missing or stopped; it was not started".to_string())
+        };
+        report.logs.push(debug::LogSource::guest(
+            "guest journal: firecrab-api + firecrab-net-helper",
+            journal,
+            options.tail,
+        ));
+    }
+    report
 }
 
 fn print_daemon_status(status: &daemon::Status) {
@@ -223,7 +318,7 @@ fn run_validate(host: &provision::Host, layout: &lifecycle::Layout) -> Result<i3
 }
 
 /// A root console in the managed distribution. It keeps the distribution
-/// running while it is open, like `run` on macOS keeps its VM in the foreground.
+/// running while it is open.
 fn run_foreground() -> Result<i32, Error> {
     if !wsl::contains(&wsl::distributions(), DISTRO_NAME) {
         return Err(Error::NotInstalled);
@@ -325,9 +420,67 @@ mod tests {
     }
 
     #[test]
+    fn debug_reads_failure_markers_without_starting_stopped_wsl() {
+        let (_directory, layout) = layout();
+        std::fs::write(
+            layout.runtime().join("provision.phase"),
+            "install-packages\n",
+        )
+        .unwrap();
+        std::fs::write(layout.runtime().join("provision.failed"), "1\n").unwrap();
+        std::fs::write(layout.runtime().join("microManager-task.xml"), ENABLED).unwrap();
+        std::fs::write(layout.distro().join("ext4.vhdx"), "test disk").unwrap();
+        let wsl = fake::answer(|line| match line {
+            l if l.starts_with("schtasks.exe /Query") => Ok(ENABLED.into()),
+            "wsl.exe --version" => Ok("WSL version: 2.7.14.0\nKernel version: 6.18.33.2\n".into()),
+            "wsl.exe --list --quiet" => Ok("firecrab-debian\n".into()),
+            "wsl.exe --list --running --quiet" => Ok(String::new()),
+            "cmd.exe /c ver" => Ok("Microsoft Windows [Version 10.0.26200.1]".into()),
+            other => panic!("debug started or queried a stopped guest: {other}"),
+        });
+        let report = collect_debug(&layout, debug::Options::new(true, true, Some(20)));
+        assert_eq!(report.capability.probe.state, "unavailable");
+        assert_eq!(report.provision.phase.as_deref(), Some("install-packages"));
+        assert_eq!(report.provision.failure.as_deref(), Some("1"));
+        assert_eq!(report.guest.state, "failed");
+        assert_eq!(report.logs.last().unwrap().state, "unavailable");
+        assert!(wsl.calls().iter().all(|call| !call.contains(" -d ")));
+    }
+
+    #[test]
+    fn debug_reads_live_guest_journal() {
+        let (_directory, layout) = layout();
+        std::fs::write(layout.runtime().join("microManager-task.xml"), ENABLED).unwrap();
+        std::fs::write(layout.distro().join("ext4.vhdx"), "test disk").unwrap();
+        let _wsl = fake::answer(|line| match line {
+            l if l.starts_with("schtasks.exe /Query") => Ok(ENABLED.into()),
+            "wsl.exe --version" => Ok("WSL version: 2.7.14.0\nKernel version: 6.18.33.2\n".into()),
+            "wsl.exe --list --quiet" => Ok("firecrab-debian\n".into()),
+            "wsl.exe --list --running --quiet" => Ok("firecrab-debian\n".into()),
+            "cmd.exe /c ver" => Ok("Microsoft Windows [Version 10.0.26200.1]".into()),
+            l if l.contains("printf 'kernel=") => Ok(format!(
+                "kernel=6.18.33.2\nmachine={}\nuptime=900\nkvm=present\nkvm_open=ok\nnested=yes\n",
+                std::env::consts::ARCH
+            )),
+            l if l.contains("systemctl is-active") => {
+                Ok("firecrab-api=active\nfirecrab-net-helper=active\nip=172.20.0.2\n".into())
+            }
+            l if l.contains("journalctl") => Ok("old\nAuthorization: Bearer secret\nlast\n".into()),
+            other => panic!("unexpected command: {other}"),
+        });
+        let report = collect_debug(&layout, debug::Options::new(true, true, Some(2)));
+        assert_eq!(report.capability.probe.state, "pass");
+        assert_eq!(report.guest.state, "pass");
+        assert_eq!(
+            report.logs.last().unwrap().excerpt.as_deref(),
+            Some("[REDACTED]\nlast")
+        );
+    }
+
+    #[test]
     fn run_needs_the_managed_distribution() {
         let _wsl = fake::answer(|_| Ok("Debian\n".into()));
-        assert!(matches!(run(Command::Run), Err(Error::NotInstalled)));
+        assert!(matches!(run_foreground(), Err(Error::NotInstalled)));
     }
 
     #[test]

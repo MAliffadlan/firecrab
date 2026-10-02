@@ -29,6 +29,7 @@ Isolated Playwright suite.
 5. Optional: assert `FIRECRAB_NETWORK_READY` and `FIRECRAB_OCI_E2E_READY` on the console
 6. Networks: IPv6 select defaults to Off; optional create of IPv4-only and auto-ULA dual-stack
 7. OCI DHCP: import fixture → create network → VM with `80:18888/tcp` → start → `FIRECRAB_NETWORK_READY` and an IPv4 on the detail panel
+8. MicroRegistry: register a custom image → delete its installed template → reinstall the local package → boot that image
 
 - `FIRECRAB_E2E_SKIP_GUEST_BOOT=1`: skip guest-boot half
 - Inspect and import still run
@@ -61,14 +62,28 @@ Full path (KVM, `firecracker` on `PATH`, live net helper):
 npm test --prefix firecrab-e2e
 ```
 
+On macOS, start the source-built services and use the management VM for the
+Linux OCI fixture and IPv6 SSH connection:
+
+```sh
+./target/debug/firecrab service dev
+FIRECRAB_MICROMANAGER_HOME="$HOME/Library/Application Support/Firecrab/micromanager" \
+  ./scripts/ci-qa-macos-e2e.sh browser
+```
+
+Chromium and frontend dependencies must be installed first. The browser runs
+on the Mac; guest boot and the registry run inside Debian. The fixture exits
+when its controlling SSH connection closes.
+
 MicroRegistry register ([#108](https://github.com/SteelCrab/firecrab/issues/108)), skip guest boot:
 
 ```sh
 FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm run test:register --prefix firecrab-e2e
 ```
 
-- Expect **2 passed, 2 skipped** (import + register/409; failed-job and reinstall/boot are product-gated)
-- Leftover `127.0.0.1-15556-firecrab-e2e-ready` catalog row fails `beforeAll` until L3 grows a DELETE
+- Expect **2 passed, 2 skipped** (import + register/409; guest boot is disabled and failed-job cleanup has API unit coverage)
+- Without the guest-boot skip flag: **3 passed, 1 skipped**, including local package reinstall and actual guest boot
+- Cleanup removes the imported disk, staged package, and this run's local catalog registration
 
 MicroNetwork IPv6 ([#146](https://github.com/SteelCrab/firecrab/issues/146)), form only:
 
@@ -146,6 +161,8 @@ python3 scripts/oci-e2e-registry.py --port 15555
 | `FIRECRAB_OCI_DHCP_E2E_PORT` | `15557` | DHCP-boot spec registry port |
 | `FIRECRAB_E2E_BASE_URL` | `http://localhost:8080` | Dashboard origin |
 | `FIRECRAB_E2E_API_URL` | `http://127.0.0.1:5523` | API used for cleanup |
+| `FIRECRAB_QA_MANAGER_HOST` | unset | Management VM IP for OCI fixtures and IPv6 SSH |
+| `FIRECRAB_QA_MANAGER_KEY` | unset | Management VM key; set together with the host |
 
 - Suite does not infer `/dev/kvm`
 - Unset the skip flag only on a host that can boot a guest

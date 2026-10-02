@@ -3,6 +3,7 @@
 //! Each host has its own backend module; everything they share lives beside them.
 
 mod artifact;
+mod debug;
 mod host_platform;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -65,7 +66,7 @@ fn write_retrying_transient_errors(writer: &mut impl Write, mut bytes: &[u8]) {
 }
 
 /// `firecrab service` on every host that runs Firecrab inside a managed Debian
-/// VM. One definition keeps the verbs identical; each backend decides how.
+/// VM. Common lifecycle verbs share one definition; platform tools are gated.
 #[derive(Subcommand)]
 pub enum Command {
     /// Install microManager and provision the managed Debian VM.
@@ -100,7 +101,36 @@ pub enum Command {
     },
     /// Show and validate the managed Debian VM configuration.
     Validate,
-    /// Run the managed Debian VM in the foreground with its console attached.
+    /// Diagnose the managed VM without changing its state.
+    Debug {
+        /// Emit a machine-readable diagnostic report.
+        #[arg(long)]
+        json: bool,
+        /// Include bounded excerpts from available logs.
+        #[arg(long)]
+        logs: bool,
+        /// Number of lines from each log (requires --logs; maximum 1000).
+        #[arg(long, requires = "logs", value_parser = clap::value_parser!(u16).range(1..=1000))]
+        tail: Option<u16>,
+    },
+    /// Build local API/net-helper sources inside the macOS management VM and restart them.
+    #[cfg(target_os = "macos")]
+    Dev {
+        /// Checkout root (defaults to the current directory).
+        #[arg(long, conflicts_with = "restore")]
+        source: Option<std::path::PathBuf>,
+        /// Build optimized guest binaries instead of debug binaries.
+        #[arg(long, conflicts_with = "restore")]
+        release: bool,
+        /// Remove development overrides and restart the installed release binaries.
+        #[arg(long)]
+        restore: bool,
+        /// Skip the artifact download prompt if the management VM needs installation.
+        #[arg(short, long, conflicts_with = "restore")]
+        yes: bool,
+    },
+    /// Open an interactive root console in the managed WSL distribution.
+    #[cfg(target_os = "windows")]
     Run,
     /// Serve running VMs' TCP port forwards on 127.0.0.1; run by the macOS daemon.
     #[command(hide = true)]
@@ -188,5 +218,56 @@ mod tests {
 
         let install = TestCli::try_parse_from(["test", "install"]).unwrap();
         assert!(matches!(install.command, Command::Install { yes: false }));
+    }
+
+    #[test]
+    fn debug_log_tail_is_explicit_and_bounded() {
+        let parsed =
+            TestCli::try_parse_from(["test", "debug", "--json", "--logs", "--tail", "50"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Debug {
+                json: true,
+                logs: true,
+                tail: Some(50)
+            }
+        ));
+        assert!(TestCli::try_parse_from(["test", "debug", "--tail", "50"]).is_err());
+        assert!(TestCli::try_parse_from(["test", "debug", "--logs", "--tail", "0"]).is_err());
+        assert!(TestCli::try_parse_from(["test", "debug", "--logs", "--tail", "1001"]).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dev_restore_is_independent_of_source_and_build_options() {
+        let cli = TestCli::try_parse_from(["test", "dev", "--restore"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Dev {
+                restore: true,
+                source: None,
+                ..
+            }
+        ));
+        assert!(TestCli::try_parse_from(["test", "dev", "--restore", "--source", "."]).is_err());
+        assert!(TestCli::try_parse_from(["test", "dev", "--restore", "--release"]).is_err());
+        let cli = TestCli::try_parse_from([
+            "test",
+            "dev",
+            "--source",
+            "/tmp/firecrab",
+            "--release",
+            "--yes",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Dev {
+                release: true,
+                yes: true,
+                restore: false,
+                ..
+            }
+        ));
     }
 }
