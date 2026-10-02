@@ -31,7 +31,7 @@ for unit in firecrab-api firecrab-net-helper; do
 done
 
 # Invoked by the EXIT trap, including a failed build or interrupted deployment.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 finish() {
   rc=$?
   trap - EXIT
@@ -94,10 +94,9 @@ if [ "$profile" != restore ]; then
   export CARGO_TARGET_DIR="$root/target"
   export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
   export CARGO_PROFILE_DEV_DEBUG=${CARGO_PROFILE_DEV_DEBUG:-1}
-  flags=()
+  flags=(--locked --target aarch64-unknown-linux-gnu -p firecrab-api -p firecrab-net-helper)
   if [ "$profile" = release ]; then flags+=(--release); fi
-  rustup run "$channel" cargo build --locked --target aarch64-unknown-linux-gnu \
-    -p firecrab-api -p firecrab-net-helper "${flags[@]}"
+  rustup run "$channel" cargo build "${flags[@]}"
 
   binaries=$(mktemp -d "$bin_root/build.XXXXXX")
   chmod 0755 "$binaries"

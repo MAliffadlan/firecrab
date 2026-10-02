@@ -86,11 +86,11 @@ class GuestDevelopmentTest(unittest.TestCase):
             archive.add(source, arcname="firecrab-api/src/main.rs")
             archive.add(tools, arcname="scripts/firecracker-menual")
 
-    def run_guest(self, profile="debug", **flags):
+    def run_guest(self, profile="debug", shell="bash", **flags):
         environment = os.environ.copy()
         environment.update(TEST_ROOT=str(self.root), PATH=str(self.commands) + ":" + environment["PATH"])
         environment.update({key: str(value) for key, value in flags.items()})
-        return subprocess.run(["bash", str(self.script), profile, "1.97.1", self.archive.name],
+        return subprocess.run([shell, str(self.script), profile, "1.97.1", self.archive.name],
                               env=environment, text=True, capture_output=True, timeout=10)
 
     def override(self, unit="firecrab-api"):
@@ -111,6 +111,12 @@ class GuestDevelopmentTest(unittest.TestCase):
                 self.assertIn("built-from-source", (self.binaries / "bin/firecrab-net-helper").read_text())
                 self.assertIn("runtime-tool", (self.binaries / "bin/extract-arm64-image").read_text())
                 self.assertFalse(self.archive.exists())
+
+    def test_debug_deploy_works_with_system_bash(self):
+        result = self.run_guest(shell="/bin/bash")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue(self.override().is_file())
+        self.assertIn("built-from-source", (self.binaries / "bin/firecrab-api").read_text())
 
     def test_build_failure_does_not_touch_services_or_previous_binaries(self):
         result = self.run_guest(BUILD_FAIL=1)
