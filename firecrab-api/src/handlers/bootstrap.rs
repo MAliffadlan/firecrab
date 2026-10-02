@@ -970,6 +970,7 @@ mod tests {
                 pid: 0,
                 exited: exited_rx,
                 console: console.clone(),
+                control: crate::vm_shim::client::ShimControl::for_test().0,
             },
         );
         console

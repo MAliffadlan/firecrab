@@ -26,6 +26,7 @@ mod shells;
 mod state;
 mod storage;
 mod templates;
+mod vm_shim;
 
 use std::error::Error;
 use std::io;
@@ -58,8 +59,28 @@ enum StartupError {
     Serve(#[source] io::Error),
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // `firecrab-api vm-shim …` runs one VM's shim instead of the API; see
+    // `vm_shim`. Checked before anything else so the shim never opens the
+    // database or binds the API port.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new(vm_shim::SUBCOMMAND)) {
+        return vm_shim::run(args.collect());
+    }
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[ERROR] failed to start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(serve_api())
+}
+
+async fn serve_api() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

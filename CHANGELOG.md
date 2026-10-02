@@ -26,7 +26,10 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Changed
 
-- None.
+- Each MicroVM now runs under a per-VM `firecrab-vm` shim (`firecrab-api vm-shim`)
+  that owns Firecracker, writes `console.log`, and records the exit status in
+  `exit.json`. The API controls the VM through the shim's socket. VMs still stop
+  when the API stops; keeping them running is the rest of [#123].
 
 ### Deprecated
 
@@ -519,6 +522,7 @@ network helper.
 [#295]: https://github.com/SteelCrab/firecrab/pull/295
 [#297]: https://github.com/SteelCrab/firecrab/pull/297
 [#312]: https://github.com/SteelCrab/firecrab/pull/312
+[#123]: https://github.com/SteelCrab/firecrab/issues/123
 [88ba35d]: https://github.com/SteelCrab/firecrab/commit/88ba35d
 [34193f5]: https://github.com/SteelCrab/firecrab/commit/34193f5
 [729bb47]: https://github.com/SteelCrab/firecrab/commit/729bb47
