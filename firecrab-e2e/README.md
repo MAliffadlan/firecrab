@@ -27,6 +27,7 @@ Isolated Playwright suite.
 5. Optional: assert `FIRECRAB_NETWORK_READY` and `FIRECRAB_OCI_E2E_READY` on the console
 6. Networks: IPv6 select defaults to Off; optional create of IPv4-only and auto-ULA dual-stack
 7. OCI DHCP: import fixture → create network → VM with `80:18888/tcp` → start → `FIRECRAB_NETWORK_READY` and an IPv4 on the detail panel
+8. MicroRegistry: register a custom image → delete its installed template → reinstall the local package → boot that image
 
 - `FIRECRAB_E2E_SKIP_GUEST_BOOT=1`: skip guest-boot half
 - Inspect and import still run
@@ -78,8 +79,9 @@ MicroRegistry register ([#108](https://github.com/SteelCrab/firecrab/issues/108)
 FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm run test:register --prefix firecrab-e2e
 ```
 
-- Expect **2 passed, 2 skipped** (import + register/409; failed-job and reinstall/boot are product-gated)
-- Leftover `127.0.0.1-15556-firecrab-e2e-ready` catalog row fails `beforeAll` until L3 grows a DELETE
+- Expect **2 passed, 2 skipped** (import + register/409; guest boot is disabled and failed-job cleanup has API unit coverage)
+- Without the guest-boot skip flag: **3 passed, 1 skipped**, including local package reinstall and actual guest boot
+- Cleanup removes the imported disk, staged package, and this run's local catalog registration
 
 MicroNetwork IPv6 ([#146](https://github.com/SteelCrab/firecrab/issues/146)), form only:
 
