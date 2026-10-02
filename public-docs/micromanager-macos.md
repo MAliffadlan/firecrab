@@ -95,6 +95,11 @@ Interactive processes such as Terminal can also reach every forward at the manag
 A host port another Mac process already holds is skipped and logged once in `runtime/daemon.log`, and port 5523 always belongs to the API.
 The relay restarts on its own after a crash without touching the VM; installs from before the relay pick it up with `firecrab service reinstall`.
 A dropped API tunnel (sleep, a network stall) reconnects without restarting the VM, so running microVMs survive it; after five failed reconnects the agent restarts both.
+
+`service stop` waits for the management VM process to exit before returning.
+If the guest cannot acknowledge shutdown within 20 seconds, the native helper
+stops its Virtualization.framework instance so a kernel panic cannot leave the
+disk images locked indefinitely. Failure to stop within 40 seconds is an error.
 `--purge` is deliberately destructive and refuses unsafe paths, symlinks, and roots whose final component is not `micromanager`.
 
 ## Validate and boot
