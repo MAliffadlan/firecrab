@@ -1,4 +1,5 @@
 mod daemon;
+mod dev;
 mod forward;
 mod lifecycle;
 mod provision;
@@ -36,6 +37,8 @@ pub enum Error {
     Provision(#[from] provision::Error),
     #[error(transparent)]
     Forward(#[from] forward::Error),
+    #[error(transparent)]
+    Dev(#[from] dev::Error),
     #[error("could not launch EFI provisioning helper {path}: {source}")]
     ProvisionHelper {
         path: PathBuf,
@@ -67,6 +70,12 @@ pub fn run(command: Command) -> Result<i32, Error> {
         Command::Stop => run_stop(),
         Command::Status => run_status(),
         Command::Debug { json, logs, tail } => run_debug(debug::Options::new(json, logs, tail)),
+        Command::Dev {
+            source,
+            release,
+            restore,
+            yes,
+        } => run_dev(source.as_deref(), release, restore, yes),
         Command::ForwardPorts {
             manager,
             key,
@@ -157,6 +166,51 @@ fn run_start() -> Result<i32, Error> {
     let status = daemon::start(&layout)?;
     print_daemon_status(&status);
     Ok(i32::from(!status.success()))
+}
+
+fn run_dev(source: Option<&Path>, release: bool, restore: bool, yes: bool) -> Result<i32, Error> {
+    // Validate and archive before installing or starting anything.
+    let checkout = if restore {
+        None
+    } else {
+        Some(dev::Checkout::prepare(
+            source.unwrap_or_else(|| Path::new(".")),
+        )?)
+    };
+    let layout = lifecycle::Layout::from_process_env()?;
+    let paths = daemon::paths(&layout)?;
+    if !paths.wrapper.is_file() || !paths.plist.is_file() {
+        if restore {
+            return Err(daemon::Error::NotInstalled(paths.wrapper).into());
+        }
+        report!("[INSTALL] management VM for source development");
+        run_install(false, yes)?;
+    }
+    let mut status = daemon::status(&layout)?;
+    if !status.loaded {
+        provision::require_guest_provisioned(&layout.managed_home)?;
+        status = daemon::start(&layout)?;
+    }
+    // A failed development API can leave SSH usable without daemon-ready.
+    let guest_marker = fs::read_to_string(&paths.manager_ready).unwrap_or_default();
+    let ip = status
+        .detail
+        .as_deref()
+        .and_then(manager_ip)
+        .or_else(|| manager_ip(&guest_marker))
+        .filter(|_| status.loaded)
+        .ok_or(dev::Error::GuestNotReady)?;
+    dev::deploy(&layout, ip, checkout.as_ref(), release)?;
+    let started = Instant::now();
+    while !daemon::status(&layout)?.api_reachable {
+        if started.elapsed() >= Duration::from_secs(30) {
+            return Err(dev::Error::LocalApiUnavailable.into());
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    report!("[PASS] API: http://127.0.0.1:5523/");
+    report!("  logs: firecrab service debug --logs --tail 100");
+    Ok(0)
 }
 
 fn run_stop() -> Result<i32, Error> {
@@ -591,6 +645,7 @@ fn command_arguments(command: &Command) -> Vec<OsString> {
         | Command::Stop
         | Command::Status
         | Command::Debug { .. }
+        | Command::Dev { .. }
         | Command::ForwardPorts { .. } => {
             unreachable!("lifecycle and relay commands do not invoke the native helper")
         }
@@ -602,7 +657,6 @@ fn command_arguments(command: &Command) -> Vec<OsString> {
             arguments
         }
         Command::Validate => vec![OsString::from("validate")],
-        Command::Run => vec![OsString::from("run")],
     }
 }
 
@@ -734,8 +788,7 @@ mod tests {
         let validate = TestCli::try_parse_from(["test", "validate"]).unwrap();
         assert_eq!(command_arguments(&validate.command), ["validate"]);
 
-        let run = TestCli::try_parse_from(["test", "run"]).unwrap();
-        assert_eq!(command_arguments(&run.command), ["run"]);
+        assert!(TestCli::try_parse_from(["test", "run"]).is_err());
 
         assert!(TestCli::try_parse_from(["test", "validate", "--kernel", "/tmp/Image"]).is_err());
     }

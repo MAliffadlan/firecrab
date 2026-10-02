@@ -52,8 +52,11 @@ pub fn run(command: Command) -> Result<i32, Error> {
         Command::Validate => {
             run_validate(provision::host()?, &lifecycle::Layout::from_process_env()?)
         }
+        #[cfg(target_os = "windows")]
         Command::Run => run_foreground(),
         Command::ForwardPorts { .. } => Err(Error::MacosOnly("forward-ports")),
+        #[cfg(target_os = "macos")]
+        Command::Dev { .. } => Err(Error::MacosOnly("dev")),
     }
 }
 
@@ -315,7 +318,7 @@ fn run_validate(host: &provision::Host, layout: &lifecycle::Layout) -> Result<i3
 }
 
 /// A root console in the managed distribution. It keeps the distribution
-/// running while it is open, like `run` on macOS keeps its VM in the foreground.
+/// running while it is open.
 fn run_foreground() -> Result<i32, Error> {
     if !wsl::contains(&wsl::distributions(), DISTRO_NAME) {
         return Err(Error::NotInstalled);
@@ -477,7 +480,7 @@ mod tests {
     #[test]
     fn run_needs_the_managed_distribution() {
         let _wsl = fake::answer(|_| Ok("Debian\n".into()));
-        assert!(matches!(run(Command::Run), Err(Error::NotInstalled)));
+        assert!(matches!(run_foreground(), Err(Error::NotInstalled)));
     }
 
     #[test]

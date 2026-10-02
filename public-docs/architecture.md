@@ -2,12 +2,13 @@
 
 Firecrab is a single-host control plane for Firecracker microVMs.
 It manages images, networks, disks, VM state, and browser consoles.
-This contributor view follows the v0.3.0 release of 2026-09-29 and includes processes, ports, paths, and event order.
+This contributor view covers the v0.3.0 system and the current checkout's source development flow, including processes, ports, paths, and event order.
 For the simpler overview, see the [README](../README.md#architecture).
 
 ## Contents
 
 - [microManager system architecture](#micromanager-system-architecture): Linux, macOS, and Windows
+- [Source development on macOS](#source-development-on-macos): guest builds and frontend proxy
 - [Firecrab system architecture](#firecrab-system-architecture): components and VM startup
 - [Image and kernel supply](#image-and-kernel-supply): catalog, OCI, MicroBoot, and kernels
 - [Guest features](#guest-features): usage, shell repository, and SSH
@@ -69,6 +70,20 @@ The host requires Store WSL2 and usable nested `/dev/kvm`; native ARM64 installa
 The dashboard, API, images, and networks work; newer net-helper fixes reach this guest when a newer bundle is pinned.
 Managed files live under `%LOCALAPPDATA%\Firecrab\micromanager`.
 See [microManager on Windows](micromanager-windows.md) for lifecycle and shared WSL2 state.
+
+## Source development on macOS
+
+`service dev` builds the API and network helper inside the managed Debian VM.
+Frontend source runs through Vite on the Mac.
+
+![macOS source development: SSH upload, Debian build, systemd deployment, and frontend proxy](../assets/architecture/micromanager-source-dev.en.svg)
+
+1. **Upload:** ensure the management VM and API tunnel are ready, then upload one checkout snapshot over key-only SSH. Run `service dev` again after Rust edits.
+2. **Build:** Debian uses the pinned Rust toolchain and `cargo build --locked` for Linux ARM64. Source and compiler caches live under `/var/lib/firecrab/dev` on the persistent data disk.
+3. **Deploy:** stage the two executables under `/usr/local/lib/firecrab-dev`, switch systemd `ExecStart` overrides, then start net-helper followed by the API and check readiness. Build failure keeps the current services; deployment failure restores their previous executables. `service dev --restore` selects the release binaries.
+4. **Frontend:** `npm run dev --prefix firecrab-frontend` serves `http://localhost:8080` and proxies `/api` and `/ws` through the Mac's `127.0.0.1:5523` SSH tunnel to the guest API. The installed dashboard remains available at port 5523.
+
+See [microManager on macOS](micromanager-macos.md#run-the-api-and-network-helper-from-local-source) for commands.
 
 ## Firecrab system architecture
 
