@@ -22,6 +22,7 @@ import {
   SKIP_GUEST_BOOT,
 } from "../src/constants.js";
 import { startLocalOciRegistry, type LocalOciRegistry } from "../src/registry.js";
+import { managerProxyArgs } from "../src/manager.js";
 
 /**
  * OCI guest dual-stack DHCP + SSH boot — the nginx-stable dashboard path
@@ -138,7 +139,7 @@ async function authenticateWithDownloadedKey(vmId: string, ipv6: string): Promis
       String(DHCP_SSH_HOST_PORT),
       "root@127.0.0.1",
     ]);
-    await authenticate("IPv6 direct", ["-6", `root@${ipv6}`]);
+    await authenticate("IPv6", [...managerProxyArgs(), "-6", `root@${ipv6}`]);
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }

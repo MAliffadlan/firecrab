@@ -4,7 +4,7 @@
 #
 # CI must set isolated FIRECRAB_INSTALL_DIR and FIRECRAB_MICROMANAGER_HOME
 # paths. The gate installs the current checkout; the caller purges afterward.
-# Usage: scripts/ci-qa-macos-e2e.sh [gate|api|nginx|guest|all]
+# Usage: scripts/ci-qa-macos-e2e.sh [gate|browser|api|nginx|guest|all]
 set -euo pipefail
 
 if [ "$(uname -s)" != Darwin ]; then
@@ -22,9 +22,9 @@ PHASE=${1:-all}
 export FIRECRAB_QA_WAIT_FACTOR=${FIRECRAB_QA_WAIT_FACTOR:-3}
 
 case "$PHASE" in
-    gate | api | nginx | guest | all) ;;
+    gate | browser | api | nginx | guest | all) ;;
     *)
-        printf 'usage: %s [gate|api|nginx|guest|all]\n' "$0" >&2
+        printf 'usage: %s [gate|browser|api|nginx|guest|all]\n' "$0" >&2
         exit 2
         ;;
 esac
@@ -113,6 +113,11 @@ case "$PHASE" in
     gate)
         run_gate
         ;;
+    browser)
+        require_api
+        configure_manager_ssh
+        npm --prefix "$root/firecrab-e2e" test
+        ;;
     api)
         require_api
         "$root/scripts/ci-qa-api.sh"
@@ -129,6 +134,7 @@ case "$PHASE" in
         ;;
     all)
         run_gate
+        npm --prefix "$root/firecrab-e2e" test
         "$root/scripts/ci-qa-api.sh"
         "$root/scripts/ci-qa-nginx.sh" nginx:1.27-alpine
         "$root/scripts/ci-qa-guest.sh" alpine:3.21 ubuntu:24.04 fedora:42
