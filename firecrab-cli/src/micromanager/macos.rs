@@ -51,6 +51,12 @@ pub enum Error {
     MissingProvisionMarker,
     #[error("could not render the debug report: {0}")]
     Render(#[from] serde_json::Error),
+    #[error("the management VM is not running; run `firecrab service start` first")]
+    ShellNotRunning,
+    #[error("the management SSH key is missing from {0}; run `firecrab service reinstall`")]
+    ShellCredentials(PathBuf),
+    #[error("could not run ssh: {0}")]
+    ShellSsh(#[source] std::io::Error),
     #[error(
         "could not launch macOS microManager helper {path}: {source}; reinstall the macOS CLI or set {HELPER_ENV}"
     )]
@@ -76,6 +82,7 @@ pub fn run(command: Command) -> Result<i32, Error> {
             restore,
             yes,
         } => run_dev(source.as_deref(), release, restore, yes),
+        Command::Shell { command } => run_shell(&command),
         Command::ForwardPorts {
             manager,
             key,
@@ -343,6 +350,73 @@ fn host_capability(layout: &lifecycle::Layout) -> debug::Capability {
             "host capability helper returned no valid report: {error}"
         )),
     }
+}
+
+/// A root shell in the management VM over its key-only SSH, or one command
+/// run there as root.
+fn run_shell(command: &[String]) -> Result<i32, Error> {
+    use std::io::IsTerminal;
+
+    let layout = lifecycle::Layout::from_process_env()?;
+    let paths = daemon::paths(&layout)?;
+    let status = daemon::status(&layout)?;
+    let guest_marker = fs::read_to_string(&paths.manager_ready).unwrap_or_default();
+    let ip = status
+        .detail
+        .as_deref()
+        .and_then(manager_ip)
+        .or_else(|| manager_ip(&guest_marker))
+        .filter(|_| status.loaded)
+        .ok_or(Error::ShellNotRunning)?;
+    let runtime = layout.managed_home.join("runtime");
+    if !runtime.join("manager_ed25519").is_file() {
+        return Err(Error::ShellCredentials(runtime));
+    }
+    let tty = command.is_empty() || io::stdin().is_terminal();
+    let status = ProcessCommand::new("/usr/bin/ssh")
+        .args(shell_arguments(&runtime, ip, command, tty))
+        .status()
+        .map_err(Error::ShellSsh)?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// `ssh` arguments for [`run_shell`]. ssh joins everything after the host
+/// into one line for the remote shell, so each command argument is quoted to
+/// arrive unchanged.
+fn shell_arguments(
+    runtime: &Path,
+    ip: std::net::IpAddr,
+    command: &[String],
+    tty: bool,
+) -> Vec<OsString> {
+    let mut arguments: Vec<OsString> = vec!["-i".into(), runtime.join("manager_ed25519").into()];
+    for option in [
+        "BatchMode=yes",
+        "ConnectTimeout=10",
+        // The daemon trusts the guest's key the same way on first connect and
+        // keeps it in the same file; a changed key is refused.
+        "StrictHostKeyChecking=accept-new",
+        "UpdateHostKeys=no",
+        "LogLevel=ERROR",
+    ] {
+        arguments.extend(["-o".into(), option.into()]);
+    }
+    arguments.push("-o".into());
+    let mut known_hosts = OsString::from("UserKnownHostsFile=");
+    known_hosts.push(runtime.join("known_hosts"));
+    arguments.push(known_hosts);
+    if tty {
+        arguments.push("-t".into());
+    }
+    arguments.push(format!("root@{ip}").into());
+    if !command.is_empty() {
+        let line: Vec<String> = command
+            .iter()
+            .map(|argument| format!("'{}'", argument.replace('\'', "'\\''")))
+            .collect();
+        arguments.push(line.join(" ").into());
+    }
+    arguments
 }
 
 fn manager_ip(marker: &str) -> Option<std::net::IpAddr> {
@@ -646,6 +720,7 @@ fn command_arguments(command: &Command) -> Vec<OsString> {
         | Command::Status
         | Command::Debug { .. }
         | Command::Dev { .. }
+        | Command::Shell { .. }
         | Command::ForwardPorts { .. } => {
             unreachable!("lifecycle and relay commands do not invoke the native helper")
         }
@@ -664,6 +739,46 @@ fn command_arguments(command: &Command) -> Vec<OsString> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    fn shell_ip() -> std::net::IpAddr {
+        "192.0.2.7".parse().unwrap()
+    }
+
+    #[test]
+    fn the_shell_is_an_interactive_root_login_over_the_management_key() {
+        let runtime = Path::new("/managed/runtime");
+        let arguments = shell_arguments(runtime, shell_ip(), &[], true);
+        let text: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(text[..2], ["-i", "/managed/runtime/manager_ed25519"]);
+        assert!(text.contains(&"-t".to_owned()));
+        assert!(text.contains(&"StrictHostKeyChecking=accept-new".to_owned()));
+        assert!(text.contains(&"UserKnownHostsFile=/managed/runtime/known_hosts".to_owned()));
+        assert_eq!(text.last().unwrap(), "root@192.0.2.7");
+    }
+
+    #[test]
+    fn a_shell_command_reaches_the_guest_with_each_argument_intact() {
+        let runtime = Path::new("/managed/runtime");
+        let command = ["sh", "-c", "echo it's here"].map(String::from);
+        let arguments = shell_arguments(runtime, shell_ip(), &command, false);
+        let text: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(!text.contains(&"-t".to_owned()), "no terminal without one");
+        let at = text
+            .iter()
+            .position(|argument| argument == "root@192.0.2.7")
+            .unwrap();
+        // ssh joins its remaining arguments into one remote shell line, so
+        // each argument is quoted for that shell.
+        assert_eq!(text[at + 1..], ["'sh' '-c' 'echo it'\\''s here'"]);
+    }
 
     #[test]
     fn debug_accepts_only_an_ip_from_the_ready_marker() {

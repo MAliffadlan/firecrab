@@ -129,9 +129,14 @@ pub enum Command {
         #[arg(short, long, conflicts_with = "restore")]
         yes: bool,
     },
-    /// Open an interactive root console in the managed WSL distribution.
-    #[cfg(target_os = "windows")]
-    Run,
+    /// Open a root shell in the managed Debian guest, or run one command there.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg_attr(target_os = "windows", command(alias = "run"))]
+    Shell {
+        /// Command to run instead of an interactive shell, e.g. `systemctl status firecrab-api`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// Serve running VMs' TCP port forwards on 127.0.0.1; run by the macOS daemon.
     #[command(hide = true)]
     ForwardPorts {
@@ -235,6 +240,39 @@ mod tests {
         assert!(TestCli::try_parse_from(["test", "debug", "--tail", "50"]).is_err());
         assert!(TestCli::try_parse_from(["test", "debug", "--logs", "--tail", "0"]).is_err());
         assert!(TestCli::try_parse_from(["test", "debug", "--logs", "--tail", "1001"]).is_err());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn shell_opens_a_console_or_runs_one_command() {
+        let cli = TestCli::try_parse_from(["test", "shell"]).unwrap();
+        assert!(matches!(cli.command, Command::Shell { ref command } if command.is_empty()));
+
+        for line in [
+            &["test", "shell", "systemctl", "status", "firecrab-api"][..],
+            &["test", "shell", "--", "systemctl", "status", "firecrab-api"][..],
+        ] {
+            let cli = TestCli::try_parse_from(line).unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Shell { ref command } if command == &["systemctl", "status", "firecrab-api"]
+            ));
+        }
+
+        // Options after the command belong to the command, not to `shell`.
+        let cli =
+            TestCli::try_parse_from(["test", "shell", "journalctl", "-u", "firecrab-api"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Shell { ref command } if command == &["journalctl", "-u", "firecrab-api"]
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn run_still_opens_the_shell_on_windows() {
+        let cli = TestCli::try_parse_from(["test", "run"]).unwrap();
+        assert!(matches!(cli.command, Command::Shell { ref command } if command.is_empty()));
     }
 
     #[cfg(target_os = "macos")]
