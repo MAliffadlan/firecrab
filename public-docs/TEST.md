@@ -23,6 +23,7 @@ Update scope:   POST /api/update → U1 only
 - [Shells](#shells)
 - [Images, kernels, OCI, and registry](#images-kernels-oci-and-registry)
 - [MicroVM and SSH](#microvm-and-ssh)
+- [VM lifetime](#vm-lifetime)
 - [nginx combined scenario](#nginx-combined-scenario)
 - [CLI](#cli)
 - [Browser E2E](#browser-e2e-every-playwright-case)
@@ -305,6 +306,42 @@ ssh -i firecrab-qa-vm.pem -o IdentitiesOnly=yes "root@$GUEST_IP" uname -s
 
 CPU, RAM, disk, and egress edits apply only in created, stopped, or error. Environment edits also apply in running.
 
+## VM lifetime
+
+Run these on a running VM (V7) with root on the API host; on macOS, run the host commands in the management VM over SSH.
+R3–R6 need `FIRECRAB_VM_LAUNCHER=systemd` in the API's environment; with the default launcher, record them as WARNING.
+
+- [ ] **R1 — Shim:** `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent; the runtime directory has `shim.sock` and `console.log`.
+- [ ] **R2 — API restart, default launcher:** the VM stops with the API and is `stopped` after startup; `exit.json` has `"stop_requested":true`.
+- [ ] **R3 — systemd unit:** `firecrab-vm-<simple id>.service` is active; the shim's parent is PID 1 and it runs as the API user.
+- [ ] **R4 — API restart, systemd launcher:** shim and Firecracker PIDs are unchanged, the VM stays `running`, the journal reports `adopted=1`, the TAP stays on its bridge, and V9 and V11 still work.
+- [ ] **R5 — Crash while the API is down:** after `kill -9` of Firecracker, the started API records `error` and removes the TAP and nft rules.
+- [ ] **R6 — Interrupted start:** restarting the API after the shim appears but before `running` records `error` and leaves no unit.
+- [ ] **R7 — Normal stop:** V11 records `stopped`, `exit.json` has `"stop_requested":true`, and no `firecrab-vm-*` unit is failed.
+
+```sh
+# R1, R3: the shim, its parent, and its unit (systemd launcher)
+VM=<vm id>
+ps -o pid,ppid,user,args -p "$(pgrep -f "[v]m-shim --vm-id $VM")"
+systemctl list-units --all --plain --no-legend 'firecrab-vm-*'
+
+# R4: restart the API and compare PIDs
+pgrep -f "[v]m-shim --vm-id $VM"
+sudo systemctl restart firecrab-api
+pgrep -f "[v]m-shim --vm-id $VM"
+journalctl -u firecrab-api -b | grep 'startup reconciliation finished' | tail -1
+
+# R5: crash the VM while the API is down
+sudo systemctl stop firecrab-api
+sudo pkill -9 -f "firecracker --api-sock .*/$(echo "$VM" | tr -d -)/"
+sudo systemctl start firecrab-api
+
+# R7, X7
+systemctl --failed --plain --no-legend | grep firecrab-vm- || echo none
+```
+
+`scripts/ci-qa-lifetime.sh [OCI reference]` runs R1–R7 and X7, imports the image when it is missing, and restores the launcher setting it changed.
+
 ## nginx combined scenario
 
 Run the nginx QA script to cover OCI, shell, VM, environment, forwarding, and SSH together.
@@ -437,6 +474,7 @@ npm test --prefix firecrab-e2e
 - [ ] **X4:** no QA shell remains.
 - [ ] **X5:** custom OCI alias is gone; retain catalog fixtures only by explicit choice.
 - [ ] **X6:** no QA Docker Hub secret remains; restore any prior login.
+- [ ] **X7:** no `firecrab-vm-*` unit remains for a QA VM; the API's `FIRECRAB_VM_LAUNCHER` is restored.
 
 Inspect the four resource lists after cleanup:
 
@@ -455,6 +493,7 @@ scripts/ci-qa-api.sh: G4–G5 H1–H2 N1–N5 S1–S3 L1–L3 I1 I8–I9 V14 C3 
 scripts/ci-qa-nginx.sh: NGX1–NGX9, including V8a–V8d
 scripts/ci-qa-ssh.sh: V8a–V8d from guest and nginx runs
 scripts/ci-qa-guest.sh: I5–I6 V1–V2 V6–V9 V11–V13 N6 C1–C2 C4 X5
+scripts/ci-qa-lifetime.sh: R1–R7 X7, root commands on the API host (macOS: management VM SSH)
 scripts/ci-qa-macos-e2e.sh: native-Mac manual runtime pass after fresh install
 scripts/ci-qa-windows-e2e.ps1: native-Windows manual runtime pass after fresh install
 ```

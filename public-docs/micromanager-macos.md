@@ -195,6 +195,9 @@ firecrab service debug --json
 
 If `service start` reports that guest provisioning stopped at a phase such as `firecrab`, the API inside Debian is not ready; starting the launchd agent again cannot finish the installation. Run `firecrab service reinstall` from a checkout with the signed helper beside the CLI. Reinstall rebuilds an incomplete Debian OS disk and keeps `data/firecrab-data.raw`. After it succeeds, check `firecrab service status` and `curl -fsS http://127.0.0.1:5523/api/host`. A VM process left running after `service stop` can keep both disk images busy; inspect running `firecrab-micromanager-macos` processes before retrying and preserve the data disk when recovering them.
 
+If `ssh` to the management VM fails with `kex_exchange_identification: read: Connection reset by peer`, the guest's sshd is blocking the Mac under `PerSourcePenalties` (up to 600 seconds after crashed or unauthenticated sessions); wait, or run `firecrab service stop` and `service start`.
+If `runtime/vm-console.log` shows `Internal error: Oops`, `Kernel panic`, or `EXT4-fs error`, the guest kernel failed under nested load: restart the service, and after ext4 errors stop it, keep a clone of the data disk (`cp -c data/firecrab-data.raw data/firecrab-data.raw.bak`), repair it with Homebrew `e2fsck -fy`, and run `firecrab service reinstall`.
+
 If the guest finishes provisioning but its VM does not power off within two minutes, `install` stops the provisioning VM and continues from the recorded markers.
 A successful install additionally records these guest gates in `runtime/provisioned`:
 
