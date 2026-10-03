@@ -44,6 +44,7 @@ The API contract does not.
 | G3 | Windows | `firecrab service doctor` then `install` / `status` (WSL2 with nested virt required) |
 | G4 | all | `GET /api/host` 200; dashboard `GET /` HTML 200 |
 | G5 | all | `GET /api/no-such-route` JSON 404 with `requestId` |
+| G6 | macOS, Windows | `firecrab service shell -- id -un` is `root`; arguments arrive unchanged; a command's exit code comes back; no command opens a root login |
 
 GitHub-hosted ARM64 macOS runners do not expose nested virtualization. They
 run build/unit/signing checks only. This repository does not register a
@@ -244,8 +245,8 @@ Linux-only (skip on macOS/Windows CLI, or run inside the management guest):
 | `firecrab-e2e` `test:dashboard` | dashboard rows that fake the API and console (`@dashboard`), including V15 in the web terminal |
 | GitHub-hosted macOS | Swift/Rust checks, signed helper, and diagnostic JSON; no runtime E2E |
 | GitHub-hosted Windows | Rust clippy/tests and diagnostic JSON; no runtime E2E |
-| Windows host manual run | `ci-qa-windows-e2e.ps1`; fresh install, then the API/nginx/guest scripts inside the managed distribution |
-| Native M3+ manual run | `ci-qa-macos-e2e.sh`; fresh install plus API/nginx/guest/lifetime E2E; capability failure is fatal |
+| Windows host manual run | `ci-qa-windows-e2e.ps1`; fresh install and G6 `service shell`, then the API/nginx/guest scripts inside the managed distribution |
+| Native M3+ manual run | `ci-qa-macos-e2e.sh`; fresh install, G6 `service shell`, and API/nginx/guest/lifetime E2E; capability failure is fatal |
 | microManager PR report | `micromanager-pr-report.py`; comments both hosted jobs' results, log tails, and the manual E2E commands on PRs that touch them |
 
 Not in GitHub Ubuntu CI: I2 I3 I4 I7 I10 U1.

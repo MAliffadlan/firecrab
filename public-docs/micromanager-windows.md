@@ -171,6 +171,7 @@ Publish measurements from real Windows hosts before quoting Windows performance.
 
 `scripts/ci-qa-windows-e2e.ps1` is the Windows counterpart of the macOS E2E script.
 Its gate runs `doctor`, a fresh `install`, and `status`, then checks the API from Windows.
+The `shell` phase checks `service shell` (G6) from Windows.
 The `api`, `nginx`, and `guest` phases run the shared QA scripts inside `firecrab-debian`, the Firecrab host.
 
 ```powershell
