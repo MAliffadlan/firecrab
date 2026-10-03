@@ -405,12 +405,18 @@ mod tests {
             },
             std::future::pending(),
         ));
+        // The fake VMM binds its API socket only after it installs its
+        // SIGTERM handler; a stop sent before then would kill it outright.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while tokio::net::UnixStream::connect(&runtime.shim_socket)
             .await
             .is_err()
+            || !runtime.api_socket.exists()
         {
-            assert!(std::time::Instant::now() < deadline, "shim never listened");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shim never served its VM"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
