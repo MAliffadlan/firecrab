@@ -80,6 +80,7 @@ is not required; inspect guest logs with `service debug --logs`.
 ./target/debug/firecrab service dev --release                 # Optimized local build
 ./target/debug/firecrab service dev --yes                     # Skip download prompt
 ./target/debug/firecrab service debug --logs --tail 100       # Inspect logs
+./target/debug/firecrab service shell                         # Root shell in the guest
 ./target/debug/firecrab service dev --restore                 # Return to installed binaries
 ./target/debug/firecrab service dev --help                    # List options
 ```
@@ -190,6 +191,8 @@ firecrab service debug
 firecrab service debug --logs --tail 100
 firecrab service debug --json
 ```
+
+For a hands-on look, `firecrab service shell` opens a root shell in the management VM over its key-only SSH, and `firecrab service shell -- <command>` runs one command there, for example `firecrab service shell -- journalctl -u firecrab-api -n 50`.
 
 `debug` reports host capability checks and fixes, the launchd agent, management VM services, localhost API, provisioning phase/failure marker, and available logs. `--logs` adds a bounded excerpt of each log and the running guest's Firecrab systemd journal; `--tail` accepts 1–1000 lines and requires `--logs` (default 200). The command does not start or stop the management VM. When the VM is stopped, guest journal output is unavailable, but the host-side markers and logs remain visible. The report omits credential files and redacts recognized secrets in log excerpts; inspect a log locally before sharing it.
 

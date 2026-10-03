@@ -52,8 +52,8 @@ pub fn run(command: Command) -> Result<i32, Error> {
         Command::Validate => {
             run_validate(provision::host()?, &lifecycle::Layout::from_process_env()?)
         }
-        #[cfg(target_os = "windows")]
-        Command::Run => run_foreground(),
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        Command::Shell { command } => run_shell(&command),
         Command::ForwardPorts { .. } => Err(Error::MacosOnly("forward-ports")),
         #[cfg(target_os = "macos")]
         Command::Dev { .. } => Err(Error::MacosOnly("dev")),
@@ -317,17 +317,30 @@ fn run_validate(host: &provision::Host, layout: &lifecycle::Layout) -> Result<i3
     ))
 }
 
-/// A root console in the managed distribution. It keeps the distribution
-/// running while it is open.
-fn run_foreground() -> Result<i32, Error> {
+/// A root shell in the managed distribution, or one command run there as
+/// root. The distribution keeps running while it is open.
+fn run_shell(command: &[String]) -> Result<i32, Error> {
     if !wsl::contains(&wsl::distributions(), DISTRO_NAME) {
         return Err(Error::NotInstalled);
     }
     let status = std::process::Command::new("wsl.exe")
-        .args(["-d", DISTRO_NAME, "-u", "root", "--cd", "~"])
+        .args(shell_arguments(command))
         .status()
         .map_err(Error::Console)?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// `wsl.exe` arguments for [`run_shell`]. A command runs through `--exec`, so
+/// each argument reaches it unchanged instead of being re-parsed by a shell.
+fn shell_arguments(command: &[String]) -> Vec<String> {
+    let mut arguments = ["-d", DISTRO_NAME, "-u", "root", "--cd", "~"]
+        .map(String::from)
+        .to_vec();
+    if !command.is_empty() {
+        arguments.push("--exec".to_owned());
+        arguments.extend(command.iter().cloned());
+    }
+    arguments
 }
 
 /// Without `--purge` the distribution stays registered, so its Firecrab data
@@ -364,6 +377,34 @@ mod tests {
     use wsl::fake;
 
     const ENABLED: &str = "<Task><Settings><Enabled>true</Enabled></Settings></Task>";
+
+    #[test]
+    fn the_shell_is_a_root_console_in_the_managed_distribution() {
+        assert_eq!(
+            shell_arguments(&[]),
+            ["-d", DISTRO_NAME, "-u", "root", "--cd", "~"]
+        );
+    }
+
+    #[test]
+    fn a_shell_command_runs_as_given_without_the_login_shell() {
+        let command = ["systemctl", "status", "firecrab-api"].map(String::from);
+        assert_eq!(
+            shell_arguments(&command),
+            [
+                "-d",
+                DISTRO_NAME,
+                "-u",
+                "root",
+                "--cd",
+                "~",
+                "--exec",
+                "systemctl",
+                "status",
+                "firecrab-api"
+            ]
+        );
+    }
 
     fn layout() -> (tempfile::TempDir, lifecycle::Layout) {
         let directory = tempfile::tempdir().expect("temp dir");
@@ -478,9 +519,9 @@ mod tests {
     }
 
     #[test]
-    fn run_needs_the_managed_distribution() {
+    fn shell_needs_the_managed_distribution() {
         let _wsl = fake::answer(|_| Ok("Debian\n".into()));
-        assert!(matches!(run_foreground(), Err(Error::NotInstalled)));
+        assert!(matches!(run_shell(&[]), Err(Error::NotInstalled)));
     }
 
     #[test]

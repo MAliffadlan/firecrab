@@ -110,11 +110,13 @@ Set `FIRECRAB_MICROMANAGER_HOME` only when a checkout or test needs a different 
 ```
 
 `validate` re-hashes every download and prints the distribution, provisioning, and task state in one run.
-`run` opens a root console in the managed distribution; the distribution keeps running while the console is open.
+`shell` opens a root shell in the managed distribution, and `shell -- <command>` runs one command there; the distribution keeps running while the shell is open.
+`run` remains an alias of `shell`.
 
 ```powershell
 firecrab service validate
-firecrab service run
+firecrab service shell
+firecrab service shell -- systemctl status firecrab-api
 ```
 
 The distribution's disk holds both Debian and Firecrab's data under `/var/lib/firecrab`.

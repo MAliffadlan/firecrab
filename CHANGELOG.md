@@ -22,7 +22,9 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Added
 
-- None.
+- `firecrab service shell` opens a root shell in the managed Debian guest on
+  macOS and Windows, and `firecrab service shell -- <command>` runs one command
+  there. On Windows, `service run` remains an alias.
 
 ### Changed
 
