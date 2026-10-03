@@ -23,6 +23,7 @@ API 기본 주소:  http://127.0.0.1:5523
 - [Shells](#shells)
 - [이미지·커널·OCI·레지스트리](#이미지커널oci레지스트리)
 - [MicroVM 및 SSH](#microvm-및-ssh)
+- [VM 수명](#vm-수명)
 - [nginx 통합 시나리오](#nginx-통합-시나리오)
 - [CLI](#cli)
 - [브라우저 E2E](#브라우저-e2e-playwright의-모든-케이스)
@@ -305,6 +306,42 @@ ssh -i firecrab-qa-vm.pem -o IdentitiesOnly=yes "root@$GUEST_IP" uname -s
 
 CPU, RAM, 디스크, egress는 created, stopped, error에서만 수정한다. 환경 변수는 running에서도 수정할 수 있다.
 
+## VM 수명
+
+실행 중인 VM(V7)과 API 호스트의 root 권한으로 수행한다. macOS에서는 호스트 명령을 management VM에 SSH로 접속해 실행한다.
+R3–R6은 API 환경에 `FIRECRAB_VM_LAUNCHER=systemd`가 필요하다. 기본 launcher에서는 WARNING으로 기록한다.
+
+- [ ] **R1 — Shim:** `firecrab-api vm-shim --vm-id <id>`가 Firecracker의 부모이고, 런타임 디렉터리에 `shim.sock`과 `console.log`가 있다.
+- [ ] **R2 — API 재시작, 기본 launcher:** VM이 API와 함께 멈추고 시작 후 `stopped`가 되며, `exit.json`에 `"stop_requested":true`가 있다.
+- [ ] **R3 — systemd unit:** `firecrab-vm-<simple id>.service`가 active이고, shim의 부모는 PID 1이며 API 사용자로 실행된다.
+- [ ] **R4 — API 재시작, systemd launcher:** shim과 Firecracker PID가 그대로이고 VM이 `running`을 유지하며, journal에 `adopted=1`이 남고 TAP이 bridge에 붙어 있고 V9와 V11이 동작한다.
+- [ ] **R5 — API가 꺼진 동안 crash:** Firecracker를 `kill -9`한 뒤 시작한 API가 `error`를 기록하고 TAP과 nft 규칙을 제거한다.
+- [ ] **R6 — 중단된 시작:** shim이 뜬 뒤 `running` 전에 API를 재시작하면 `error`가 기록되고 unit이 남지 않는다.
+- [ ] **R7 — 정상 중지:** V11이 `stopped`를 기록하고 `exit.json`에 `"stop_requested":true`가 있으며 failed 상태의 `firecrab-vm-*` unit이 없다.
+
+```sh
+# R1, R3: shim, 부모 프로세스, unit 확인 (systemd launcher)
+VM=<vm id>
+ps -o pid,ppid,user,args -p "$(pgrep -f "[v]m-shim --vm-id $VM")"
+systemctl list-units --all --plain --no-legend 'firecrab-vm-*'
+
+# R4: API 재시작 전후 PID 비교
+pgrep -f "[v]m-shim --vm-id $VM"
+sudo systemctl restart firecrab-api
+pgrep -f "[v]m-shim --vm-id $VM"
+journalctl -u firecrab-api -b | grep 'startup reconciliation finished' | tail -1
+
+# R5: API가 꺼진 동안 VM crash
+sudo systemctl stop firecrab-api
+sudo pkill -9 -f "firecracker --api-sock .*/$(echo "$VM" | tr -d -)/"
+sudo systemctl start firecrab-api
+
+# R7, X7
+systemctl --failed --plain --no-legend | grep firecrab-vm- || echo none
+```
+
+`scripts/ci-qa-lifetime.sh [OCI 참조]`가 R1–R7과 X7을 실행하고, 이미지가 없으면 import하며, 바꾼 launcher 설정을 복원한다.
+
 ## nginx 통합 시나리오
 
 nginx QA 스크립트로 OCI, Shell, VM, 환경 변수, 포트 포워딩, SSH를 함께 검증한다.
@@ -437,6 +474,7 @@ npm test --prefix firecrab-e2e
 - [ ] **X4:** QA shell이 남지 않는다.
 - [ ] **X5:** 사용자 지정 OCI alias가 없고 카탈로그 fixture는 명시적으로 보존할 때만 남긴다.
 - [ ] **X6:** QA Docker Hub 비밀값이 남지 않고 기존 로그인이 복원된다.
+- [ ] **X7:** QA VM의 `firecrab-vm-*` unit이 남지 않고 API의 `FIRECRAB_VM_LAUNCHER`가 복원된다.
 
 정리 후 네 종류의 리소스 목록을 확인한다:
 
@@ -455,6 +493,7 @@ scripts/ci-qa-api.sh: G4–G5 H1–H2 N1–N5 S1–S3 L1–L3 I1 I8–I9 V14 C3 
 scripts/ci-qa-nginx.sh: V8a–V8d를 포함한 NGX1–NGX9
 scripts/ci-qa-ssh.sh: 게스트·nginx 실행 중 V8a–V8d
 scripts/ci-qa-guest.sh: I5–I6 V1–V2 V6–V9 V11–V13 N6 C1–C2 C4 X5
+scripts/ci-qa-lifetime.sh: R1–R7 X7, API 호스트의 root 명령 (macOS: management VM SSH)
 scripts/ci-qa-macos-e2e.sh: 새로 설치한 네이티브 Mac의 수동 런타임 검사
 scripts/ci-qa-windows-e2e.ps1: 새로 설치한 네이티브 Windows의 수동 런타임 검사
 ```
