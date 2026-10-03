@@ -27,6 +27,8 @@ mod nat;
 mod self_update;
 /// Per-VM TAP device lifecycle.
 mod tap;
+/// Per-VM systemd units that run the VM shim.
+mod vm_unit;
 
 use firecrab_helper_protocol::PROTOCOL_VERSION;
 use firecrab_helper_protocol::framing::{read_frame, write_frame};
@@ -351,7 +353,11 @@ async fn handle_connection(stream: UnixStream, config: Arc<HelperConfig>) {
                 Ok(Err(_)) | Err(_) => return,
             };
 
-        let (response, after) = respond_to(envelope, &config).await;
+        let caller = vm_unit::Peer {
+            uid: peer.uid(),
+            gid: peer.gid(),
+        };
+        let (response, after) = respond_to(envelope, &config, &caller).await;
         let version_rejected = matches!(
             response.result,
             Err(HelperFailure::UnsupportedVersion { .. })
@@ -378,9 +384,10 @@ async fn handle_connection(stream: UnixStream, config: Arc<HelperConfig>) {
 async fn respond_to(
     envelope: NetworkRequestEnvelope,
     config: &HelperConfig,
+    peer: &vm_unit::Peer,
 ) -> (NetworkResponseEnvelope, AfterResponse) {
     let result = if envelope.version == PROTOCOL_VERSION {
-        dispatch(envelope.request, config).await
+        dispatch(envelope.request, config, peer).await
     } else {
         Err(HelperFailure::UnsupportedVersion {
             supported: PROTOCOL_VERSION,
@@ -574,6 +581,7 @@ fn validate_vm_policies(
 async fn dispatch(
     request: NetworkRequest,
     config: &HelperConfig,
+    peer: &vm_unit::Peer,
 ) -> Result<AfterResponse, HelperFailure> {
     match request {
         NetworkRequest::EnsureBridge => bridge::ensure_bridge(&config.bridge, config.bridge_mtu)
@@ -704,6 +712,29 @@ async fn dispatch(
                     detail: error_chain(&error),
                 })
         }
+        NetworkRequest::StartVmUnit {
+            vm_id,
+            runtime_dir,
+            firecracker,
+            enable_pci,
+            stop_grace_ms,
+        } => {
+            let request = vm_unit::UnitRequest {
+                vm_id,
+                runtime_dir,
+                firecracker,
+                enable_pci,
+                stop_grace_ms,
+            };
+            vm_unit::start(&request, peer)
+                .await
+                .map(|()| AfterResponse::Continue)
+                .map_err(vm_unit_failure)
+        }
+        NetworkRequest::StopVmUnit { vm_id } => vm_unit::stop(vm_id)
+            .await
+            .map(|()| AfterResponse::Continue)
+            .map_err(vm_unit_failure),
         NetworkRequest::ApplySelfUpdate {
             tarball_path,
             sha256,
@@ -728,6 +759,16 @@ async fn dispatch(
                     }
                 }
             }),
+    }
+}
+
+/// A rejected VM unit request is the caller's error; anything else is ours.
+fn vm_unit_failure(error: vm_unit::VmUnitError) -> HelperFailure {
+    match error {
+        vm_unit::VmUnitError::Invalid(detail) => HelperFailure::InvalidRequest { detail },
+        other => HelperFailure::Internal {
+            detail: error_chain(&other),
+        },
     }
 }
 
@@ -756,6 +797,15 @@ mod tests {
     use uuid::Uuid;
 
     // Unix socket paths are limited to ~108 bytes; keep test sockets short.
+    /// This test process as a peer, as `handle_connection` would see it.
+    fn own_peer() -> vm_unit::Peer {
+        vm_unit::Peer {
+            uid: effective_uid(),
+            // SAFETY: getgid has no failure mode.
+            gid: unsafe { libc::getgid() },
+        }
+    }
+
     fn short_tempdir() -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix("fc-net")
@@ -874,8 +924,25 @@ mod tests {
             vm_id: Uuid::new_v4(),
         };
         assert_eq!(
-            dispatch(request, &config).await,
+            dispatch(request, &config, &own_peer()).await,
             Ok(AfterResponse::Continue)
+        );
+    }
+
+    #[tokio::test]
+    async fn start_vm_unit_rejects_a_relative_runtime_directory_as_invalid_request() {
+        let config = HelperConfig::from_values("unused", None, 1500).unwrap();
+        let request = NetworkRequest::StartVmUnit {
+            vm_id: Uuid::new_v4(),
+            runtime_dir: PathBuf::from("data/vms/x/r/y"),
+            firecracker: PathBuf::from("/usr/local/bin/firecracker"),
+            enable_pci: false,
+            stop_grace_ms: 5000,
+        };
+
+        assert_matches!(
+            dispatch(request, &config, &own_peer()).await,
+            Err(HelperFailure::InvalidRequest { .. })
         );
     }
 
@@ -892,7 +959,7 @@ mod tests {
             allow_host_ssh: false,
             port_forwards: Vec::new(),
         };
-        let result = dispatch(request, &config).await;
+        let result = dispatch(request, &config, &own_peer()).await;
         assert_matches!(result, Err(HelperFailure::InvalidRequest { .. }));
     }
 
@@ -927,7 +994,7 @@ mod tests {
             }],
         ];
         for port_forwards in cases {
-            let result = dispatch(base(port_forwards), &config).await;
+            let result = dispatch(base(port_forwards), &config, &own_peer()).await;
             assert_matches!(result, Err(HelperFailure::InvalidRequest { .. }));
         }
     }
@@ -984,7 +1051,7 @@ mod tests {
             micro_networks: vec![sample_spec(Some("nosuchiface0"))],
             vm_policies: Vec::new(),
         };
-        assert_matches!(dispatch(request, &config).await,
+        assert_matches!(dispatch(request, &config, &own_peer()).await,
             Err(HelperFailure::InvalidRequest { detail }) if detail.contains("nosuchiface0"));
     }
 
@@ -999,7 +1066,7 @@ mod tests {
                 micro_networks: vec![sample_spec(Some(name))],
                 vm_policies: Vec::new(),
             };
-            let result = dispatch(request, &config).await;
+            let result = dispatch(request, &config, &own_peer()).await;
             assert_matches!(result, Err(HelperFailure::InvalidRequest { .. }));
         }
     }
@@ -1082,7 +1149,7 @@ mod tests {
             ipv6: Some(ipv6_spec("fe80::1", 64)),
         };
         assert_matches!(
-            dispatch(request, &config).await,
+            dispatch(request, &config, &own_peer()).await,
             Err(HelperFailure::InvalidRequest { .. })
         );
     }
@@ -1098,7 +1165,7 @@ mod tests {
                 prefix,
                 ipv6: None,
             };
-            let result = dispatch(request, &config).await;
+            let result = dispatch(request, &config, &own_peer()).await;
             assert_matches!(result, Err(HelperFailure::InvalidRequest { .. }));
         }
     }
@@ -1255,7 +1322,7 @@ mod tests {
             layout,
         };
         assert_matches!(
-            runtime().block_on(dispatch(request, &config)),
+            runtime().block_on(dispatch(request, &config, &own_peer())),
             Err(HelperFailure::InvalidRequest { .. })
         );
     }
@@ -1278,7 +1345,7 @@ mod tests {
             layout,
         };
         assert_matches!(
-            runtime().block_on(dispatch(request, &config)),
+            runtime().block_on(dispatch(request, &config, &own_peer())),
             Err(HelperFailure::InvalidRequest { .. })
         );
     }
@@ -1298,7 +1365,7 @@ mod tests {
             layout,
         };
         assert_eq!(
-            runtime().block_on(dispatch(request, &config)),
+            runtime().block_on(dispatch(request, &config, &own_peer())),
             Ok(AfterResponse::RestartUnits)
         );
     }

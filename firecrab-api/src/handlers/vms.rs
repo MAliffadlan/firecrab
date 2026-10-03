@@ -2565,7 +2565,7 @@ pub(crate) mod test_support {
         let socket_path = root.join(format!("net-helper-{}.sock", Uuid::new_v4()));
         crate::network::test_support::spawn_always_ok_helper(&socket_path);
 
-        AppState::with_db_file(templates, root.join("data/firecrab.db"))
+        let state = AppState::with_db_file(templates, root.join("data/firecrab.db"))
             .await
             .unwrap()
             .with_test_runtime(RuntimeConfig {
@@ -2576,7 +2576,11 @@ pub(crate) mod test_support {
                 network_ready_timeout: Duration::from_millis(300),
                 shim: crate::firecracker::ShimLauncher::InProcess,
             })
-            .with_test_network(crate::network::NetworkClient::with_socket_path(socket_path))
+            .with_test_network(crate::network::NetworkClient::with_socket_path(socket_path));
+        // As `main` does before serving, so tests that reopen state against
+        // the same directory see a restart.
+        crate::reconcile::reconcile(&state).await;
+        state
     }
 
     pub(crate) fn seed_vm(state: &AppState, vm: &VmRecord) {

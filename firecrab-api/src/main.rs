@@ -20,6 +20,7 @@ mod oci;
 mod package;
 mod persistence;
 mod process_metrics;
+mod reconcile;
 mod rootfs;
 mod server;
 mod shells;
@@ -116,12 +117,11 @@ async fn run() -> Result<(), StartupError> {
     // at startup (not only on VM start) is what brings back a MicroNetwork
     // that has no VMs in it yet — nothing else would ever touch it.
     //
-    // Best-effort: if the net-helper isn't up yet, this just means the host
-    // side lags until the next per-VM start, which re-applies the same thing
-    // (see setup_vm_network) — not worth failing API startup over.
-    if let Err(error) = handlers::micro_networks::ensure_all_networks(&state).await {
-        tracing::warn!(error, "initial network resync failed");
-    }
+    // Settles the VMs the previous run left active and resyncs host
+    // networking. Best-effort: if the net-helper isn't up yet, the host side
+    // lags until the next per-VM start, which re-applies the same thing (see
+    // setup_vm_network) — not worth failing API startup over.
+    reconcile::reconcile(&state).await;
     // Fetch the shared bootstrap builder source now, in the background, so
     // the request that needs it doesn't have to — see spawn_warmup.
     microboot::spawn_warmup(state.clone());

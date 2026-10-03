@@ -56,9 +56,52 @@ impl NetworkClient {
     }
 
     pub async fn call(&self, request: NetworkRequest) -> Result<(), NetworkError> {
-        tokio::time::timeout(self.timeout, self.exchange(request))
+        self.call_within(self.timeout, request).await
+    }
+
+    async fn call_within(
+        &self,
+        timeout: Duration,
+        request: NetworkRequest,
+    ) -> Result<(), NetworkError> {
+        tokio::time::timeout(timeout, self.exchange(request))
             .await
             .map_err(|_| NetworkError::Timeout)?
+    }
+
+    /// Asks the helper to run `vm_id`'s shim in its own systemd unit, so the
+    /// VM outlives this process. Returns once the unit has started; the
+    /// caller then connects to the shim's socket.
+    pub async fn start_vm_unit(
+        &self,
+        vm_id: Uuid,
+        runtime_dir: PathBuf,
+        firecracker: PathBuf,
+        enable_pci: bool,
+        stop_grace: Duration,
+    ) -> Result<(), NetworkError> {
+        self.call(NetworkRequest::StartVmUnit {
+            vm_id,
+            runtime_dir,
+            firecracker,
+            enable_pci,
+            stop_grace_ms: u64::try_from(stop_grace.as_millis()).unwrap_or(u64::MAX),
+        })
+        .await
+    }
+
+    /// Stops `vm_id`'s unit — the shim's own graceful stop, then systemd's
+    /// SIGKILL — and waits for it, up to `stop_grace` plus systemd's slack.
+    pub async fn stop_vm_unit(
+        &self,
+        vm_id: Uuid,
+        stop_grace: Duration,
+    ) -> Result<(), NetworkError> {
+        self.call_within(
+            self.timeout + stop_grace + Duration::from_secs(15),
+            NetworkRequest::StopVmUnit { vm_id },
+        )
+        .await
     }
 
     /// Idempotently ensures a MicroNetwork's own bridge exists, gated at
@@ -258,6 +301,8 @@ pub(crate) mod test_support {
             NetworkRequest::ApplyVmPolicy { .. } => "apply_vm_policy",
             NetworkRequest::RemoveVmPolicy { .. } => "remove_vm_policy",
             NetworkRequest::SyncDhcpLeases { .. } => "sync_dhcp_leases",
+            NetworkRequest::StartVmUnit { .. } => "start_vm_unit",
+            NetworkRequest::StopVmUnit { .. } => "stop_vm_unit",
             NetworkRequest::ApplySelfUpdate { .. } => "apply_self_update",
         }
     }
