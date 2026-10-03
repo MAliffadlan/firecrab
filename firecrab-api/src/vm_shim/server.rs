@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -69,17 +70,53 @@ pub(crate) struct ShimConfig {
     pub stop_grace: Duration,
 }
 
+/// How a shim's VM ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ShimExit {
+    /// Firecracker's exit status.
+    pub status: ExitStatus,
+    /// Whether the end was asked for (`Terminate`, `Kill`, or the shim's own
+    /// shutdown) rather than the guest powering off or the VMM crashing.
+    pub stop_requested: bool,
+}
+
+/// `exit.json`: the exit status plus whether it was asked for, so an API that
+/// was down when the VM ended can tell a requested stop from a crash.
+#[derive(Serialize)]
+struct ExitRecord {
+    #[serde(flatten)]
+    status: ExitStatus,
+    stop_requested: bool,
+}
+
 /// Runs Firecracker until it exits and serves it on `runtime.shim_socket`.
 ///
 /// `shutdown` resolving (the shim itself was asked to stop) sends SIGTERM and
-/// escalates to SIGKILL after `stop_grace`. Returns Firecracker's exit status
-/// once it has been written to `runtime.exit_status` and offered to the
-/// attached client. Fails only if Firecracker cannot be started at all.
+/// escalates to SIGKILL after `stop_grace`. Returns how the VM ended once
+/// that has been written to `runtime.exit_status` and offered to the
+/// attached client. Fails only if Firecracker cannot be started at all,
+/// including when another shim already holds this VM's lock.
 pub(crate) async fn serve(
     config: ShimConfig,
     shutdown: impl Future<Output = ()>,
-) -> io::Result<ExitStatus> {
+) -> io::Result<ShimExit> {
     let runtime = &config.runtime;
+    // Held until this function returns: while it is, no other shim can start
+    // Firecracker on this VM's disk.
+    let _vm_lock = match lock_vm(&runtime.vm_lock) {
+        Ok(lock) => lock,
+        Err(error) => {
+            let _ = remove_if_present(&runtime.shim_error);
+            record_startup_error(
+                runtime,
+                &format!(
+                    "another firecrab-vm shim is already running this VM ({}): {error}",
+                    runtime.vm_lock.display()
+                ),
+            );
+            return Err(error);
+        }
+    };
     for stale in [
         &runtime.api_socket,
         &runtime.shim_socket,
@@ -137,7 +174,9 @@ pub(crate) async fn serve(
     tokio::spawn(read_console(stdout, output_tx));
     let (requests_tx, mut requests_rx) = mpsc::channel(64);
     let mut shim = Shim {
+        vm_id: config.vm_id,
         vmm_pid,
+        stop_requested: false,
         input: Some(spawn_input_writer(stdin)),
         log: tokio::fs::File::from_std(log),
         log_filter: Vec::new(),
@@ -165,6 +204,7 @@ pub(crate) async fn serve(
             Some((id, request)) = requests_rx.recv() => shim.on_request(id, request),
             () = &mut shutdown, if !shutdown_requested => {
                 shutdown_requested = true;
+                shim.stop_requested = true;
                 signal(vmm_pid, libc::SIGTERM);
                 kill_at = Some(tokio::time::Instant::now() + config.stop_grace);
             }
@@ -199,14 +239,18 @@ pub(crate) async fn serve(
         }
     }
     let _ = shim.log.flush().await;
-    if let Err(error) = write_exit_status(&runtime.exit_status, &status) {
+    let exit = ShimExit {
+        status,
+        stop_requested: shim.stop_requested,
+    };
+    if let Err(error) = write_exit_status(&runtime.exit_status, &exit) {
         tracing::warn!(%error, "failed to record the VM exit status");
     }
     shim.finish(status).await;
     let _ = remove_if_present(&runtime.shim_socket);
     let _ = remove_if_present(&runtime.api_socket);
-    tracing::info!(vm_id = %config.vm_id, ?status, "vm shim exiting");
-    Ok(status)
+    tracing::info!(vm_id = %config.vm_id, ?exit, "vm shim exiting");
+    Ok(exit)
 }
 
 /// The attached client: its outgoing queue, the console bytes waiting in it,
@@ -222,7 +266,9 @@ struct Client {
 /// State the serve loop mutates, kept apart from the Firecracker child so the
 /// loop can wait on the child while handling everything else.
 struct Shim {
+    vm_id: Uuid,
     vmm_pid: u32,
+    stop_requested: bool,
     input: Option<mpsc::Sender<Vec<u8>>>,
     log: tokio::fs::File,
     log_filter: Vec<u8>,
@@ -291,6 +337,7 @@ impl Shim {
         self.send(ShimEvent::Hello {
             version: PROTOCOL_VERSION,
             vmm_pid: self.vmm_pid,
+            vm_id: Some(self.vm_id),
         });
         if !self.backlog.is_empty() {
             let backlog = self.backlog.iter().copied().collect();
@@ -335,8 +382,14 @@ impl Shim {
                     }
                 }
             }
-            Some(ShimRequest::Terminate) => signal(self.vmm_pid, libc::SIGTERM),
-            Some(ShimRequest::Kill) => signal(self.vmm_pid, libc::SIGKILL),
+            Some(ShimRequest::Terminate) => {
+                self.stop_requested = true;
+                signal(self.vmm_pid, libc::SIGTERM);
+            }
+            Some(ShimRequest::Kill) => {
+                self.stop_requested = true;
+                signal(self.vmm_pid, libc::SIGKILL);
+            }
         }
     }
 
@@ -476,10 +529,32 @@ fn bind_private(path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-fn write_exit_status(path: &Path, status: &ExitStatus) -> io::Result<()> {
+fn write_exit_status(path: &Path, exit: &ShimExit) -> io::Result<()> {
+    let record = ExitRecord {
+        status: exit.status,
+        stop_requested: exit.stop_requested,
+    };
     let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec(status)?)?;
+    fs::write(&temporary, serde_json::to_vec(&record)?)?;
     fs::rename(&temporary, path)
+}
+
+/// Takes this VM's exclusive lock without waiting. The lock lives as long as
+/// the returned file stays open.
+fn lock_vm(path: &Path) -> io::Result<fs::File> {
+    use std::os::fd::AsRawFd;
+
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    // SAFETY: `flock` on a file descriptor this function owns.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
 }
 
 /// Leaves the reason a start failed where the API can read it. Best effort:
@@ -610,7 +685,7 @@ threading.Thread(target=_burst, daemon=True).start()
     struct Running {
         _directory: tempfile::TempDir,
         runtime: HostRuntimePaths,
-        shim: JoinHandle<io::Result<ExitStatus>>,
+        shim: JoinHandle<io::Result<ShimExit>>,
         shutdown: Option<oneshot::Sender<()>>,
     }
 
@@ -625,7 +700,7 @@ threading.Thread(target=_burst, daemon=True).start()
         firecracker: std::path::PathBuf,
         stop_grace: Duration,
     ) -> Running {
-        let runtime = HostRuntimePaths::in_dir(directory.path().join("r"));
+        let runtime = HostRuntimePaths::in_dir(directory.path().join("vm/r/one"));
         fs::create_dir_all(&runtime.dir).unwrap();
         fs::write(&runtime.config, "{}").unwrap();
         let (shutdown, requested) = oneshot::channel::<()>();
@@ -702,12 +777,12 @@ threading.Thread(target=_burst, daemon=True).start()
             shim,
             ..
         } = running;
-        let status = tokio::time::timeout(Duration::from_secs(10), shim)
+        let exit = tokio::time::timeout(Duration::from_secs(10), shim)
             .await
             .expect("shim did not return")
             .unwrap()
             .unwrap();
-        (_directory, runtime, status)
+        (_directory, runtime, exit.status)
     }
 
     fn fake_pid(runtime: &HostRuntimePaths) -> u32 {
@@ -726,10 +801,16 @@ threading.Thread(target=_burst, daemon=True).start()
         );
         let mut client = connect(&running.runtime.shim_socket).await;
 
-        let Some(ShimEvent::Hello { version, vmm_pid }) = next_event(&mut client).await else {
+        let Some(ShimEvent::Hello {
+            version,
+            vmm_pid,
+            vm_id,
+        }) = next_event(&mut client).await
+        else {
             panic!("the first frame must be Hello");
         };
         assert_eq!(version, PROTOCOL_VERSION);
+        assert!(vm_id.is_some(), "the shim must name its VM");
         // The fake records its pid before it prints anything.
         output_until(&mut client, "booted").await;
         assert_eq!(vmm_pid, fake_pid(&running.runtime));
@@ -928,6 +1009,118 @@ threading.Thread(target=_burst, daemon=True).start()
         running.shutdown.take().unwrap().send(()).unwrap();
         let (_directory, _, status) = finish(running).await;
         assert!(status.clean());
+    }
+
+    /// Like `finish`, but keeps the whole `ShimExit`; the temp directory is
+    /// returned so `exit.json` is still there to read.
+    async fn finish_exit(running: Running) -> (tempfile::TempDir, ShimExit) {
+        let Running {
+            _directory, shim, ..
+        } = running;
+        let exit = tokio::time::timeout(Duration::from_secs(10), shim)
+            .await
+            .expect("shim did not return")
+            .unwrap()
+            .unwrap();
+        (_directory, exit)
+    }
+
+    fn recorded_stop_request(runtime: &HostRuntimePaths) -> bool {
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&runtime.exit_status).unwrap()).unwrap();
+        record["stop_requested"].as_bool().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_terminate_request_is_recorded_as_a_requested_stop() {
+        let running = launch(
+            &format!("{HONOR_SIGTERM}{SERVE_LOOP}"),
+            Duration::from_secs(5),
+        );
+        let runtime = running.runtime.clone();
+        let mut client = connect(&runtime.shim_socket).await;
+        output_until(&mut client, "booted").await;
+
+        write_request(&mut client, &ShimRequest::Terminate)
+            .await
+            .unwrap();
+        let (_directory, exit) = finish_exit(running).await;
+
+        assert!(exit.stop_requested);
+        assert!(recorded_stop_request(&runtime));
+    }
+
+    #[tokio::test]
+    async fn shutdown_counts_as_a_requested_stop() {
+        let mut running = launch(SERVE_LOOP, Duration::from_secs(5));
+        let runtime = running.runtime.clone();
+        let mut client = connect(&runtime.shim_socket).await;
+        output_until(&mut client, "booted").await;
+
+        running.shutdown.take().unwrap().send(()).unwrap();
+        let (_directory, exit) = finish_exit(running).await;
+
+        // Killed by the SIGTERM it did not handle, as real Firecracker is:
+        // not a clean exit, but one that was asked for.
+        assert_eq!(exit.status.signal, Some(libc::SIGTERM));
+        assert!(exit.stop_requested);
+        assert!(recorded_stop_request(&runtime));
+    }
+
+    #[tokio::test]
+    async fn a_guest_initiated_exit_is_not_a_requested_stop() {
+        let running = launch("time.sleep(0.2)\nsys.exit(0)\n", Duration::from_secs(5));
+        let runtime = running.runtime.clone();
+        let (_directory, exit) = finish_exit(running).await;
+
+        assert!(exit.status.clean());
+        assert!(!exit.stop_requested);
+        assert!(!recorded_stop_request(&runtime));
+    }
+
+    #[tokio::test]
+    async fn a_second_shim_for_the_same_vm_is_refused() {
+        let first = launch(
+            &format!("{HONOR_SIGTERM}{SERVE_LOOP}"),
+            Duration::from_secs(5),
+        );
+        let mut client = connect(&first.runtime.shim_socket).await;
+        output_until(&mut client, "booted").await;
+
+        // Same VM directory, new runtime directory: what a retried start
+        // after a lost record would look like.
+        let second_runtime =
+            HostRuntimePaths::in_dir(first.runtime.dir.parent().unwrap().join("two"));
+        fs::create_dir_all(&second_runtime.dir).unwrap();
+        fs::write(&second_runtime.config, "{}").unwrap();
+        let firecracker = first
+            .runtime
+            .dir
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .join("fake-firecracker");
+        let second = serve(
+            ShimConfig {
+                vm_id: Uuid::new_v4(),
+                runtime: second_runtime.clone(),
+                firecracker,
+                enable_pci: false,
+                stop_grace: Duration::from_secs(5),
+            },
+            std::future::pending(),
+        )
+        .await;
+
+        assert!(second.is_err());
+        let reason = fs::read_to_string(&second_runtime.shim_error).unwrap();
+        assert!(reason.contains("already running"), "{reason}");
+
+        write_request(&mut client, &ShimRequest::Terminate)
+            .await
+            .unwrap();
+        exited(&mut client).await;
+        finish(first).await;
     }
 
     #[tokio::test]

@@ -88,6 +88,7 @@ Run the common checks:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --document-private-items
 npm ci --prefix firecrab-frontend
 npm run lint --prefix firecrab-frontend
 npm run build --prefix firecrab-frontend
@@ -100,6 +101,14 @@ Run browser E2E checks without guest boot:
 npm ci --prefix firecrab-e2e
 npm run install-browsers --prefix firecrab-e2e
 FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e
+```
+
+Changes to VM start, stop, or the API's lifetime also need the VM lifetime checks (R1–R7), which restart the API on a real host:
+
+```sh
+FIRECRAB_QA_VM_LAUNCHER=systemd scripts/ci-qa-lifetime.sh alpine:3.21   # Linux, from the repository root
+FIRECRAB_MICROMANAGER_HOME="$HOME/Library/Application Support/Firecrab/micromanager" \
+  scripts/ci-qa-macos-e2e.sh lifetime                                # macOS
 ```
 
 For platform scenarios, manual steps, expected results, and cleanup, see the [English TEST guide](public-docs/TEST.md) or [Korean TEST guide](public-docs/TEST.ko.md).

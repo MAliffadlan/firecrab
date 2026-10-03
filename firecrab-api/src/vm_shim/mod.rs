@@ -12,7 +12,7 @@ pub(crate) mod protocol;
 pub(crate) mod server;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -150,6 +150,12 @@ pub(crate) fn run(args: Vec<OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Err(reason) = check_private_dir(&config.runtime.dir) {
+        // Where the API looks for why a start failed.
+        let _ = std::fs::write(&config.runtime.shim_error, &reason);
+        eprintln!("[ERROR] vm-shim: {reason}");
+        return ExitCode::FAILURE;
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -160,8 +166,16 @@ pub(crate) fn run(args: Vec<OsString>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(server::serve(config, terminate_requested())) {
-        Ok(status) if status.clean() => ExitCode::SUCCESS,
+    // SIGTERM is watched from the first poll, before Firecracker exists, so
+    // a service manager stopping the shim early still gets a recorded exit.
+    let outcome = runtime.block_on(async {
+        let terminate = terminate_requested();
+        server::serve(config, terminate).await
+    });
+    match outcome {
+        // A stop that was asked for is a success even though Firecracker died
+        // of the SIGTERM; otherwise every normal stop would fail its unit.
+        Ok(exit) if exit.status.clean() || exit.stop_requested => ExitCode::SUCCESS,
         Ok(_) => ExitCode::FAILURE,
         Err(error) => {
             eprintln!("[ERROR] vm-shim: failed to run Firecracker: {error}");
@@ -170,16 +184,42 @@ pub(crate) fn run(args: Vec<OsString>) -> ExitCode {
     }
 }
 
-/// Resolves when the shim receives SIGTERM (a service manager stopping it,
-/// or the API's parent-death signal).
-async fn terminate_requested() {
-    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-        Ok(mut terminate) => {
-            terminate.recv().await;
-        }
-        Err(error) => {
-            tracing::warn!(%error, "cannot watch for SIGTERM; only a client can stop this VM");
-            std::future::pending::<()>().await;
+/// The runtime directory must be this user's own private directory, not
+/// reached through a symlink. The privileged helper that starts a systemd
+/// unit cannot look inside the API's directories, so the shim, running as
+/// the API's user, checks the directory it was handed before using it.
+fn check_private_dir(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let refuse = |reason: &str| format!("runtime directory {}: {reason}", dir.display());
+    let metadata = std::fs::symlink_metadata(dir).map_err(|error| refuse(&error.to_string()))?;
+    if !metadata.file_type().is_dir() {
+        return Err(refuse("is not a directory (or is a symlink)"));
+    }
+    // SAFETY: geteuid has no failure mode.
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(refuse("is not owned by this user"));
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Err(refuse("must not be accessible to group or others"));
+    }
+    Ok(())
+}
+
+/// Starts watching for SIGTERM (a service manager stopping the shim, or the
+/// API's parent-death signal) immediately, and returns a future that
+/// resolves when one arrives.
+fn terminate_requested() -> impl std::future::Future<Output = ()> {
+    let watcher = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+    async move {
+        match watcher {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot watch for SIGTERM; only a client can stop this VM");
+                std::future::pending::<()>().await;
+            }
         }
     }
 }
@@ -260,5 +300,38 @@ mod tests {
         let mut line = command_args(&config());
         line.push(OsString::from("--surprise"));
         assert!(parse_args(line).is_err());
+    }
+
+    fn private_dir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        directory
+    }
+
+    #[test]
+    fn a_private_runtime_directory_of_this_user_is_accepted() {
+        let directory = private_dir();
+        check_private_dir(directory.path()).unwrap();
+    }
+
+    #[test]
+    fn a_runtime_directory_others_can_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = private_dir();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(check_private_dir(directory.path()).is_err());
+    }
+
+    #[test]
+    fn a_symlinked_runtime_directory_is_refused() {
+        let directory = private_dir();
+        let real = directory.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(check_private_dir(&link).is_err());
     }
 }

@@ -29,6 +29,15 @@ struct Vm {
     shim: Child,
 }
 
+impl Drop for Vm {
+    // A failed assertion must not leave a shim holding the test harness's
+    // output pipes open; its Firecracker follows it (parent-death signal).
+    fn drop(&mut self) {
+        let _ = self.shim.kill();
+        let _ = self.shim.wait();
+    }
+}
+
 fn write_executable(path: &Path, body: &str) {
     let temporary = path.with_extension("tmp");
     {
@@ -41,12 +50,19 @@ fn write_executable(path: &Path, body: &str) {
 }
 
 fn start(firecracker_body: &str) -> Vm {
+    start_with_mode(firecracker_body, 0o700)
+}
+
+/// Starts the shim on a runtime directory with `mode` (the API creates
+/// them `0700`).
+fn start_with_mode(firecracker_body: &str, mode: u32) -> Vm {
     // Short path: the shim socket must fit AF_UNIX's ~108-byte limit.
     let directory = tempfile::tempdir_in("/tmp").unwrap();
     let firecracker = directory.path().join("firecracker");
     write_executable(&firecracker, firecracker_body);
-    let runtime = directory.path().join("r");
-    fs::create_dir(&runtime).unwrap();
+    let runtime = directory.path().join("vm/r/one");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(mode)).unwrap();
     fs::write(runtime.join("fc.json"), "{}").unwrap();
     let shim = Command::new(env!("CARGO_BIN_EXE_firecrab-api"))
         .arg("vm-shim")
@@ -159,6 +175,37 @@ fn sigterm_to_the_shim_stops_its_vm_cleanly() {
     assert_eq!(recorded["code"], 0);
 }
 
+/// Real Firecracker does not handle SIGTERM: it dies of it. A stop that was
+/// asked for must still end the shim (and so its systemd unit) successfully.
+#[test]
+fn a_requested_stop_exits_zero_even_when_sigterm_kills_the_vmm() {
+    let mut vm = start(
+        "#!/usr/bin/env python3
+import sys, time
+print(\"booted\", flush=True)
+while True:
+    time.sleep(1)
+",
+    );
+    let mut stream = connect(&vm.runtime);
+    let mut console = String::new();
+    while !console.contains("booted") {
+        let (_, payload) = read_frame(&mut stream);
+        console.push_str(&String::from_utf8_lossy(&payload));
+    }
+
+    // SAFETY: signals our own child.
+    unsafe {
+        libc::kill(vm.shim.id() as i32, libc::SIGTERM);
+    }
+
+    assert!(wait_for(&mut vm.shim).success());
+    let recorded: serde_json::Value =
+        serde_json::from_slice(&fs::read(vm.runtime.join("exit.json")).unwrap()).unwrap();
+    assert_eq!(recorded["signal"], libc::SIGTERM);
+    assert_eq!(recorded["stop_requested"], true);
+}
+
 #[test]
 fn a_vm_that_crashes_makes_the_shim_fail() {
     let mut vm = start("#!/bin/sh\nexit 3\n");
@@ -178,4 +225,14 @@ fn bad_arguments_are_a_usage_error() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(2));
+}
+
+#[test]
+fn a_runtime_directory_others_can_read_is_refused_before_firecracker_starts() {
+    let mut vm = start_with_mode(FAKE_FIRECRACKER, 0o755);
+
+    assert!(!wait_for(&mut vm.shim).success());
+    let reason = fs::read_to_string(vm.runtime.join("shim.err")).unwrap();
+    assert!(reason.contains("runtime directory"), "{reason}");
+    assert!(!vm.runtime.join("console.log").exists());
 }

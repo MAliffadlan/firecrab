@@ -8,6 +8,7 @@ use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use super::protocol::{
     ExitStatus, FrameError, PROTOCOL_VERSION, ShimEvent, ShimRequest, read_event, write_request,
@@ -107,6 +108,14 @@ pub(crate) enum ShimConnectError {
     /// The first frame was not a greeting.
     #[error("VM shim sent {0:?} before its greeting")]
     UnexpectedFrame(ShimEvent),
+    /// The shim runs a different VM than the one asked for.
+    #[error("VM shim runs VM {found}, expected {expected}")]
+    WrongVm {
+        /// The VM the caller meant to reach.
+        expected: Uuid,
+        /// The VM the shim reported.
+        found: Uuid,
+    },
     /// The shim speaks a different protocol version.
     #[error("VM shim speaks protocol version {found}, this API speaks {expected}")]
     Version {
@@ -118,10 +127,12 @@ pub(crate) enum ShimConnectError {
 }
 
 /// Attaches to the shim on `socket`, retrying until it accepts or `timeout`
-/// passes, and checks its greeting. A shim that is still starting is the
-/// normal case right after launch, hence the retry.
+/// passes, and checks its greeting: the protocol version, and that it runs
+/// `vm_id`. A shim that is still starting is the normal case right after
+/// launch, hence the retry.
 pub(crate) async fn connect(
     socket: &Path,
+    vm_id: Uuid,
     timeout: Duration,
 ) -> Result<ShimSession, ShimConnectError> {
     let attach = async {
@@ -142,7 +153,19 @@ pub(crate) async fn connect(
                 timeout,
             })??;
     let vmm_pid = match greeting {
-        Some(ShimEvent::Hello { version, vmm_pid }) if version == PROTOCOL_VERSION => vmm_pid,
+        Some(ShimEvent::Hello {
+            version,
+            vm_id: Some(found),
+            ..
+        }) if version == PROTOCOL_VERSION && found != vm_id => {
+            return Err(ShimConnectError::WrongVm {
+                expected: vm_id,
+                found,
+            });
+        }
+        Some(ShimEvent::Hello {
+            version, vmm_pid, ..
+        }) if version == PROTOCOL_VERSION => vmm_pid,
         Some(ShimEvent::Hello { version, .. }) => {
             return Err(ShimConnectError::Version {
                 found: version,
@@ -228,6 +251,7 @@ threading.Thread(target=_echo, daemon=True).start()
 
     struct Shim {
         _directory: tempfile::TempDir,
+        vm_id: Uuid,
         runtime: HostRuntimePaths,
         _stop: oneshot::Sender<()>,
     }
@@ -235,13 +259,14 @@ threading.Thread(target=_echo, daemon=True).start()
     fn start_shim(body: &str) -> Shim {
         let directory = short_tempdir();
         let firecracker = fake_firecracker(directory.path(), body);
-        let runtime = HostRuntimePaths::in_dir(directory.path().join("r"));
+        let runtime = HostRuntimePaths::in_dir(directory.path().join("vm/r/one"));
         fs::create_dir_all(&runtime.dir).unwrap();
         fs::write(&runtime.config, "{}").unwrap();
         let (stop, stopped) = oneshot::channel::<()>();
+        let vm_id = Uuid::new_v4();
         tokio::spawn(serve(
             ShimConfig {
-                vm_id: Uuid::new_v4(),
+                vm_id,
                 runtime: runtime.clone(),
                 firecracker,
                 enable_pci: false,
@@ -253,6 +278,7 @@ threading.Thread(target=_echo, daemon=True).start()
         ));
         Shim {
             _directory: directory,
+            vm_id,
             runtime,
             _stop: stop,
         }
@@ -289,9 +315,13 @@ threading.Thread(target=_echo, daemon=True).start()
     #[tokio::test]
     async fn connecting_reports_the_vmm_pid_and_streams_console_output() {
         let shim = start_shim(&format!("{HONOR_SIGTERM}{SERVE_LOOP}"));
-        let mut session = connect(&shim.runtime.shim_socket, Duration::from_secs(5))
-            .await
-            .unwrap();
+        let mut session = connect(
+            &shim.runtime.shim_socket,
+            shim.vm_id,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         assert!(session.vmm_pid > 0);
         output_until(&mut session.events, "booted").await;
         session.control.terminate();
@@ -301,9 +331,13 @@ threading.Thread(target=_echo, daemon=True).start()
     #[tokio::test]
     async fn input_reaches_the_guest_console() {
         let shim = start_shim(&format!("{HONOR_SIGTERM}{ECHO_STDIN}{SERVE_LOOP}"));
-        let mut session = connect(&shim.runtime.shim_socket, Duration::from_secs(5))
-            .await
-            .unwrap();
+        let mut session = connect(
+            &shim.runtime.shim_socket,
+            shim.vm_id,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         output_until(&mut session.events, "booted").await;
 
         session.control.input(b"hello shim\n").await;
@@ -316,9 +350,13 @@ threading.Thread(target=_echo, daemon=True).start()
     #[tokio::test]
     async fn terminate_yields_a_clean_exit_and_then_the_session_ends() {
         let shim = start_shim(&format!("{HONOR_SIGTERM}{SERVE_LOOP}"));
-        let mut session = connect(&shim.runtime.shim_socket, Duration::from_secs(5))
-            .await
-            .unwrap();
+        let mut session = connect(
+            &shim.runtime.shim_socket,
+            shim.vm_id,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         output_until(&mut session.events, "booted").await;
 
         session.control.terminate();
@@ -334,9 +372,13 @@ threading.Thread(target=_echo, daemon=True).start()
         let shim = start_shim(&format!(
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n{SERVE_LOOP}"
         ));
-        let mut session = connect(&shim.runtime.shim_socket, Duration::from_secs(5))
-            .await
-            .unwrap();
+        let mut session = connect(
+            &shim.runtime.shim_socket,
+            shim.vm_id,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         output_until(&mut session.events, "booted").await;
 
         session.control.kill();
@@ -351,9 +393,13 @@ threading.Thread(target=_echo, daemon=True).start()
     #[tokio::test]
     async fn input_larger_than_a_frame_leaves_stop_working() {
         let shim = start_shim(&format!("{HONOR_SIGTERM}{SERVE_LOOP}"));
-        let mut session = connect(&shim.runtime.shim_socket, Duration::from_secs(5))
-            .await
-            .unwrap();
+        let mut session = connect(
+            &shim.runtime.shim_socket,
+            shim.vm_id,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         output_until(&mut session.events, "booted").await;
 
         let paste = vec![b'a'; crate::vm_shim::protocol::MAX_FRAME_LEN * 2];
@@ -371,9 +417,13 @@ threading.Thread(target=_echo, daemon=True).start()
     #[tokio::test]
     async fn input_after_the_vm_exited_is_silently_dropped() {
         let shim = start_shim(&format!("{HONOR_SIGTERM}{SERVE_LOOP}"));
-        let mut session = connect(&shim.runtime.shim_socket, Duration::from_secs(5))
-            .await
-            .unwrap();
+        let mut session = connect(
+            &shim.runtime.shim_socket,
+            shim.vm_id,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         output_until(&mut session.events, "booted").await;
         session.control.terminate();
         exit_of(&mut session.events).await;
@@ -397,6 +447,7 @@ threading.Thread(target=_echo, daemon=True).start()
                 &ShimEvent::Hello {
                     version: PROTOCOL_VERSION,
                     vmm_pid: 7,
+                    vm_id: None,
                 },
             )
             .await
@@ -404,13 +455,46 @@ threading.Thread(target=_echo, daemon=True).start()
             // dropped: the connection closes with no Exited frame
         });
 
-        let mut session = connect(&socket, Duration::from_secs(5)).await.unwrap();
+        let mut session = connect(&socket, Uuid::new_v4(), Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(session.vmm_pid, 7);
         assert!(matches!(
             next(&mut session.events).await,
             Some(SessionEvent::Lost)
         ));
         assert!(next(&mut session.events).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_greeting_for_another_vm_is_refused() {
+        let directory = short_tempdir();
+        let socket = directory.path().join("shim.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let other = Uuid::new_v4();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            write_event(
+                &mut stream,
+                &ShimEvent::Hello {
+                    version: PROTOCOL_VERSION,
+                    vmm_pid: 7,
+                    vm_id: Some(other),
+                },
+            )
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let expected = Uuid::new_v4();
+        let error = connect(&socket, expected, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ShimConnectError::WrongVm { found, .. } if found == other
+        ));
     }
 
     #[tokio::test]
@@ -425,6 +509,7 @@ threading.Thread(target=_echo, daemon=True).start()
                 &ShimEvent::Hello {
                     version: PROTOCOL_VERSION + 1,
                     vmm_pid: 7,
+                    vm_id: None,
                 },
             )
             .await
@@ -432,7 +517,9 @@ threading.Thread(target=_echo, daemon=True).start()
             tokio::time::sleep(Duration::from_secs(5)).await;
         });
 
-        let error = connect(&socket, Duration::from_secs(5)).await.unwrap_err();
+        let error = connect(&socket, Uuid::new_v4(), Duration::from_secs(5))
+            .await
+            .unwrap_err();
         assert!(matches!(
             error,
             ShimConnectError::Version { found, .. } if found == PROTOCOL_VERSION + 1
@@ -444,7 +531,7 @@ threading.Thread(target=_echo, daemon=True).start()
         let directory = short_tempdir();
         let socket = directory.path().join("shim.sock");
         let started = std::time::Instant::now();
-        let error = connect(&socket, Duration::from_millis(200))
+        let error = connect(&socket, Uuid::new_v4(), Duration::from_millis(200))
             .await
             .unwrap_err();
         assert!(matches!(error, ShimConnectError::Timeout { .. }));

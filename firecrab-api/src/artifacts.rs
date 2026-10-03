@@ -60,6 +60,9 @@ pub struct HostRuntimePaths {
     /// shim's stderr only reaches the journal, and this is what the start
     /// error shows the user.
     pub shim_error: PathBuf,
+    /// Lock the shim holds for its whole life, one per VM (not per start):
+    /// it keeps a second shim from running Firecracker on the same disk.
+    pub vm_lock: PathBuf,
 }
 
 impl HostRuntimePaths {
@@ -74,6 +77,11 @@ impl HostRuntimePaths {
             shim_socket: dir.join("shim.sock"),
             exit_status: dir.join("exit.json"),
             shim_error: dir.join("shim.err"),
+            // `<vm>/r/<runtime>/` → `<vm>/vm.lock`, shared by every start.
+            vm_lock: dir
+                .parent()
+                .and_then(Path::parent)
+                .map_or_else(|| dir.join("vm.lock"), |vm| vm.join("vm.lock")),
             dir,
         }
     }
@@ -190,6 +198,7 @@ mod tests {
         assert_eq!(runtime.shim_socket, dir.join("shim.sock"));
         assert_eq!(runtime.exit_status, dir.join("exit.json"));
         assert_eq!(runtime.shim_error, dir.join("shim.err"));
+        assert_eq!(runtime.vm_lock, paths.dir.join("vm.lock"));
     }
 
     #[test]
