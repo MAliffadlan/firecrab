@@ -203,6 +203,7 @@ mod tests {
             pid: 4242,
             exited,
             console: Arc::new(ConsoleBroker::new()),
+            control: crate::vm_shim::client::ShimControl::for_test().0,
         };
         (exit_tx, process)
     }
