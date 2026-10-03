@@ -86,9 +86,22 @@ pub(crate) async fn serve(
         &runtime.exit_status,
         &runtime.shim_error,
     ] {
-        remove_if_present(stale)?;
+        remove_if_present(stale).inspect_err(|error| {
+            record_startup_error(
+                runtime,
+                &format!("failed to clear {}: {error}", stale.display()),
+            );
+        })?;
     }
-    let log = fs::File::create(&runtime.console_log)?;
+    let log = fs::File::create(&runtime.console_log).inspect_err(|error| {
+        record_startup_error(
+            runtime,
+            &format!(
+                "failed to create {}: {error}",
+                runtime.console_log.display()
+            ),
+        );
+    })?;
     // Firecracker's own diagnostics go straight to the log; its stdout is the
     // guest's ttyS0 and is filtered on the way in.
     let mut child = match spawn_firecracker(&config, log.try_clone()?).await {
@@ -972,6 +985,53 @@ threading.Thread(target=_burst, daemon=True).start()
             .unwrap();
         assert!(result.is_err());
         assert!(!running.runtime.shim_socket.exists());
+    }
+
+    /// Serves a VM whose runtime directory has a directory where `blocked`
+    /// expects a file, so preparing it fails before Firecracker starts.
+    async fn serve_blocked(
+        blocked: fn(&HostRuntimePaths) -> &Path,
+    ) -> (tempfile::TempDir, HostRuntimePaths, bool) {
+        let directory = short_tempdir();
+        let firecracker = fake_firecracker(directory.path(), SERVE_LOOP);
+        let runtime = HostRuntimePaths::in_dir(directory.path().join("vm/r/one"));
+        fs::create_dir_all(&runtime.dir).unwrap();
+        fs::write(&runtime.config, "{}").unwrap();
+        let obstacle = blocked(&runtime).to_owned();
+        fs::create_dir(&obstacle).unwrap();
+        fs::write(obstacle.join("keep"), "").unwrap();
+        let config = ShimConfig {
+            vm_id: Uuid::new_v4(),
+            runtime: runtime.clone(),
+            firecracker,
+            enable_pci: false,
+            stop_grace: Duration::from_secs(5),
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            serve(config, std::future::pending()),
+        )
+        .await
+        .unwrap();
+        (directory, runtime, result.is_err())
+    }
+
+    #[tokio::test]
+    async fn a_console_log_that_cannot_be_created_is_recorded_as_the_start_failure() {
+        let (_directory, runtime, failed) = serve_blocked(|runtime| &runtime.console_log).await;
+
+        assert!(failed);
+        let reason = fs::read_to_string(&runtime.shim_error).unwrap();
+        assert!(reason.contains("console.log"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_stale_file_that_cannot_be_removed_is_recorded_as_the_start_failure() {
+        let (_directory, runtime, failed) = serve_blocked(|runtime| &runtime.exit_status).await;
+
+        assert!(failed);
+        let reason = fs::read_to_string(&runtime.shim_error).unwrap();
+        assert!(reason.contains("exit.json"), "{reason}");
     }
 
     #[tokio::test]
