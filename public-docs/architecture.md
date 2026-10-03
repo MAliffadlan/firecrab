@@ -99,7 +99,7 @@ The installed API also serves the built dashboard. Development uses Vite, proxyi
 | `firecrab-frontend` | VM, image, network, storage, console, and host UI | Browser |
 | `firecrab-cli` | REST/WebSocket client; platform-local service commands | Client/host |
 | `firecrab-api` | VM lifecycle, artifact checks, jobs, SQLite, and console broker | Unprivileged service account |
-| `firecrab-net-helper` | Bridge, TAP, DHCP/DNS, firewall, NAT/DNAT, and Linux update application | Privileged, bounded capabilities |
+| `firecrab-net-helper` | Bridge, TAP, DHCP/DNS, firewall, NAT/DNAT, VM units (`StartVmUnit`/`StopVmUnit`), and Linux update application | Privileged, bounded capabilities |
 | `firecrab-api-types` | Shared REST request/response models | Shared crate |
 | `firecrab-helper-protocol` | Typed envelopes, framing, and protocol version 2 | Shared crate |
 | `firecrab-vm` shim | Owns one Firecracker process; serves its console, stop/kill requests, and exit status on `shim.sock`; writes `console.log` and `exit.json` | One process per running VM, same account as the API (`firecrab-api vm-shim`); a child of the API, or a `firecrab-vm-<id>.service` unit with `FIRECRAB_VM_LAUNCHER=systemd` |
@@ -206,6 +206,7 @@ On Windows, `~` means `%USERPROFILE%`; `FIRECRAB_CONFIG_DIR` overrides the profi
 7. `sudo firecrab update --apply` downloads the host bundle, verifies SHA-256, and stages it under `$DATADIR/updates/<uuid>`. The CLI does not write installation directories or call systemctl.
 8. It sends one `ApplySelfUpdate` request. The helper re-verifies the checksum using its own file descriptor and writes only to installation paths derived from its service units.
 9. The helper replaces binaries/dashboard and restarts both services. Unit files are preserved; rerun `install.sh` when release notes require unit changes. The dashboard update indicator uses the equivalent `GET /api/update` and `POST /api/update` flow.
+   With `FIRECRAB_VM_LAUNCHER=systemd`, running VMs keep running through the update: each shim stays on the previous binary until its VM restarts, and the restarted API re-adopts it, or stops through the helper a shim whose protocol it no longer speaks.
 
 See [CLI](firecrab-cli.md) and [Operations](operations.md) for commands and failure handling.
 
@@ -215,6 +216,7 @@ See [CLI](firecrab-cli.md) and [Operations](operations.md) for commands and fail
 
 ```text
 <storage-root>/vms/<vm-id>/
+  vm.lock
   d/<generation-id>.ext4
   r/<runtime-id>/
     fc.json
@@ -236,6 +238,8 @@ MicroStorage registers an already mounted directory; Firecrab does not partition
 | Shim connections | API memory | Re-attached at startup when the shim still runs |
 | Job progress | API memory | Not recovered after restart |
 | Bridge, TAP, nftables, and dnsmasq state | Linux runtime | Reconciled from desired state |
+
+![VM lifetime: the default and systemd launchers, and how API startup settles each active VM](../assets/architecture/vm-lifetime.en.svg)
 
 By default the shim is the API's child and stops its VM when the API exits.
 With `FIRECRAB_VM_LAUNCHER=systemd`, the helper starts each shim as a transient `firecrab-vm-<id>.service` unit, so VMs keep running across API restarts and upgrades.
@@ -271,6 +275,7 @@ SQLite and artifacts remain the durable source of truth.
 - The HTTP listener defaults to loopback at `127.0.0.1:5523`.
 - Browser mutations must pass origin policy; REST requests have body-size, timeout, and concurrency limits.
 - The API is unprivileged. The helper validates peer UID, protocol version 2, and request fields, and receives bounded Linux capabilities through systemd.
+- With `FIRECRAB_VM_LAUNCHER=systemd`, the helper starts VM units for the API but takes nothing privileged from the request: it derives the unit name from the VM UUID, the uid/gid from the socket peer, and the program from the `firecrab-api` beside it, accepts only root-owned binaries nobody else can change, and runs each unit as the API user in the API's sandbox.
 - Image and VM paths are restricted to configured roots.
 - Firecrab remains a single-host system without built-in multi-host scheduling, HA, or live migration.
 
