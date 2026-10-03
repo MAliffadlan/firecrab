@@ -1,10 +1,12 @@
 <#
 .SYNOPSIS
-Windows E2E: G3 capability gate, fresh install, API QA, and nested guest boot.
+Windows E2E: G3 capability gate, fresh install, G6 service shell, API QA, and
+nested guest boot.
 
 .DESCRIPTION
 Runs on a Windows host whose `firecrab service doctor` reports ready. The gate
-installs microManager with -Cli. The api, nginx, and guest phases run the shared
+installs microManager with -Cli. The shell phase checks `service shell` from
+Windows. The api, nginx, and guest phases run the shared
 Linux QA scripts inside the managed distribution, which is the Firecrab host,
 the same way Linux CI runs them on its own host. The caller purges afterward
 with `firecrab service uninstall --purge`.
@@ -14,7 +16,7 @@ scripts\ci-qa-windows-e2e.ps1 -Phase all -Cli target\debug\firecrab.exe
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet("gate", "api", "nginx", "guest", "all")]
+    [ValidateSet("gate", "shell", "api", "nginx", "guest", "all")]
     [string]$Phase = "all",
     # The Windows CLI under test; the gate installs microManager with it.
     [string]$Cli = "firecrab.exe",
@@ -38,8 +40,8 @@ $qaRoot = "/root/firecrab-qa"
 # socket lives under the storage root, within the Unix socket path limit.
 $storage = "/var/lib/firecrab/q"
 
-function Fail([string]$Message) {
-    [Console]::Error.WriteLine("FAILED G3: $Message")
+function Fail([string]$Message, [string]$Id = "G3") {
+    [Console]::Error.WriteLine("FAILED ${Id}: $Message")
     exit 1
 }
 
@@ -92,6 +94,22 @@ function Invoke-Gate {
     Write-Output "PASS G3 capability, fresh install, service status, and localhost API"
 }
 
+# G6: `service shell` runs a command in the distribution as root, passes each
+# argument through unchanged, and returns the command's exit code. The CLI
+# takes every word after `shell` as the command.
+function Invoke-Shell {
+    $ErrorActionPreference = "Continue"
+    $user = (& $Cli service shell id -un | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $user -ne "root") { Fail "commands run as '$user' (exit $LASTEXITCODE), expected root" G6 }
+    $state = (& $Cli service shell systemctl is-active firecrab-api | Out-String).Trim()
+    if ($state -ne "active") { Fail "firecrab-api is '$state' in $distro, expected active" G6 }
+    $output = ((& $Cli service shell printf '[%s]\n' "it's here" 'a b' '$HOME' | Out-String) -replace "`r", "").TrimEnd([char]10)
+    if ($output -ne "[it's here]`n[a b]`n[`$HOME]") { Fail "arguments arrived as: $output" G6 }
+    & $Cli service shell sh -c 'exit 7' | Out-Null
+    if ($LASTEXITCODE -ne 7) { Fail "a command that exits 7 returned $LASTEXITCODE" G6 }
+    Write-Output "PASS G6 service shell runs as root, keeps arguments, and returns exit codes"
+}
+
 # Copies the checkout's QA scripts into the distribution and installs the few
 # tools they call that the managed guest does not ship.
 function Initialize-Qa {
@@ -137,11 +155,13 @@ exec bash 'scripts/__SCRIPT__' __ARGS__
 $guestReferences = "alpine:3.21 ubuntu:24.04 fedora:42"
 switch ($Phase) {
     "gate" { Invoke-Gate }
+    "shell" { Assert-Api; Invoke-Shell }
     "api" { Assert-Api; Initialize-Qa; Invoke-Qa "ci-qa-api.sh" "" }
     "nginx" { Assert-Api; Initialize-Qa; Invoke-Qa "ci-qa-nginx.sh" "nginx:1.27-alpine" }
     "guest" { Assert-Api; Initialize-Qa; Invoke-Qa "ci-qa-guest.sh" $guestReferences }
     "all" {
         Invoke-Gate
+        Invoke-Shell
         Initialize-Qa
         Invoke-Qa "ci-qa-api.sh" ""
         Invoke-Qa "ci-qa-nginx.sh" "nginx:1.27-alpine"

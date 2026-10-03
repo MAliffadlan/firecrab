@@ -114,6 +114,7 @@ A17 필수 도구: ip nft dnsmasq mkfs.ext4 firecracker sha256sum
 - [ ] **G3 — Windows:** WSL2 중첩 가상화 환경에서 서비스 진단·설치·상태 확인 성공.
 - [ ] **G4 — 전체:** 호스트 API는 200, 대시보드는 HTML 200.
 - [ ] **G5 — 전체:** 없는 경로는 요청 ID를 포함한 JSON 404.
+- [ ] **G6 — macOS/Windows:** `service shell`은 관리 Debian 게스트에서 명령을 root로 실행하고, 각 인자를 그대로 전달하며, 명령의 종료 코드를 돌려준다. 명령 없이 실행하면 root 로그인 셸이 열린다.
 - [ ] **H1 — 업데이트 상태:** 읽기 전용 상태 확인 성공.
 - [ ] **H2 — 호스트 네트워크:** uplink가 있으며 loopback·내부 helper 인터페이스는 선택 목록에 없다.
 - [ ] **U1 — 업데이트 적용(별도 선택 실행):** 적용 후 호스트가 복구되고 API가 200을 반환한다.
@@ -131,6 +132,12 @@ firecrab service status
 firecrab service doctor
 firecrab service install
 firecrab service status
+
+# G6: 네이티브 macOS 또는 Windows 호스트
+firecrab service shell -- id -un                                     # root
+firecrab service shell -- printf '[%s]\n' "it's here" 'a b' '$HOME'   # [it's here] [a b] [$HOME]
+firecrab service shell -- sh -c 'exit 7'; echo $?                    # 7
+firecrab service shell                                               # root 로그인, `exit`로 종료
 ```
 
 ```text
@@ -497,8 +504,8 @@ scripts/ci-qa-nginx.sh: V8a–V8d를 포함한 NGX1–NGX9
 scripts/ci-qa-ssh.sh: 게스트·nginx 실행 중 V8a–V8d
 scripts/ci-qa-guest.sh: I5–I6 V1–V2 V6–V9 V11–V13 N6 C1–C2 C4 X5
 scripts/ci-qa-lifetime.sh: R1–R7 X7, API 호스트의 root 명령 (macOS: management VM SSH)
-scripts/ci-qa-macos-e2e.sh: 새로 설치한 네이티브 Mac의 수동 런타임 검사
-scripts/ci-qa-windows-e2e.ps1: 새로 설치한 네이티브 Windows의 수동 런타임 검사
+scripts/ci-qa-macos-e2e.sh: 새로 설치한 네이티브 Mac의 수동 런타임 검사 (G6 포함)
+scripts/ci-qa-windows-e2e.ps1: 새로 설치한 네이티브 Windows의 수동 런타임 검사 (G6 포함)
 ```
 
 확장 게스트 검사는 첫 OCI 참조에 적용한다.

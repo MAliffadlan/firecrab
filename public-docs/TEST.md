@@ -114,6 +114,7 @@ A17 required tools: ip nft dnsmasq mkfs.ext4 firecracker sha256sum
 - [ ] **G3 — Windows:** service doctor, install, and status succeed with WSL2 nested virtualization.
 - [ ] **G4 — All:** host API returns 200; dashboard returns HTML 200.
 - [ ] **G5 — All:** unknown route returns JSON 404 with a request ID.
+- [ ] **G6 — macOS/Windows:** `service shell` runs a command in the managed Debian guest as root with each argument unchanged and returns its exit code; without a command it opens a root login.
 - [ ] **H1 — Update status:** read-only status check succeeds.
 - [ ] **H2 — Host network:** an uplink is present; loopback and internal helper interfaces are absent from the picker.
 - [ ] **U1 — Update apply (optional separate run):** apply update; host recovers and API returns 200.
@@ -131,6 +132,12 @@ firecrab service status
 firecrab service doctor
 firecrab service install
 firecrab service status
+
+# G6: native macOS or Windows host
+firecrab service shell -- id -un                                     # root
+firecrab service shell -- printf '[%s]\n' "it's here" 'a b' '$HOME'   # [it's here] [a b] [$HOME]
+firecrab service shell -- sh -c 'exit 7'; echo $?                    # 7
+firecrab service shell                                               # root login; `exit` leaves
 ```
 
 ```text
@@ -497,8 +504,8 @@ scripts/ci-qa-nginx.sh: NGX1–NGX9, including V8a–V8d
 scripts/ci-qa-ssh.sh: V8a–V8d from guest and nginx runs
 scripts/ci-qa-guest.sh: I5–I6 V1–V2 V6–V9 V11–V13 N6 C1–C2 C4 X5
 scripts/ci-qa-lifetime.sh: R1–R7 X7, root commands on the API host (macOS: management VM SSH)
-scripts/ci-qa-macos-e2e.sh: native-Mac manual runtime pass after fresh install
-scripts/ci-qa-windows-e2e.ps1: native-Windows manual runtime pass after fresh install
+scripts/ci-qa-macos-e2e.sh: native-Mac manual runtime pass after fresh install, including G6
+scripts/ci-qa-windows-e2e.ps1: native-Windows manual runtime pass after fresh install, including G6
 ```
 
 Expanded guest checks run on the first OCI reference.
