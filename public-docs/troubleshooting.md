@@ -47,7 +47,7 @@ A new group membership needs a new login session.
 
 ## VM keeps running after the API stops
 
-With `FIRECRAB_VM_LAUNCHER=systemd`, each VM runs in a `firecrab-vm-<simple id>.service` unit and survives `firecrab-api` restarts by design.
+Each VM runs in a `firecrab-vm-<simple id>.service` unit and survives `firecrab-api` restarts by design.
 The next API start re-adopts it and logs the outcome.
 
 ```sh

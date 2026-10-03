@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -70,24 +69,10 @@ pub(crate) struct ShimConfig {
     pub stop_grace: Duration,
 }
 
-/// How a shim's VM ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ShimExit {
-    /// Firecracker's exit status.
-    pub status: ExitStatus,
-    /// Whether the end was asked for (`Terminate`, `Kill`, or the shim's own
-    /// shutdown) rather than the guest powering off or the VMM crashing.
-    pub stop_requested: bool,
-}
-
-/// `exit.json`: the exit status plus whether it was asked for, so an API that
-/// was down when the VM ended can tell a requested stop from a crash.
-#[derive(Serialize)]
-struct ExitRecord {
-    #[serde(flatten)]
-    status: ExitStatus,
-    stop_requested: bool,
-}
+/// How a shim's VM ended: written to `exit.json`, so an API that was down
+/// when the VM ended can tell a requested stop from a crash, and sent as the
+/// final `Exited` frame, so an API that was up can too.
+pub(crate) use super::protocol::ExitReport as ShimExit;
 
 /// Runs Firecracker until it exits and serves it on `runtime.shim_socket`.
 ///
@@ -246,7 +231,7 @@ pub(crate) async fn serve(
     if let Err(error) = write_exit_status(&runtime.exit_status, &exit) {
         tracing::warn!(%error, "failed to record the VM exit status");
     }
-    shim.finish(status).await;
+    shim.finish(exit).await;
     let _ = remove_if_present(&runtime.shim_socket);
     let _ = remove_if_present(&runtime.api_socket);
     tracing::info!(vm_id = %config.vm_id, ?exit, "vm shim exiting");
@@ -395,8 +380,8 @@ impl Shim {
 
     /// Offers the exit status to the client and waits briefly for it to be
     /// written, then closes the connection.
-    async fn finish(&mut self, status: ExitStatus) {
-        self.send(ShimEvent::Exited(status));
+    async fn finish(&mut self, exit: ShimExit) {
+        self.send(ShimEvent::Exited(exit));
         if let Some(client) = self.client.take() {
             let Client {
                 events,
@@ -530,12 +515,8 @@ fn bind_private(path: &Path) -> io::Result<UnixListener> {
 }
 
 fn write_exit_status(path: &Path, exit: &ShimExit) -> io::Result<()> {
-    let record = ExitRecord {
-        status: exit.status,
-        stop_requested: exit.stop_requested,
-    };
     let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec(&record)?)?;
+    fs::write(&temporary, serde_json::to_vec(exit)?)?;
     fs::rename(&temporary, path)
 }
 
@@ -761,7 +742,7 @@ threading.Thread(target=_burst, daemon=True).start()
     async fn exited(stream: &mut UnixStream) -> ExitStatus {
         loop {
             match next_event(stream).await {
-                Some(ShimEvent::Exited(status)) => return status,
+                Some(ShimEvent::Exited(exit)) => return exit.status,
                 Some(_) => {}
                 None => panic!("stream ended without an Exited event"),
             }

@@ -47,6 +47,20 @@ impl ExitStatus {
     }
 }
 
+/// How Firecracker ended and whether that end was asked for (`Terminate`,
+/// `Kill`, or the shim's own stop). It is both the `Exited` frame and
+/// `exit.json`; a shim older than `stop_requested` leaves it out of both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExitReport {
+    /// Firecracker's exit status.
+    #[serde(flatten)]
+    pub status: ExitStatus,
+    /// Whether the end was asked for rather than the guest powering off or
+    /// the VMM crashing.
+    #[serde(default)]
+    pub stop_requested: bool,
+}
+
 /// Shim → client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ShimEvent {
@@ -63,7 +77,7 @@ pub(crate) enum ShimEvent {
     /// Raw guest console bytes, including `FIRECRAB_USAGE` lines.
     Output(Vec<u8>),
     /// Firecracker exited; the shim exits after sending this.
-    Exited(ExitStatus),
+    Exited(ExitReport),
 }
 
 /// Client → shim.
@@ -124,8 +138,8 @@ pub(crate) async fn write_event<W: AsyncWrite + Unpin>(
             write_frame(writer, HELLO, &payload).await
         }
         ShimEvent::Output(bytes) => write_frame(writer, OUTPUT, bytes).await,
-        ShimEvent::Exited(status) => {
-            write_frame(writer, EXITED, &serde_json::to_vec(status)?).await
+        ShimEvent::Exited(report) => {
+            write_frame(writer, EXITED, &serde_json::to_vec(report)?).await
         }
     }
 }
@@ -258,13 +272,19 @@ mod tests {
             },
             ShimEvent::Output(b"login: ".to_vec()),
             ShimEvent::Output(Vec::new()),
-            ShimEvent::Exited(ExitStatus {
-                code: Some(0),
-                signal: None,
+            ShimEvent::Exited(ExitReport {
+                status: ExitStatus {
+                    code: Some(0),
+                    signal: None,
+                },
+                stop_requested: false,
             }),
-            ShimEvent::Exited(ExitStatus {
-                code: None,
-                signal: Some(9),
+            ShimEvent::Exited(ExitReport {
+                status: ExitStatus {
+                    code: None,
+                    signal: Some(15),
+                },
+                stop_requested: true,
             }),
         ] {
             assert_eq!(round_trip_event(event.clone()).await, event);

@@ -356,6 +356,7 @@ async fn handle_connection(stream: UnixStream, config: Arc<HelperConfig>) {
         let caller = vm_unit::Peer {
             uid: peer.uid(),
             gid: peer.gid(),
+            pid: peer.pid(),
         };
         let (response, after) = respond_to(envelope, &config, &caller).await;
         let version_rejected = matches!(
@@ -803,6 +804,7 @@ mod tests {
             uid: effective_uid(),
             // SAFETY: getgid has no failure mode.
             gid: unsafe { libc::getgid() },
+            pid: Some(std::process::id() as i32),
         }
     }
 

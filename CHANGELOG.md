@@ -32,9 +32,16 @@ Entries land here as work merges, and move under the next version heading when t
 - API startup settles VMs left active by the previous run from evidence
   (live shim, `exit.json`) instead of marking them all `stopped`, and
   re-applies their networking ([#123]).
-- `FIRECRAB_VM_LAUNCHER=systemd` (opt-in) runs each VM's shim in a
-  `firecrab-vm-<id>.service` unit started by the helper, so VMs survive API
-  restarts and upgrades; the default still stops VMs with the API ([#123]).
+- Each VM's shim runs in its own `firecrab-vm-<id>.service` unit started by
+  the network helper, so VMs survive API restarts and upgrades ([#123]). The
+  child-process launcher and `FIRECRAB_VM_LAUNCHER` are gone; a leftover value
+  is logged and ignored. Running the API from a checkout on Linux now goes
+  through `scripts/dev-net-helper.sh`, which stages both binaries as root.
+- A VM stopped from outside the API (`systemctl stop` of its unit, a host
+  shutdown) is recorded `stopped` rather than `error`; a start right after a
+  stop no longer fails on the previous unit's name; a VM left `stopping` by an
+  API restart is killed if it ignores SIGTERM; and `$` in a VM's paths reaches
+  its unit unexpanded ([#123]).
 
 ### Deprecated
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# QA VM lifetime (public-docs/qa.md R1–R7, X7): the per-VM shim, API restarts
-# with the default and systemd launchers, a crash while the API is down, an
-# interrupted start, and unit cleanup.
+# QA VM lifetime (public-docs/qa.md R1–R7, X7): each VM's shim in its own
+# systemd unit, a stop from outside the API, a quick restart, an API restart, a
+# crash while the API is down, an interrupted start, and unit cleanup.
 #
 # Usage: scripts/ci-qa-lifetime.sh [OCI reference]   (default alpine:3.21)
 #
@@ -11,9 +11,6 @@
 # Root commands on the API host run through sudo on Linux, or as root on the
 # management VM over SSH when FIRECRAB_QA_MANAGER_HOST and
 # FIRECRAB_QA_MANAGER_KEY are set (macOS; ci-qa-macos-e2e.sh sets them).
-# FIRECRAB_QA_VM_LAUNCHER=systemd|process switches the API's launcher in its
-# environment file for this run and restores the file afterwards; unset, the
-# run uses whatever the API already has.
 set -euo pipefail
 
 API=${FIRECRAB_API:-http://127.0.0.1:5523}
@@ -21,7 +18,6 @@ API=${API%/}
 REFERENCE=${1:-alpine:3.21}
 WAIT_FACTOR=${FIRECRAB_QA_WAIT_FACTOR:-1}
 SUBNET=${FIRECRAB_QA_LIFETIME_SUBNET:-172.219.0.0/24}
-WANT_LAUNCHER=${FIRECRAB_QA_VM_LAUNCHER:-}
 
 pass() { printf 'PASS %s\n' "$1"; }
 warning() { printf 'WARNING %s: %s\n' "$1" "$2"; }
@@ -79,9 +75,6 @@ vmm_pid() { host "pgrep -f '[f]irecracker --api-sock .*/$SIMPLE/' || true"; }
 runtime_dir() {
     host "tr '\\0' '\\n' < /proc/$1/cmdline | sed -n '/^--runtime-dir\$/{n;p;}'"
 }
-launcher() {
-    host "tr '\\0' '\\n' < /proc/\$(systemctl show -p MainPID --value firecrab-api)/environ | sed -n 's/^FIRECRAB_VM_LAUNCHER=//p'"
-}
 
 json_field() {
     python3 -c 'import json,sys; d=json.load(sys.stdin); v=d.get(sys.argv[1]); print("" if v is None else str(v).lower() if isinstance(v, bool) else v)' "$1"
@@ -113,15 +106,6 @@ installed_alias() {
 NET=
 VM=
 IMPORTED=
-ENV_FILE=
-ENV_SAVED=
-# Puts the API's environment file back as it was (absent if it was absent).
-restore_launcher() {
-    [ -n "${ENV_SAVED:-}" ] || return 0
-    host "if [ -e '$ENV_SAVED' ]; then mv '$ENV_SAVED' '$ENV_FILE'; else rm -f '$ENV_FILE'; fi; systemctl restart firecrab-api"
-    ENV_SAVED=
-    api_ready
-}
 cleanup() {
     if [ -n "${VM:-}" ]; then
         curl -sS -o /dev/null --max-time 120 -X POST "$API/api/vms/$VM/stop" || true
@@ -133,22 +117,11 @@ cleanup() {
     if [ -n "${IMPORTED:-}" ]; then
         curl -sS -o /dev/null --max-time 60 -X DELETE "$API/api/images/$IMPORTED" || true
     fi
-    restore_launcher || true
 }
 trap cleanup EXIT
 
-if [ -n "$WANT_LAUNCHER" ]; then
-    ENV_FILE=$(host "systemctl show -p EnvironmentFiles --value firecrab-api" | awk 'NR == 1 { print $1 }')
-    [ -n "$ENV_FILE" ] || fail R3 "firecrab-api has no environment file to set FIRECRAB_VM_LAUNCHER in"
-    ENV_SAVED="$ENV_FILE.qa-lifetime-$$"
-    host "if [ -e '$ENV_FILE' ]; then cp -p '$ENV_FILE' '$ENV_SAVED'; fi
-        { grep -v '^FIRECRAB_VM_LAUNCHER=' '$ENV_FILE' 2>/dev/null || true; echo 'FIRECRAB_VM_LAUNCHER=$WANT_LAUNCHER'; } > '$ENV_FILE.new-$$'
-        mv '$ENV_FILE.new-$$' '$ENV_FILE'; systemctl restart firecrab-api"
-    api_ready || fail R3 "API did not come back after setting FIRECRAB_VM_LAUNCHER=$WANT_LAUNCHER"
-fi
-LAUNCHER=$(launcher)
 TEMPLATE=$(installed_alias)
-printf 'VM lifetime: template=%s launcher=%s api=%s\n' "$TEMPLATE" "${LAUNCHER:-process}" "$API"
+printf 'VM lifetime: template=%s api=%s\n' "$TEMPLATE" "$API"
 
 NET=$(curl -fsS -X POST "$API/api/micro-networks" \
     -H 'content-type: application/json' \
@@ -165,7 +138,8 @@ UNIT="firecrab-vm-$SIMPLE.service"
 start_vm
 [ "$(settled_state)" = running ] || fail R1 "VM did not reach running"
 
-# R1: Firecracker runs under this VM's shim.
+# R1: Firecracker runs under this VM's shim, in the VM's own unit, owned by
+# PID 1 and run as the API user.
 SHIM=$(shim_pid)
 VMM=$(vmm_pid)
 [ -n "$SHIM" ] || fail R1 "no shim for $VM"
@@ -173,68 +147,69 @@ VMM=$(vmm_pid)
 [ "$(host "ps -o ppid= -p $VMM" | tr -d ' ')" = "$SHIM" ] || fail R1 "Firecracker $VMM is not a child of shim $SHIM"
 RUNTIME=$(runtime_dir "$SHIM")
 host "test -S '$RUNTIME/shim.sock' && test -f '$RUNTIME/console.log'" || fail R1 "runtime $RUNTIME lacks shim.sock or console.log"
-pass "R1 shim $SHIM owns Firecracker $VMM"
+[ "$(host "systemctl is-active $UNIT" || true)" = active ] || fail R1 "$UNIT is not active"
+[ "$(host "ps -o ppid= -p $SHIM" | tr -d ' ')" = 1 ] || fail R1 "shim $SHIM is not a child of PID 1"
+api_user=$(host "systemctl show -p User --value firecrab-api")
+[ "$(host "ps -o user= -p $SHIM" | tr -d ' ')" = "${api_user:-root}" ] || fail R1 "shim does not run as ${api_user:-root}"
+pass "R1 shim $SHIM owns Firecracker $VMM in $UNIT, parent PID 1, user ${api_user:-root}"
 
-if [ "$LAUNCHER" != systemd ]; then
-    # R2: the default launcher stops VMs with the API, and startup records the
-    # requested stop from exit.json.
-    host "systemctl restart firecrab-api"
-    api_ready || fail R2 "API did not come back"
-    [ "$(settled_state)" = stopped ] || fail R2 "VM is $(vm_state) after an API restart, expected stopped"
-    host "grep -q '\"stop_requested\":true' '$RUNTIME/exit.json'" || fail R2 "exit.json does not record the requested stop"
-    pass "R2 API restart stopped the VM and recorded stopped"
-    for item in R3 R4 R5 R6; do
-        warning "$item" "needs FIRECRAB_VM_LAUNCHER=systemd (set FIRECRAB_QA_VM_LAUNCHER=systemd)"
-    done
+# R2: a stop from outside the API (`systemctl stop`, as at host shutdown)
+# records stopped, whatever signal ended Firecracker.
+host "systemctl stop $UNIT"
+[ "$(settled_state)" = stopped ] || fail R2 "VM is $(vm_state) after systemctl stop, expected stopped"
+host "grep -q '\"stop_requested\":true' '$RUNTIME/exit.json'" || fail R2 "exit.json does not record the requested stop"
+host "! ip link show $TAP >/dev/null 2>&1" || fail R2 "$TAP is still present"
+pass "R2 systemctl stop recorded stopped and removed $TAP"
+
+# R3: a start right after a stop reuses the unit name without waiting for the
+# previous unit to be collected.
+start_vm
+[ "$(settled_state)" = running ] || fail R3 "VM did not reach running again"
+curl -fsS -o /dev/null --max-time 120 -X POST "$API/api/vms/$VM/stop"
+start_vm
+[ "$(settled_state)" = running ] || fail R3 "VM is $(vm_state) after a stop and an immediate start, expected running"
+SHIM=$(shim_pid)
+VMM=$(vmm_pid)
+pass "R3 a start right after a stop reached running"
+
+# R4: an API restart re-adopts the running VM.
+host "systemctl restart firecrab-api"
+api_ready || fail R4 "API did not come back"
+[ "$(shim_pid)" = "$SHIM" ] || fail R4 "the shim PID changed across the restart"
+[ "$(vmm_pid)" = "$VMM" ] || fail R4 "the Firecracker PID changed across the restart"
+[ "$(settled_state)" = running ] || fail R4 "VM is $(vm_state) after the restart, expected running"
+host "journalctl -u firecrab-api -b --no-pager | grep 'startup reconciliation finished' | tail -1" |
+    grep -Eq 'adopted=[1-9]' || fail R4 "the last reconciliation adopted no VM"
+host "ip -o link show $TAP | grep -q ' master '" || fail R4 "$TAP is not attached to a bridge"
+if command -v firecrab >/dev/null 2>&1; then
+    # Ctrl+] detaches; reaching it proves the console WebSocket attached.
+    printf '\035' | firecrab --api "$API" vm console "$VM" >/dev/null 2>&1 || fail R4 "console did not attach after adoption"
+    pass "R4 API restart kept shim $SHIM, re-adopted the VM, kept $TAP, and console works"
 else
-    warning R2 "default launcher only; this API runs FIRECRAB_VM_LAUNCHER=systemd"
+    pass "R4 API restart kept shim $SHIM, re-adopted the VM, and kept $TAP"
+    warning R4 "firecrab CLI not on PATH; console after adoption not checked"
+fi
 
-    # R3: the shim runs in its own unit, owned by PID 1, as the API user.
-    [ "$(host "systemctl is-active $UNIT" || true)" = active ] || fail R3 "$UNIT is not active"
-    [ "$(host "ps -o ppid= -p $SHIM" | tr -d ' ')" = 1 ] || fail R3 "shim $SHIM is not a child of PID 1"
-    api_user=$(host "systemctl show -p User --value firecrab-api")
-    [ "$(host "ps -o user= -p $SHIM" | tr -d ' ')" = "${api_user:-root}" ] || fail R3 "shim does not run as ${api_user:-root}"
-    pass "R3 $UNIT active, shim parent PID 1, user ${api_user:-root}"
+# R5: a crash while the API is down is recorded from exit.json.
+host "systemctl stop firecrab-api; kill -9 $VMM; sleep 2; systemctl start firecrab-api"
+api_ready || fail R5 "API did not come back"
+[ "$(settled_state)" = error ] || fail R5 "VM is $(vm_state) after a crash, expected error"
+host "! ip link show $TAP >/dev/null 2>&1" || fail R5 "$TAP is still present"
+host "! nft list ruleset 2>/dev/null | grep -q '${VM%%-*}'" || fail R5 "nft rules for $VM are still present"
+pass "R5 crash while the API was down recorded error and removed $TAP"
 
-    # R4: an API restart re-adopts the running VM.
-    host "systemctl restart firecrab-api"
-    api_ready || fail R4 "API did not come back"
-    [ "$(shim_pid)" = "$SHIM" ] || fail R4 "the shim PID changed across the restart"
-    [ "$(vmm_pid)" = "$VMM" ] || fail R4 "the Firecracker PID changed across the restart"
-    [ "$(settled_state)" = running ] || fail R4 "VM is $(vm_state) after the restart, expected running"
-    host "journalctl -u firecrab-api -b --no-pager | grep 'startup reconciliation finished' | tail -1" |
-        grep -Eq 'adopted=[1-9]' || fail R4 "the last reconciliation adopted no VM"
-    host "ip -o link show $TAP | grep -q ' master '" || fail R4 "$TAP is not attached to a bridge"
-    if command -v firecrab >/dev/null 2>&1; then
-        # Ctrl+] detaches; reaching it proves the console WebSocket attached.
-        printf '\035' | firecrab --api "$API" vm console "$VM" >/dev/null 2>&1 || fail R4 "console did not attach after adoption"
-        pass "R4 API restart kept shim $SHIM, re-adopted the VM, kept $TAP, and console works"
-    else
-        pass "R4 API restart kept shim $SHIM, re-adopted the VM, and kept $TAP"
-        warning R4 "firecrab CLI not on PATH; console after adoption not checked"
-    fi
-
-    # R5: a crash while the API is down is recorded from exit.json.
-    host "systemctl stop firecrab-api; kill -9 $VMM; sleep 2; systemctl start firecrab-api"
-    api_ready || fail R5 "API did not come back"
-    [ "$(settled_state)" = error ] || fail R5 "VM is $(vm_state) after a crash, expected error"
-    host "! ip link show $TAP >/dev/null 2>&1" || fail R5 "$TAP is still present"
-    host "! nft list ruleset 2>/dev/null | grep -q '${VM%%-*}'" || fail R5 "nft rules for $VM are still present"
-    pass "R5 crash while the API was down recorded error and removed $TAP"
-
-    # R6: a start the restart cuts short is killed and recorded as an error.
-    start_vm
-    host "for i in \$(seq 1 200); do pgrep -f '[v]m-shim --vm-id $VM' >/dev/null && break; sleep 0.05; done; systemctl restart firecrab-api"
-    api_ready || fail R6 "API did not come back"
-    state=$(settled_state)
-    if [ "$state" = running ]; then
-        warning R6 "the VM reached running before the restart; the interrupted start was not exercised"
-    else
-        [ "$state" = error ] || fail R6 "VM is $state after an interrupted start, expected error"
-        sleep 2
-        [ "$(host "systemctl is-active $UNIT" || true)" != active ] || fail R6 "$UNIT still active"
-        pass "R6 interrupted start recorded error and left no unit"
-    fi
+# R6: a start the restart cuts short is killed and recorded as an error.
+start_vm
+host "for i in \$(seq 1 200); do pgrep -f '[v]m-shim --vm-id $VM' >/dev/null && break; sleep 0.05; done; systemctl restart firecrab-api"
+api_ready || fail R6 "API did not come back"
+state=$(settled_state)
+if [ "$state" = running ]; then
+    warning R6 "the VM reached running before the restart; the interrupted start was not exercised"
+else
+    [ "$state" = error ] || fail R6 "VM is $state after an interrupted start, expected error"
+    sleep 2
+    [ "$(host "systemctl is-active $UNIT" || true)" != active ] || fail R6 "$UNIT still active"
+    pass "R6 interrupted start recorded error and left no unit"
 fi
 
 # R7: a normal stop records stopped and leaves no failed unit.
@@ -258,5 +233,4 @@ if [ -n "$IMPORTED" ]; then
     curl -fsS -o /dev/null --max-time 60 -X DELETE "$API/api/images/$IMPORTED"
     IMPORTED=
 fi
-restore_launcher || fail X7 "API did not come back after restoring its environment file"
-pass "X7 no unit remains; launcher setting restored"
+pass "X7 no unit remains"

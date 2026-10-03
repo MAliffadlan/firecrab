@@ -6,7 +6,6 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,7 +14,6 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
@@ -23,7 +21,7 @@ use crate::console::ConsoleBroker;
 use crate::model::{MacAddr, VmRecord, VmState};
 use crate::state::{AppState, RuntimeConfig};
 use crate::vm_shim::client::{SessionEvent, ShimConnectError, ShimControl, ShimSession};
-use crate::vm_shim::protocol::ExitStatus;
+use crate::vm_shim::protocol::ExitReport;
 use crate::vm_shim::server::ShimConfig;
 
 /// Delay between readiness probe attempts while waiting for the API socket.
@@ -274,13 +272,6 @@ pub fn console_log_path(runtime: &crate::artifacts::HostRuntimePaths) -> PathBuf
 /// How the API starts a VM's shim (`crate::vm_shim`).
 #[derive(Debug, Clone)]
 pub(crate) enum ShimLauncher {
-    /// Runs `program vm-shim …` as a child process. Until startup
-    /// reconciliation exists (#123), the shim is still tied to the API: the
-    /// handle's drop kills it and the API's own death SIGTERMs it.
-    Process {
-        /// This binary.
-        program: PathBuf,
-    },
     /// Asks the privileged helper to run the shim in its own systemd unit
     /// (`firecrab-vm-<uuid>.service`), owned by PID 1: the VM outlives this
     /// process, and startup reconciliation reattaches to it.
@@ -292,34 +283,23 @@ pub(crate) enum ShimLauncher {
 }
 
 impl ShimLauncher {
-    /// Re-executes this binary. Resolved once at startup: after a
-    /// self-update replaces the file, `/proc/self/exe` names a deleted inode
-    /// while the original path names the new binary, whose shim the
-    /// protocol handshake then accepts or refuses on its version.
-    pub(crate) fn this_binary() -> Self {
-        Self::Process {
-            program: env::current_exe().unwrap_or_else(|_| PathBuf::from("firecrab-api")),
-        }
-    }
-
-    /// The launcher `FIRECRAB_VM_LAUNCHER` asks for: `systemd` runs VMs in
-    /// units through `network`; anything else, including unset, keeps them as
-    /// this process's children.
+    /// Every VM runs in a systemd unit. `FIRECRAB_VM_LAUNCHER` used to choose
+    /// between that and child processes; a leftover value is reported and
+    /// otherwise ignored, so no old setting can tie VMs to the API again.
     pub(crate) fn from_setting(
         setting: Option<&str>,
         network: &crate::network::NetworkClient,
     ) -> Self {
-        match setting.map(str::trim) {
-            Some("systemd") => Self::SystemdUnit(network.clone()),
-            None | Some("") | Some("process") => Self::this_binary(),
-            Some(other) => {
-                tracing::warn!(
-                    value = other,
-                    "unknown FIRECRAB_VM_LAUNCHER; VMs stay children of the API"
-                );
-                Self::this_binary()
-            }
+        if let Some(value) = setting
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "systemd")
+        {
+            tracing::warn!(
+                value,
+                "FIRECRAB_VM_LAUNCHER is no longer used; VMs always run in systemd units"
+            );
         }
+        Self::SystemdUnit(network.clone())
     }
 }
 
@@ -356,21 +336,28 @@ fn is_executable(path: &Path) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VmExit {
     /// Firecracker exited and the shim reported how.
-    Exited(ExitStatus),
+    Exited(ExitReport),
     /// The shim went away without reporting an exit.
     Lost,
 }
 
 impl VmExit {
     fn clean(self) -> bool {
-        matches!(self, VmExit::Exited(status) if status.clean())
+        matches!(self, VmExit::Exited(exit) if exit.status.clean())
+    }
+
+    /// Whether the end was asked for, through the API or not (`systemctl
+    /// stop` of the unit, a host shutdown).
+    fn requested(self) -> bool {
+        matches!(self, VmExit::Exited(exit) if exit.stop_requested)
     }
 }
 
 /// A running shim this API launched.
 #[derive(Debug)]
+// Only the test-only `Task` variant is small.
+#[cfg_attr(test, allow(clippy::large_enum_variant))]
 enum ShimHandle {
-    Process(Child),
     /// A shim in a systemd unit. It is not this process's child, so its end is
     /// observed through the files it leaves behind.
     Unit {
@@ -386,9 +373,6 @@ impl ShimHandle {
     /// Resolves once the shim itself has exited. Awaited at most once.
     async fn wait(&mut self) {
         match self {
-            ShimHandle::Process(child) => {
-                let _ = child.wait().await;
-            }
             ShimHandle::Unit { runtime, .. } => {
                 // The shim writes `exit.json` when Firecracker exits and
                 // `shim.err` when it cannot start one; either means it is done.
@@ -406,8 +390,8 @@ impl ShimHandle {
 
 impl Drop for ShimHandle {
     fn drop(&mut self) {
-        // A `Process` child is killed by `kill_on_drop`; an in-process shim
-        // has to be cancelled, which drops (and so kills) its Firecracker.
+        // An in-process shim has to be cancelled, which drops (and so kills)
+        // its Firecracker; a unit is stopped through the helper instead.
         #[cfg(test)]
         if let ShimHandle::Task(handle) = self {
             handle.abort();
@@ -495,34 +479,34 @@ pub fn sigkill(pid: u32) {
     }
 }
 
-/// Makes the shim stop its VM if the API that launched it disappears: the
-/// parent-death signal is SIGTERM, which the shim turns into SIGTERM, then
-/// SIGKILL, for Firecracker. Startup reconciliation (#123) has to exist
-/// before a VM may outlive the API; until then, a VM nothing tracks would
-/// keep a TAP, lease, and nft policy that look owned by a dead API.
-///
-/// The parent-PID check handles the tiny race where the API exits between the
-/// fork and the prctl call: a re-parented child then refuses to start rather
-/// than becoming an untracked shim.
-fn terminate_with_parent(command: &mut Command) {
-    // SAFETY: reads this process's PID before the child is forked.
-    let parent_pid = unsafe { libc::getpid() };
-    // SAFETY: `pre_exec` runs the closure only in the child between fork and
-    // exec. The closure uses only Linux process-control syscalls and reports
-    // failure back through `spawn`.
-    unsafe {
-        command.pre_exec(move || {
-            // SAFETY: both libc calls are async-signal-safe process-control
-            // syscalls and this is the only code run in the post-fork child.
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::getppid() != parent_pid {
-                return Err(io::Error::from_raw_os_error(libc::ESRCH));
-            }
-            Ok(())
-        });
+/// Stops a registered VM: SIGTERM through its shim, then SIGKILL through it,
+/// then SIGKILL to Firecracker directly when the shim does not confirm the
+/// exit, waiting up to `grace` after each step for the exit monitor.
+pub(crate) async fn stop_registered(id: Uuid, process: VmProcess, grace: Duration) {
+    let VmProcess {
+        pid,
+        control,
+        mut exited,
+        ..
+    } = process;
+    let mut wait = async || {
+        tokio::time::timeout(grace, exited.wait_for(|done| *done))
+            .await
+            .is_ok_and(|done| done.is_ok())
+    };
+    control.terminate();
+    if wait().await {
+        return;
     }
+    control.kill();
+    if wait().await {
+        return;
+    }
+    // The shim did not confirm the exit — it may be gone or wedged. Kill
+    // Firecracker directly so a VM recorded as stopped is never still running.
+    tracing::error!(vm_id = %id, pid, "vm shim did not confirm the stop; killing Firecracker directly");
+    sigkill(pid);
+    wait().await;
 }
 
 /// Registers the process in the state map and spawns the exit monitor.
@@ -530,7 +514,9 @@ fn terminate_with_parent(command: &mut Command) {
 /// The monitor is the only writer of guest-initiated terminal states: a
 /// clean exit lands on `stopped`, a crash or a lost shim on `error`, and an
 /// exit while the record is `stopping` always lands on `stopped` so the stop
-/// API and the monitor never fight over the result.
+/// API and the monitor never fight over the result. A stop the shim was asked
+/// for from outside the API (`systemctl stop` of the VM's unit, a host
+/// shutdown) also lands on `stopped`, whatever signal ended Firecracker.
 pub fn register_and_watch(state: &AppState, id: Uuid, mut process: FirecrackerProcess) {
     let (exited_tx, exited_rx) = watch::channel(false);
     let pid = process.vmm_pid;
@@ -602,6 +588,7 @@ pub fn register_and_watch(state: &AppState, id: Uuid, mut process: FirecrackerPr
         }
 
         let clean_exit = outcome.clean();
+        let requested = outcome.requested();
         let updated = {
             let mut vms = state
                 .vms
@@ -615,7 +602,7 @@ pub fn register_and_watch(state: &AppState, id: Uuid, mut process: FirecrackerPr
                             VmState::Starting | VmState::Running | VmState::Stopping
                         ) =>
                 {
-                    vm.state = if vm.state == VmState::Stopping || clean_exit {
+                    vm.state = if vm.state == VmState::Stopping || clean_exit || requested {
                         VmState::Stopped
                     } else {
                         VmState::Error
@@ -631,6 +618,7 @@ pub fn register_and_watch(state: &AppState, id: Uuid, mut process: FirecrackerPr
             tracing::info!(
                 vm_id = %id,
                 clean_exit,
+                requested,
                 ?outcome,
                 state = ?record.state,
                 "vm process exited"
@@ -822,42 +810,6 @@ async fn launch_shim(
                 network: network.clone(),
             })
         }
-        ShimLauncher::Process { program } => {
-            let mut command = Command::new(program);
-            command
-                .arg0(crate::vm_shim::PROCESS_NAME)
-                .arg(crate::vm_shim::SUBCOMMAND)
-                .args(crate::vm_shim::command_args(&config))
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .kill_on_drop(true);
-            terminate_with_parent(&mut command);
-            // `execve` of a program that was just written can fail with
-            // `ETXTBSY` while another test's forked child still holds a
-            // write descriptor on it; the installed binary never changes
-            // under a running API, so the retry is test-only.
-            const BUSY_ATTEMPTS: u32 = 8;
-            let mut attempt = 0;
-            loop {
-                match command.spawn() {
-                    Ok(child) => return Ok(ShimHandle::Process(child)),
-                    Err(source)
-                        if cfg!(test)
-                            && source.kind() == io::ErrorKind::ExecutableFileBusy
-                            && attempt < BUSY_ATTEMPTS =>
-                    {
-                        attempt += 1;
-                        tokio::time::sleep(Duration::from_millis(10 * u64::from(attempt))).await;
-                    }
-                    Err(source) => {
-                        return Err(FirecrackerError::Spawn {
-                            program: program.clone(),
-                            source,
-                        });
-                    }
-                }
-            }
-        }
         #[cfg(test)]
         ShimLauncher::InProcess => Ok(ShimHandle::Task(tokio::spawn(
             crate::vm_shim::server::serve(config, std::future::pending()),
@@ -886,7 +838,7 @@ fn spawn_event_pump(
                         .ingest_console(id, &chunk);
                     console.push_output(&chunk);
                 }
-                Some(SessionEvent::Exited(status)) => break VmExit::Exited(status),
+                Some(SessionEvent::Exited(exit)) => break VmExit::Exited(exit),
                 Some(SessionEvent::Lost) | None => break VmExit::Lost,
             }
         };
@@ -1555,24 +1507,22 @@ mod tests {
     }
 
     #[test]
-    fn the_launcher_setting_selects_systemd_units_only_when_asked() {
+    fn every_launcher_setting_runs_vms_in_systemd_units() {
         let network = crate::network::NetworkClient::with_socket_path(PathBuf::from("/x"));
-        assert_matches!(
-            ShimLauncher::from_setting(None, &network),
-            ShimLauncher::Process { .. }
-        );
-        assert_matches!(
-            ShimLauncher::from_setting(Some("process"), &network),
-            ShimLauncher::Process { .. }
-        );
-        assert_matches!(
-            ShimLauncher::from_setting(Some("systemd"), &network),
-            ShimLauncher::SystemdUnit(_)
-        );
-        assert_matches!(
-            ShimLauncher::from_setting(Some("bogus"), &network),
-            ShimLauncher::Process { .. }
-        );
+        // `process` was removed; an old setting must not keep VMs tied to the API.
+        for setting in [
+            None,
+            Some(""),
+            Some("systemd"),
+            Some("process"),
+            Some("bogus"),
+        ] {
+            assert_matches!(
+                ShimLauncher::from_setting(setting, &network),
+                ShimLauncher::SystemdUnit(_),
+                "{setting:?}"
+            );
+        }
     }
 
     #[test]
@@ -1753,59 +1703,6 @@ mod tests {
             stopped_unit(&requests, id),
             "an aborted start must not leave its unit behind"
         );
-    }
-
-    #[test]
-    fn this_binary_launches_the_running_executable() {
-        let ShimLauncher::Process { program } = ShimLauncher::this_binary() else {
-            panic!("this_binary must launch a process");
-        };
-        assert_eq!(program, env::current_exe().unwrap());
-    }
-
-    #[tokio::test]
-    async fn the_process_launcher_runs_the_program_as_a_vm_shim() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = short_tempdir();
-        let argv_file = directory.path().join("argv");
-        // Stands in for this binary: records its arguments and exits the way
-        // a shim that cannot start Firecracker would.
-        let program = directory.path().join("fake-firecrab-api");
-        {
-            let mut file = fs::File::create(&program).unwrap();
-            write!(
-                file,
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 1\n",
-                argv_file.display()
-            )
-            .unwrap();
-            file.sync_all().unwrap();
-        }
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-        let id = Uuid::new_v4();
-        let runtime = runtime_for(&directory.path().join("vms"), id);
-        let mut config = test_config(Path::new("/opt/firecracker"), Duration::from_secs(5));
-        config.shim = ShimLauncher::Process { program };
-
-        let started = std::time::Instant::now();
-        let result = spawn_vm(&config, &runtime, id, true, test_metrics()).await;
-
-        assert_matches!(result, Err(FirecrackerError::ShimExited { .. }));
-        assert!(started.elapsed() < Duration::from_secs(3));
-        let argv: Vec<std::ffi::OsString> = fs::read_to_string(&argv_file)
-            .unwrap()
-            .lines()
-            .map(std::ffi::OsString::from)
-            .collect();
-        assert_eq!(argv[0], crate::vm_shim::SUBCOMMAND);
-        let parsed = crate::vm_shim::parse_args(argv[1..].to_vec()).unwrap();
-        assert_eq!(parsed.vm_id, id);
-        assert_eq!(parsed.runtime, runtime);
-        assert_eq!(parsed.firecracker, Path::new("/opt/firecracker"));
-        assert!(parsed.enable_pci);
-        assert_eq!(parsed.stop_grace, config.stop_grace);
     }
 
     #[tokio::test]

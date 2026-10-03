@@ -20,15 +20,14 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::artifacts::{HostRuntimePaths, VmArtifactPaths};
 use crate::firecracker::{self, FirecrackerProcess};
 use crate::model::{VmRecord, VmState};
 use crate::state::AppState;
-use crate::vm_shim::client::{self, SessionEvent, ShimConnectError, ShimControl, ShimSession};
-use crate::vm_shim::protocol::ExitStatus;
+use crate::vm_shim::client::{self, SessionEvent, ShimConnectError, ShimSession};
+use crate::vm_shim::protocol::ExitReport;
 
 /// How long a shim that accepted the connection has to send its greeting.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -59,20 +58,10 @@ pub(crate) struct ReconcileReport {
     pub orphan_units: Vec<String>,
 }
 
-/// `exit.json` as the shim writes it. `stop_requested` is missing from
-/// records written before it existed.
-#[derive(Debug, Deserialize)]
-struct ExitRecord {
-    #[serde(flatten)]
-    status: ExitStatus,
-    #[serde(default)]
-    stop_requested: bool,
-}
-
 enum Evidence {
     Live(ShimSession),
     Mismatch(ShimConnectError),
-    Exited(ExitRecord),
+    Exited(ExitReport),
     Gone,
 }
 
@@ -97,7 +86,7 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
 
     // Adopted VMs are registered only after the network is re-verified, so
     // an exit monitor's teardown can never run before a TAP re-attach.
-    let mut adopted: Vec<(VmRecord, FirecrackerProcess, ShimControl)> = Vec::new();
+    let mut adopted: Vec<(VmRecord, FirecrackerProcess)> = Vec::new();
     let mut released: Vec<Uuid> = Vec::new();
     for vm in active {
         let runtime = vm.last_runtime_id.map(|runtime_id| {
@@ -117,11 +106,10 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
                 }
                 _ => {
                     let runtime = runtime.as_ref().expect("a live shim has a runtime");
-                    let control = session.control.clone();
                     let process =
                         firecracker::adopt(vm.id, runtime, session, state.process_metrics.clone());
                     report.adopted.push(vm.id);
-                    adopted.push((vm, process, control));
+                    adopted.push((vm, process));
                     continue;
                 }
             },
@@ -182,12 +170,22 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
             report.network_mismatches.push(vm.id);
         }
     }
-    for (vm, process, control) in adopted {
+    for (vm, process) in adopted {
         firecracker::register_and_watch(state, vm.id, process);
-        // The stop the previous run accepted is finished now; the exit
-        // monitor records `stopped` for an exit while `stopping`.
+        // The stop the previous run accepted is finished now, escalating like
+        // the stop API; the exit monitor records `stopped` for an exit while
+        // `stopping`.
         if vm.state == VmState::Stopping {
-            control.terminate();
+            let registered = state
+                .processes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&vm.id)
+                .cloned();
+            if let Some(process) = registered {
+                let grace = state.runtime.stop_grace;
+                tokio::spawn(firecracker::stop_registered(vm.id, process, grace));
+            }
         }
     }
 
@@ -237,7 +235,7 @@ async fn gather(id: Uuid, runtime: &HostRuntimePaths) -> Evidence {
     }
 }
 
-fn read_exit(path: &Path) -> Option<ExitRecord> {
+fn read_exit(path: &Path) -> Option<ExitReport> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes)
         .inspect_err(|error| {
@@ -360,9 +358,13 @@ mod tests {
 
     /// A host whose helper fails `fail_operation`.
     async fn host_failing(fail_operation: Option<&'static str>) -> Host {
+        host_running(&format!("{HONOR_SIGTERM}{SERVE_LOOP}"), fail_operation).await
+    }
+
+    /// A host whose fake Firecracker runs `body`.
+    async fn host_running(body: &str, fail_operation: Option<&'static str>) -> Host {
         let directory = short_tempdir();
-        let firecracker =
-            fake_firecracker(directory.path(), &format!("{HONOR_SIGTERM}{SERVE_LOOP}"));
+        let firecracker = fake_firecracker(directory.path(), body);
         let state = test_state_with_binary(directory.path(), firecracker.clone()).await;
         let socket = directory.path().join("recording-helper.sock");
         let (_helper, helper_log) =
@@ -475,6 +477,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stop_from_outside_the_api_is_recorded_stopped() {
+        // Firecracker dies of the SIGTERM, as a real one does when its unit
+        // is stopped (`systemctl stop`, host shutdown) while the API runs.
+        let host = host_running(SERVE_LOOP, None).await;
+        let (id, runtime) = seed_active(&host, "stopped-by-systemd", VmState::Running);
+        surviving_shim(&host, id, &runtime).await;
+        reconcile(&host.state).await;
+
+        let control = host.state.processes.lock().unwrap()[&id].control.clone();
+        control.terminate();
+
+        wait_for(&host, id, VmState::Stopped).await;
+    }
+
+    #[tokio::test]
     async fn a_stopping_vm_whose_shim_answers_finishes_its_stop() {
         let host = host().await;
         let (id, runtime) = seed_active(&host, "half-stopped", VmState::Stopping);
@@ -483,6 +500,21 @@ mod tests {
         let report = reconcile(&host.state).await;
 
         assert_eq!(report.adopted, vec![id]);
+        wait_for(&host, id, VmState::Stopped).await;
+    }
+
+    #[tokio::test]
+    async fn a_stopping_vm_that_ignores_sigterm_is_killed_to_finish_its_stop() {
+        let host = host_running(
+            &format!("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n{SERVE_LOOP}"),
+            None,
+        )
+        .await;
+        let (id, runtime) = seed_active(&host, "stubborn", VmState::Stopping);
+        surviving_shim(&host, id, &runtime).await;
+
+        reconcile(&host.state).await;
+
         wait_for(&host, id, VmState::Stopped).await;
     }
 

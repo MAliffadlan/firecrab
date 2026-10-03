@@ -448,13 +448,10 @@ jobs:
         # reported as WARNING rather than a false PASS.
         run: scripts/ci-qa-guest.sh alpine:3.21 ubuntu:24.04 fedora:42
 
-      - name: QA VM lifetime (default and systemd launchers)
+      - name: QA VM lifetime
         timeout-minutes: 30
-        # R1–R7 and X7 from public-docs/qa.md. Each run restarts the installed
-        # API and restores its environment file afterwards.
-        run: |
-          FIRECRAB_QA_VM_LAUNCHER=process scripts/ci-qa-lifetime.sh alpine:3.21
-          FIRECRAB_QA_VM_LAUNCHER=systemd scripts/ci-qa-lifetime.sh alpine:3.21
+        # R1–R7 and X7 from public-docs/qa.md; restarts the installed API.
+        run: scripts/ci-qa-lifetime.sh alpine:3.21
 
       - name: Dashboard, MicroNetwork, and create-VM API smoke
         # No guest image here, so no guest boot. Still exercise the
