@@ -168,7 +168,8 @@ start_vm
 # R1: Firecracker runs under this VM's shim.
 SHIM=$(shim_pid)
 VMM=$(vmm_pid)
-[ -n "$SHIM" ] && [ -n "$VMM" ] || fail R1 "no shim ($SHIM) or Firecracker ($VMM) for $VM"
+[ -n "$SHIM" ] || fail R1 "no shim for $VM"
+[ -n "$VMM" ] || fail R1 "no Firecracker for $VM"
 [ "$(host "ps -o ppid= -p $VMM" | tr -d ' ')" = "$SHIM" ] || fail R1 "Firecracker $VMM is not a child of shim $SHIM"
 RUNTIME=$(runtime_dir "$SHIM")
 host "test -S '$RUNTIME/shim.sock' && test -f '$RUNTIME/console.log'" || fail R1 "runtime $RUNTIME lacks shim.sock or console.log"
@@ -198,7 +199,8 @@ else
     # R4: an API restart re-adopts the running VM.
     host "systemctl restart firecrab-api"
     api_ready || fail R4 "API did not come back"
-    [ "$(shim_pid)" = "$SHIM" ] && [ "$(vmm_pid)" = "$VMM" ] || fail R4 "shim or Firecracker PID changed across the restart"
+    [ "$(shim_pid)" = "$SHIM" ] || fail R4 "the shim PID changed across the restart"
+    [ "$(vmm_pid)" = "$VMM" ] || fail R4 "the Firecracker PID changed across the restart"
     [ "$(settled_state)" = running ] || fail R4 "VM is $(vm_state) after the restart, expected running"
     host "journalctl -u firecrab-api -b --no-pager | grep 'startup reconciliation finished' | tail -1" |
         grep -Eq 'adopted=[1-9]' || fail R4 "the last reconciliation adopted no VM"
