@@ -10,6 +10,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use firecrab_helper_protocol::network::HelperFailure;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,6 +28,8 @@ use crate::vm_shim::server::ShimConfig;
 
 /// Delay between readiness probe attempts while waiting for the API socket.
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// How often a unit's runtime directory is checked for the shim's exit.
+const UNIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Failure modes for rendering config, launching, or stopping a VM.
 #[derive(Debug, Error)]
@@ -55,6 +58,9 @@ pub enum FirecrackerError {
         #[source]
         source: io::Error,
     },
+    /// The helper could not start the VM's systemd unit.
+    #[error("the network helper could not start the VM's unit: {0}")]
+    Unit(#[source] crate::network::NetworkError),
     /// Couldn't start the VM's shim process.
     #[error("failed to start the VM shim {program}: {source}")]
     Spawn {
@@ -175,13 +181,13 @@ impl FirecrackerConfig {
     ) -> Self {
         Self {
             boot_source: BootSource {
-                kernel_image_path: kernel_image_path.to_owned(),
-                initrd_path: initrd_path.map(Path::to_owned),
+                kernel_image_path: absolute(kernel_image_path),
+                initrd_path: initrd_path.map(absolute),
                 boot_args: boot_args.to_owned(),
             },
             drives: vec![Drive {
                 drive_id: "rootfs".to_owned(),
-                path_on_host: rootfs_path.to_owned(),
+                path_on_host: absolute(rootfs_path),
                 is_root_device: true,
                 is_read_only: false,
             }],
@@ -200,6 +206,13 @@ impl FirecrackerConfig {
             },
         }
     }
+}
+
+/// `path` against this process's working directory. Storage roots and the
+/// image root may be relative to it, and Firecracker may not share it: a
+/// shim in a systemd unit runs in its runtime directory.
+fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_owned())
 }
 
 /// Renders the VM's Firecracker config into this start's runtime directory.
@@ -268,6 +281,10 @@ pub(crate) enum ShimLauncher {
         /// This binary.
         program: PathBuf,
     },
+    /// Asks the privileged helper to run the shim in its own systemd unit
+    /// (`firecrab-vm-<uuid>.service`), owned by PID 1: the VM outlives this
+    /// process, and startup reconciliation reattaches to it.
+    SystemdUnit(crate::network::NetworkClient),
     /// Runs the shim as a task inside this process. Tests use it because a
     /// test binary cannot exec itself as `vm-shim`.
     #[cfg(test)]
@@ -284,6 +301,55 @@ impl ShimLauncher {
             program: env::current_exe().unwrap_or_else(|_| PathBuf::from("firecrab-api")),
         }
     }
+
+    /// The launcher `FIRECRAB_VM_LAUNCHER` asks for: `systemd` runs VMs in
+    /// units through `network`; anything else, including unset, keeps them as
+    /// this process's children.
+    pub(crate) fn from_setting(
+        setting: Option<&str>,
+        network: &crate::network::NetworkClient,
+    ) -> Self {
+        match setting.map(str::trim) {
+            Some("systemd") => Self::SystemdUnit(network.clone()),
+            None | Some("") | Some("process") => Self::this_binary(),
+            Some(other) => {
+                tracing::warn!(
+                    value = other,
+                    "unknown FIRECRAB_VM_LAUNCHER; VMs stay children of the API"
+                );
+                Self::this_binary()
+            }
+        }
+    }
+}
+
+/// Resolves `binary` the way `execvp` would, so it can be handed to a
+/// process that does not share this one's `PATH` (a systemd unit).
+pub(crate) fn resolve_on_path(
+    binary: &Path,
+    search: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, FirecrackerError> {
+    if binary.is_absolute() {
+        return Ok(binary.to_owned());
+    }
+    let not_found = || FirecrackerError::Spawn {
+        program: binary.to_owned(),
+        source: io::Error::new(io::ErrorKind::NotFound, "not found on PATH"),
+    };
+    if binary.components().count() > 1 {
+        return std::path::absolute(binary).map_err(|_| not_found());
+    }
+    let search = search.ok_or_else(not_found)?;
+    env::split_paths(search)
+        .map(|directory| directory.join(binary))
+        .find(|candidate| is_executable(candidate))
+        .ok_or_else(not_found)
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 /// How a VM's session with its shim ended.
@@ -305,8 +371,15 @@ impl VmExit {
 #[derive(Debug)]
 enum ShimHandle {
     Process(Child),
+    /// A shim in a systemd unit. It is not this process's child, so its end is
+    /// observed through the files it leaves behind.
+    Unit {
+        vm_id: Uuid,
+        runtime: crate::artifacts::HostRuntimePaths,
+        network: crate::network::NetworkClient,
+    },
     #[cfg(test)]
-    Task(tokio::task::JoinHandle<io::Result<ExitStatus>>),
+    Task(tokio::task::JoinHandle<io::Result<crate::vm_shim::server::ShimExit>>),
 }
 
 impl ShimHandle {
@@ -315,6 +388,13 @@ impl ShimHandle {
         match self {
             ShimHandle::Process(child) => {
                 let _ = child.wait().await;
+            }
+            ShimHandle::Unit { runtime, .. } => {
+                // The shim writes `exit.json` when Firecracker exits and
+                // `shim.err` when it cannot start one; either means it is done.
+                while !runtime.exit_status.exists() && !runtime.shim_error.exists() {
+                    tokio::time::sleep(UNIT_POLL_INTERVAL).await;
+                }
             }
             #[cfg(test)]
             ShimHandle::Task(handle) => {
@@ -374,6 +454,9 @@ impl FirecrackerProcess {
         let _ = tokio::time::timeout(grace, exit.wait_for(Option::is_some)).await;
         if let Some(mut shim) = self.shim.take() {
             let _ = tokio::time::timeout(grace, shim.wait()).await;
+            // Dropping a child or task kills it; nothing kills a unit whose
+            // shim is wedged, so it is stopped (a no-op once it has exited).
+            abandon(shim, grace).await;
         }
     }
 }
@@ -601,7 +684,13 @@ pub(crate) async fn spawn_vm(
     // A shim that cannot start Firecracker exits without ever accepting;
     // racing its exit keeps that from costing the whole ready timeout.
     let session = tokio::select! {
-        session = crate::vm_shim::client::connect(&runtime.shim_socket, config.ready_timeout) => session?,
+        session = crate::vm_shim::client::connect(&runtime.shim_socket, id, config.ready_timeout) => match session {
+            Ok(session) => session,
+            Err(error) => {
+                abandon(shim, config.stop_grace).await;
+                return Err(error.into());
+            }
+        },
         () = shim.wait() => {
             let reason = fs::read_to_string(&runtime.shim_error)
                 .ok()
@@ -610,24 +699,13 @@ pub(crate) async fn spawn_vm(
             return Err(FirecrackerError::ShimExited { reason });
         }
     };
-    let ShimSession {
-        vmm_pid,
-        control,
-        events,
-    } = session;
-
-    let console = Arc::new(ConsoleBroker::new());
-    console.attach_control(control.clone());
-    let (exit_tx, exit) = watch::channel(None);
-    spawn_event_pump(id, events, Arc::clone(&console), process_metrics, exit_tx);
-    let process = FirecrackerProcess {
-        shim: Some(shim),
-        vmm_pid,
-        control,
-        console,
-        exit,
-        api_sock: runtime.api_socket.clone(),
-    };
+    let process = attach(
+        id,
+        session,
+        Some(shim),
+        runtime.api_socket.clone(),
+        process_metrics,
+    );
 
     let mut exited = process.exit.clone();
     let ready = tokio::select! {
@@ -641,11 +719,109 @@ pub(crate) async fn spawn_vm(
     Ok(process)
 }
 
+/// Takes over a VM whose shim outlived the API that launched it (startup
+/// reconciliation, #123). This API never launched that shim, so it holds no
+/// handle to it: dropping the result leaves the VM running, and the exit
+/// monitor learns of its end from the session alone.
+pub(crate) fn adopt(
+    id: Uuid,
+    runtime: &crate::artifacts::HostRuntimePaths,
+    session: ShimSession,
+    process_metrics: Arc<Mutex<crate::process_metrics::ProcessMetricsTracker>>,
+) -> FirecrackerProcess {
+    attach(
+        id,
+        session,
+        None,
+        runtime.api_socket.clone(),
+        process_metrics,
+    )
+}
+
+/// Wires a shim session to a console broker and an exit channel.
+fn attach(
+    id: Uuid,
+    session: ShimSession,
+    shim: Option<ShimHandle>,
+    api_sock: PathBuf,
+    process_metrics: Arc<Mutex<crate::process_metrics::ProcessMetricsTracker>>,
+) -> FirecrackerProcess {
+    let ShimSession {
+        vmm_pid,
+        control,
+        events,
+    } = session;
+    let console = Arc::new(ConsoleBroker::new());
+    console.attach_control(control.clone());
+    let (exit_tx, exit) = watch::channel(None);
+    spawn_event_pump(id, events, Arc::clone(&console), process_metrics, exit_tx);
+    FirecrackerProcess {
+        shim,
+        vmm_pid,
+        control,
+        console,
+        exit,
+        api_sock,
+    }
+}
+
+/// Gives up on a shim that never accepted a connection. A child or task is
+/// killed by dropping it; a unit belongs to systemd, so the helper stops it.
+async fn abandon(shim: ShimHandle, stop_grace: Duration) {
+    if let ShimHandle::Unit { vm_id, network, .. } = &shim
+        && let Err(error) = network.stop_vm_unit(*vm_id, stop_grace).await
+    {
+        tracing::warn!(%vm_id, %error, "failed to stop a VM unit that never answered");
+    }
+}
+
 async fn launch_shim(
     launcher: &ShimLauncher,
     config: ShimConfig,
 ) -> Result<ShimHandle, FirecrackerError> {
     match launcher {
+        ShimLauncher::SystemdUnit(network) => {
+            // A unit shares neither this process's working directory nor its
+            // PATH, and the helper only accepts absolute paths.
+            let firecracker = resolve_on_path(&config.firecracker, env::var_os("PATH").as_deref())?;
+            let runtime_dir = std::path::absolute(&config.runtime.dir).map_err(|source| {
+                FirecrackerError::CreateDirectory {
+                    path: config.runtime.dir.clone(),
+                    source,
+                }
+            })?;
+            if let Err(error) = network
+                .start_vm_unit(
+                    config.vm_id,
+                    runtime_dir.clone(),
+                    firecracker,
+                    config.enable_pci,
+                    config.stop_grace,
+                )
+                .await
+            {
+                // Unless the request never left or the helper refused it,
+                // systemd may have started the unit before the answer was
+                // lost; nothing else would ever stop it.
+                if !matches!(
+                    error,
+                    crate::network::NetworkError::Unavailable { .. }
+                        | crate::network::NetworkError::Helper(
+                            HelperFailure::InvalidRequest { .. }
+                        )
+                ) && let Err(stop_error) =
+                    network.stop_vm_unit(config.vm_id, config.stop_grace).await
+                {
+                    tracing::warn!(vm_id = %config.vm_id, error = %stop_error, "failed to stop a VM unit whose start failed");
+                }
+                return Err(FirecrackerError::Unit(error));
+            }
+            Ok(ShimHandle::Unit {
+                vm_id: config.vm_id,
+                runtime: crate::artifacts::HostRuntimePaths::in_dir(runtime_dir),
+                network: network.clone(),
+            })
+        }
         ShimLauncher::Process { program } => {
             let mut command = Command::new(program);
             command
@@ -956,6 +1132,42 @@ mod tests {
     }
 
     #[test]
+    fn config_paths_do_not_depend_on_the_working_directory() {
+        // The default storage root is `data`, relative to the API's working
+        // directory; a shim in a systemd unit runs in its runtime directory.
+        let directory = tempdir().unwrap();
+        let vm = record(1, 512);
+        let runtime = runtime_for(&directory.path().join("vms"), vm.id);
+        let cwd = env::current_dir().unwrap();
+
+        let path = write_config(
+            &runtime,
+            Path::new("data/vms/x/d/disk.ext4"),
+            &vm,
+            Path::new("images/vmlinux"),
+            Some(Path::new("images/initrd")),
+            "console=ttyS0",
+            None,
+        )
+        .unwrap();
+
+        let config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let absolute = |relative: &str| cwd.join(relative).to_str().unwrap().to_owned();
+        assert_eq!(
+            config["boot-source"]["kernel_image_path"],
+            absolute("images/vmlinux")
+        );
+        assert_eq!(
+            config["boot-source"]["initrd_path"],
+            absolute("images/initrd")
+        );
+        assert_eq!(
+            config["drives"][0]["path_on_host"],
+            absolute("data/vms/x/d/disk.ext4")
+        );
+    }
+
+    #[test]
     fn config_wires_boot_source_and_root_drive() {
         let directory = tempdir().unwrap();
         let vms_dir = directory.path().join("vms");
@@ -1253,6 +1465,294 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("no-such-firecracker"), "{message}");
         assert!(message.contains("No such file"), "{message}");
+    }
+
+    /// How the fake unit helper answers `StartVmUnit`.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum UnitHelper {
+        /// Runs the real shim in-process, as systemd would, and answers Ok.
+        StartShims,
+        /// Answers Ok without starting anything: a unit whose shim hangs.
+        Silent,
+        /// Closes the connection without answering, as a helper that dies
+        /// (or a call that times out) after systemd already started the unit.
+        DropAnswer,
+    }
+
+    /// A fake helper for the systemd launcher that records every request.
+    fn spawn_unit_helper(
+        socket: &Path,
+        mode: UnitHelper,
+    ) -> Arc<Mutex<Vec<firecrab_helper_protocol::network::NetworkRequest>>> {
+        use firecrab_helper_protocol::PROTOCOL_VERSION;
+        use firecrab_helper_protocol::framing::{read_frame, write_frame};
+        use firecrab_helper_protocol::network::{
+            NetworkRequest, NetworkRequestEnvelope, NetworkResponseEnvelope,
+        };
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let recorded = Arc::clone(&recorded);
+                tokio::spawn(async move {
+                    while let Ok(envelope) =
+                        read_frame::<_, NetworkRequestEnvelope>(&mut stream).await
+                    {
+                        if let NetworkRequest::StartVmUnit {
+                            vm_id,
+                            runtime_dir,
+                            firecracker,
+                            enable_pci,
+                            stop_grace_ms,
+                        } = &envelope.request
+                            && mode == UnitHelper::StartShims
+                        {
+                            tokio::spawn(crate::vm_shim::server::serve(
+                                ShimConfig {
+                                    vm_id: *vm_id,
+                                    runtime: crate::artifacts::HostRuntimePaths::in_dir(
+                                        runtime_dir.clone(),
+                                    ),
+                                    firecracker: firecracker.clone(),
+                                    enable_pci: *enable_pci,
+                                    stop_grace: Duration::from_millis(*stop_grace_ms),
+                                },
+                                std::future::pending(),
+                            ));
+                        }
+                        recorded.lock().unwrap().push(envelope.request.clone());
+                        if mode == UnitHelper::DropAnswer
+                            && matches!(envelope.request, NetworkRequest::StartVmUnit { .. })
+                        {
+                            return;
+                        }
+                        let response = NetworkResponseEnvelope {
+                            version: PROTOCOL_VERSION,
+                            request_id: envelope.request_id,
+                            result: Ok(()),
+                        };
+                        if write_frame(&mut stream, &response).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        requests
+    }
+
+    fn unit_config(directory: &Path, binary: &Path, ready_timeout: Duration) -> RuntimeConfig {
+        let socket = directory.join("helper.sock");
+        let mut config = test_config(binary, ready_timeout);
+        config.shim =
+            ShimLauncher::SystemdUnit(crate::network::NetworkClient::with_socket_path(socket));
+        config
+    }
+
+    #[test]
+    fn the_launcher_setting_selects_systemd_units_only_when_asked() {
+        let network = crate::network::NetworkClient::with_socket_path(PathBuf::from("/x"));
+        assert_matches!(
+            ShimLauncher::from_setting(None, &network),
+            ShimLauncher::Process { .. }
+        );
+        assert_matches!(
+            ShimLauncher::from_setting(Some("process"), &network),
+            ShimLauncher::Process { .. }
+        );
+        assert_matches!(
+            ShimLauncher::from_setting(Some("systemd"), &network),
+            ShimLauncher::SystemdUnit(_)
+        );
+        assert_matches!(
+            ShimLauncher::from_setting(Some("bogus"), &network),
+            ShimLauncher::Process { .. }
+        );
+    }
+
+    #[test]
+    fn a_bare_firecracker_name_is_resolved_on_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = short_tempdir();
+        let bin = directory.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let firecracker = bin.join("firecracker");
+        fs::write(&firecracker, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&firecracker, fs::Permissions::from_mode(0o755)).unwrap();
+        let search = std::env::join_paths([Path::new("/nonexistent"), bin.as_path()]).unwrap();
+
+        assert_eq!(
+            resolve_on_path(Path::new("firecracker"), Some(&search)).unwrap(),
+            firecracker
+        );
+        assert_eq!(
+            resolve_on_path(Path::new("/opt/firecracker"), Some(&search)).unwrap(),
+            Path::new("/opt/firecracker")
+        );
+        assert!(resolve_on_path(Path::new("no-such-binary"), Some(&search)).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_systemd_launcher_starts_the_vm_through_the_helper() {
+        let directory = short_tempdir();
+        let binary = fake_firecracker(
+            directory.path(),
+            &format!("signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)){SERVE_LOOP}"),
+        );
+        let requests = spawn_unit_helper(
+            &directory.path().join("helper.sock"),
+            UnitHelper::StartShims,
+        );
+        let id = Uuid::new_v4();
+        let runtime = runtime_for(&directory.path().join("vms"), id);
+        fs::write(&runtime.config, "{}").unwrap();
+
+        let config = unit_config(directory.path(), &binary, Duration::from_secs(5));
+        let process = spawn_vm(&config, &runtime, id, false, test_metrics())
+            .await
+            .unwrap();
+
+        let started = requests.lock().unwrap().clone();
+        assert_matches!(
+            started.as_slice(),
+            [firecrab_helper_protocol::network::NetworkRequest::StartVmUnit {
+                vm_id,
+                runtime_dir,
+                firecracker,
+                ..
+            }] if *vm_id == id && runtime_dir.is_absolute() && firecracker == &binary
+        );
+        stop_vm(process, Duration::from_secs(5)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_unit_whose_shim_cannot_start_firecracker_fails_fast_with_the_reason() {
+        let directory = short_tempdir();
+        spawn_unit_helper(
+            &directory.path().join("helper.sock"),
+            UnitHelper::StartShims,
+        );
+        let id = Uuid::new_v4();
+        let runtime = runtime_for(&directory.path().join("vms"), id);
+        fs::write(&runtime.config, "{}").unwrap();
+        let missing = directory.path().join("no-such-firecracker");
+
+        let started = std::time::Instant::now();
+        let error = spawn_vm(
+            &unit_config(directory.path(), &missing, Duration::from_secs(5)),
+            &runtime,
+            id,
+            false,
+            test_metrics(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(error.to_string().contains("no-such-firecracker"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_unit_that_never_answers_is_stopped_through_the_helper() {
+        let directory = short_tempdir();
+        let binary = fake_firecracker(directory.path(), SERVE_LOOP);
+        let requests = spawn_unit_helper(&directory.path().join("helper.sock"), UnitHelper::Silent);
+        let id = Uuid::new_v4();
+        let runtime = runtime_for(&directory.path().join("vms"), id);
+        fs::write(&runtime.config, "{}").unwrap();
+
+        let result = spawn_vm(
+            &unit_config(directory.path(), &binary, Duration::from_millis(300)),
+            &runtime,
+            id,
+            false,
+            test_metrics(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let seen = requests.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|request| matches!(
+                request,
+                firecrab_helper_protocol::network::NetworkRequest::StopVmUnit { vm_id } if *vm_id == id
+            )),
+            "a unit that never accepted must be stopped, got {seen:?}"
+        );
+    }
+
+    fn stopped_unit(
+        requests: &Mutex<Vec<firecrab_helper_protocol::network::NetworkRequest>>,
+        id: Uuid,
+    ) -> bool {
+        requests.lock().unwrap().iter().any(|request| {
+            matches!(
+                request,
+                firecrab_helper_protocol::network::NetworkRequest::StopVmUnit { vm_id } if *vm_id == id
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn a_unit_start_whose_answer_is_lost_is_stopped_through_the_helper() {
+        let directory = short_tempdir();
+        let binary = fake_firecracker(directory.path(), SERVE_LOOP);
+        let requests = spawn_unit_helper(
+            &directory.path().join("helper.sock"),
+            UnitHelper::DropAnswer,
+        );
+        let id = Uuid::new_v4();
+        let runtime = runtime_for(&directory.path().join("vms"), id);
+        fs::write(&runtime.config, "{}").unwrap();
+
+        let result = spawn_vm(
+            &unit_config(directory.path(), &binary, Duration::from_secs(5)),
+            &runtime,
+            id,
+            false,
+            test_metrics(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            stopped_unit(&requests, id),
+            "systemd may have started the unit; it must be stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_unit_that_never_gets_ready_is_stopped_through_the_helper() {
+        let directory = short_tempdir();
+        let binary = fake_firecracker(directory.path(), "time.sleep(60)\n");
+        let requests = spawn_unit_helper(
+            &directory.path().join("helper.sock"),
+            UnitHelper::StartShims,
+        );
+        let id = Uuid::new_v4();
+        let runtime = runtime_for(&directory.path().join("vms"), id);
+        fs::write(&runtime.config, "{}").unwrap();
+
+        let result = spawn_vm(
+            &unit_config(directory.path(), &binary, Duration::from_millis(300)),
+            &runtime,
+            id,
+            false,
+            test_metrics(),
+        )
+        .await;
+
+        assert_matches!(result, Err(FirecrackerError::NotReady { .. }));
+        assert!(
+            stopped_unit(&requests, id),
+            "an aborted start must not leave its unit behind"
+        );
     }
 
     #[test]

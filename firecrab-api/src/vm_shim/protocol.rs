@@ -12,6 +12,7 @@ use std::io;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use uuid::Uuid;
 
 /// Bumped on any incompatible change. An API that reconnects to a shim
 /// started by a different version must refuse it rather than guess.
@@ -55,6 +56,9 @@ pub(crate) enum ShimEvent {
         version: u32,
         /// Firecracker's process id.
         vmm_pid: u32,
+        /// The VM this shim runs. Lets a reattaching API confirm it reached
+        /// the VM it meant to; absent from shims that predate the field.
+        vm_id: Option<Uuid>,
     },
     /// Raw guest console bytes, including `FIRECRAB_USAGE` lines.
     Output(Vec<u8>),
@@ -97,6 +101,8 @@ pub(crate) enum FrameError {
 struct HelloPayload {
     version: u32,
     vmm_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vm_id: Option<Uuid>,
 }
 
 /// Writes one shim → client frame.
@@ -105,10 +111,15 @@ pub(crate) async fn write_event<W: AsyncWrite + Unpin>(
     event: &ShimEvent,
 ) -> Result<(), FrameError> {
     match event {
-        ShimEvent::Hello { version, vmm_pid } => {
+        ShimEvent::Hello {
+            version,
+            vmm_pid,
+            vm_id,
+        } => {
             let payload = serde_json::to_vec(&HelloPayload {
                 version: *version,
                 vmm_pid: *vmm_pid,
+                vm_id: *vm_id,
             })?;
             write_frame(writer, HELLO, &payload).await
         }
@@ -132,6 +143,7 @@ pub(crate) async fn read_event<R: AsyncRead + Unpin>(
             ShimEvent::Hello {
                 version: hello.version,
                 vmm_pid: hello.vmm_pid,
+                vm_id: hello.vm_id,
             }
         }
         OUTPUT => ShimEvent::Output(payload),
@@ -237,6 +249,12 @@ mod tests {
             ShimEvent::Hello {
                 version: PROTOCOL_VERSION,
                 vmm_pid: 4242,
+                vm_id: Some(uuid::Uuid::from_u128(7)),
+            },
+            ShimEvent::Hello {
+                version: PROTOCOL_VERSION,
+                vmm_pid: 4242,
+                vm_id: None,
             },
             ShimEvent::Output(b"login: ".to_vec()),
             ShimEvent::Output(Vec::new()),

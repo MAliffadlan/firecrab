@@ -102,7 +102,7 @@ The installed API also serves the built dashboard. Development uses Vite, proxyi
 | `firecrab-net-helper` | Bridge, TAP, DHCP/DNS, firewall, NAT/DNAT, and Linux update application | Privileged, bounded capabilities |
 | `firecrab-api-types` | Shared REST request/response models | Shared crate |
 | `firecrab-helper-protocol` | Typed envelopes, framing, and protocol version 2 | Shared crate |
-| `firecrab-vm` shim | Owns one Firecracker process; serves its console, stop/kill requests, and exit status on `shim.sock`; writes `console.log` and `exit.json` | One process per running VM, same account as the API (`firecrab-api vm-shim`) |
+| `firecrab-vm` shim | Owns one Firecracker process; serves its console, stop/kill requests, and exit status on `shim.sock`; writes `console.log` and `exit.json` | One process per running VM, same account as the API (`firecrab-api vm-shim`); a child of the API, or a `firecrab-vm-<id>.service` unit with `FIRECRAB_VM_LAUNCHER=systemd` |
 | Firecracker | Boots a guest kernel and rootfs through KVM | One process per running VM, child of its shim |
 | SQLite and filesystem | Durable resource records and artifacts | API-managed state |
 
@@ -233,10 +233,29 @@ MicroStorage registers an already mounted directory; Firecrab does not partition
 | --- | --- | --- |
 | VM, network, storage, lease, and port-forward records | SQLite WAL | Loaded at API startup |
 | M2Images and VM disks | Filesystem | Paths and hashes are verified |
-| Shim connections and job progress | API memory | Not recovered after restart |
+| Shim connections | API memory | Re-attached at startup when the shim still runs |
+| Job progress | API memory | Not recovered after restart |
 | Bridge, TAP, nftables, and dnsmasq state | Linux runtime | Reconciled from desired state |
 
-The shim is still tied to the API: stopping or restarting the API stops every VM, and API startup demotes stale active VM records. Keeping VMs running across an API restart is tracked by [issue #123](https://github.com/SteelCrab/firecrab/issues/123); the shim's reconnectable socket and `exit.json` are its first step.
+By default the shim is the API's child and stops its VM when the API exits.
+With `FIRECRAB_VM_LAUNCHER=systemd`, the helper starts each shim as a transient `firecrab-vm-<id>.service` unit, so VMs keep running across API restarts and upgrades.
+The unit runs the `firecrab-api` installed beside the helper as the API's user, sandboxed like `firecrab-api.service` and sharing its private `/tmp` (`JoinsNamespaceOf=`), so paths the API resolves mean the same files to the shim; the helper refuses a program or Firecracker binary that anyone but root could change.
+Only one shim can run a VM at a time: each holds a lock on `<vm-id>/vm.lock`.
+
+At startup the API settles every VM its database calls active from what the previous run left behind ([issue #123](https://github.com/SteelCrab/firecrab/issues/123)):
+
+| Record | Evidence | Result |
+| --- | --- | --- |
+| `running` | Shim answers on `shim.sock` | Re-adopted; console and stop work again |
+| `stopping` | Shim answers | Re-adopted, and the stop finishes |
+| `starting` | Shim answers | Killed and recorded `error`: its start checks never finished |
+| Any | Shim answers but cannot be attached (another protocol version or VM) | Unit stopped, recorded `stopped`; `error` with its network kept if the stop fails |
+| Any | `exit.json`: clean exit or a requested stop | `stopped` |
+| Any | `exit.json`: crash | `error` |
+| Any | Neither | `stopped` |
+
+VMs that are not re-adopted have their unit stopped (a no-op when none runs) and lose their TAP and firewall policy; networks, policies, and the re-adopted VMs' TAPs are then re-applied.
+`firecrab-vm-*` units still running no re-adopted VM are logged, never stopped.
 SQLite and artifacts remain the durable source of truth.
 
 ### Networking

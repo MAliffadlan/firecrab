@@ -45,6 +45,20 @@ id -nG
 The API user must be in the `kvm` group.
 A new group membership needs a new login session.
 
+## VM keeps running after the API stops
+
+With `FIRECRAB_VM_LAUNCHER=systemd`, each VM runs in a `firecrab-vm-<simple id>.service` unit and survives `firecrab-api` restarts by design.
+The next API start re-adopts it and logs the outcome.
+
+```sh
+systemctl list-units --all --plain 'firecrab-vm-*'
+journalctl -u firecrab-api -b | grep 'startup reconciliation finished'
+journalctl -u 'firecrab-vm-*' -b
+```
+
+`VM unit runs no VM this API tracks; leaving it running` names a unit the API did not re-adopt; check it, then stop it with `sudo systemctl stop <unit>`.
+A start that fails with `the network helper could not start the VM's unit` names the rejected path: the API binary beside the helper and the Firecracker binary must be root-owned and not writable by group or others.
+
 ## Network helper is unavailable
 
 The API and helper must use the same socket, by default `/run/firecrab/net-helper.sock`.

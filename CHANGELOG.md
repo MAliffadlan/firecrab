@@ -28,8 +28,13 @@ Entries land here as work merges, and move under the next version heading when t
 
 - Each MicroVM now runs under a per-VM `firecrab-vm` shim (`firecrab-api vm-shim`)
   that owns Firecracker, writes `console.log`, and records the exit status in
-  `exit.json`. The API controls the VM through the shim's socket. VMs still stop
-  when the API stops; keeping them running is the rest of [#123].
+  `exit.json`. The API controls the VM through the shim's socket.
+- API startup settles VMs left active by the previous run from evidence
+  (live shim, `exit.json`) instead of marking them all `stopped`, and
+  re-applies their networking ([#123]).
+- `FIRECRAB_VM_LAUNCHER=systemd` (opt-in) runs each VM's shim in a
+  `firecrab-vm-<id>.service` unit started by the helper, so VMs survive API
+  restarts and upgrades; the default still stops VMs with the API ([#123]).
 
 ### Deprecated
 
