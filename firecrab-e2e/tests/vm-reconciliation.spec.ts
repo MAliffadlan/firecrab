@@ -152,14 +152,19 @@ test.describe("VM startup reconciliation @dashboard", () => {
       await page.screenshot({ path: testInfo.outputPath(`list-${locale}.png`), fullPage: true });
 
       for (const [outcome, english, korean] of CASES) {
+        const row = page.locator(".vm-table tbody tr").filter({ hasText: `vm-${outcome}` });
+        await row.locator(".api-status-label").hover();
+        await expect(page.getByRole("tooltip")).toHaveCount(1);
+        await expect(page.getByRole("tooltip")).toBeVisible();
         await page.getByRole("button", { name: `vm-${outcome}`, exact: true }).click();
+        await expect(page.getByRole("tooltip")).toHaveCount(0);
         const detail = page.locator(".reconciliation-detail");
         const vm = vms.find((item) => item.name === `vm-${outcome}`)!;
         await expect(page.locator(".vm-detail-heading dt")).toHaveText(["NAME", "ID", "VM-STATUS"]);
         await expect(page.locator(".vm-detail-name dd")).toHaveText(vm.name);
         await expect(page.locator(".vm-detail-id dd")).toHaveText(vm.id);
         await expect(page.locator(".vm-detail-state dd")).toHaveText(vm.state);
-        await expect(page.getByRole("heading", { name: "API-STATUS", exact: true })).toBeVisible();
+        await expect(page.getByRole("dialog").getByRole("heading", { name: "API-STATUS", exact: true })).toBeVisible();
         await expect(detail.locator(".api-status-service")).toHaveText("Firecrab API firecrab-api");
         await expect(detail.locator(".reconciliation-badge")).toHaveText(locale === "ko" ? korean : english);
         await expect(detail.locator("time")).toHaveAttribute("datetime", new Date(CHECKED_AT).toISOString());

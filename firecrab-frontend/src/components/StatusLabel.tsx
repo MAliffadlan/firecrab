@@ -1,5 +1,7 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+
+const tooltipOpenEvent = "firecrab:status-tooltip-open";
 
 interface StatusLabelProps {
   children: string;
@@ -19,23 +21,40 @@ export default function StatusLabel({ children, className, accessibleLabel, tool
   const closeTimer = useRef<number | null>(null);
   const [open, setOpen] = useState(false);
 
-  function cancelClose() {
+  const cancelClose = useCallback(() => {
     if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
     closeTimer.current = null;
-  }
+  }, []);
 
   function show() {
     cancelClose();
+    document.dispatchEvent(new CustomEvent(tooltipOpenEvent, { detail: id }));
     setOpen(true);
   }
+
+  const dismiss = useCallback(() => {
+    cancelClose();
+    setOpen(false);
+  }, [cancelClose]);
 
   function leave() {
     hovered.current = false;
     cancelClose();
     closeTimer.current = window.setTimeout(() => {
-      if (!hovered.current && !focused.current) setOpen(false);
+      if (!hovered.current && !focused.current) dismiss();
     }, 120);
   }
+
+  useEffect(() => cancelClose, [cancelClose]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    function onTooltipOpen(event: Event) {
+      if ((event as CustomEvent<string>).detail !== id) dismiss();
+    }
+    document.addEventListener(tooltipOpenEvent, onTooltipOpen);
+    return () => document.removeEventListener(tooltipOpenEvent, onTooltipOpen);
+  }, [open, id, dismiss]);
 
   useLayoutEffect(() => {
     if (!open || !trigger.current || !panel.current) return;
@@ -66,16 +85,24 @@ export default function StatusLabel({ children, className, accessibleLabel, tool
 
   useEffect(() => {
     if (!open) return;
-    function dismiss() { setOpen(false); }
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") dismiss();
     }
+    function onOutsideInteraction(event: Event) {
+      if (!(event.target instanceof Node)) return;
+      if (trigger.current?.contains(event.target) || panel.current?.contains(event.target)) return;
+      dismiss();
+    }
     document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("pointerdown", onOutsideInteraction, true);
+    document.addEventListener("focusin", onOutsideInteraction);
     return () => {
       cancelClose();
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("pointerdown", onOutsideInteraction, true);
+      document.removeEventListener("focusin", onOutsideInteraction);
     };
-  }, [open]);
+  }, [open, dismiss, cancelClose]);
 
   return (
     <>
