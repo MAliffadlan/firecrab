@@ -24,6 +24,7 @@ Env, shells, kernels, storage assignment, port forwards, and Docker Hub are API 
 - [Shells](#shells)
 - [Images, kernels, OCI](#images-kernels-oci)
 - [MicroVM](#microvm)
+- [VM lifetime](#vm-lifetime)
 - [nginx scenario (NGX)](#nginx-scenario-ngx)
 - [CLI](#cli)
 - [Cleanup](#cleanup)
@@ -163,6 +164,22 @@ Missing proxy configuration is a failure in the required E2E suite.
 CPU, RAM, disk, and egress edits only in `created` / `stopped` / `error`.
 Env may change in `running`.
 
+## VM lifetime
+
+Needs a running VM (V7) and root on the API host; on macOS, use the management VM over SSH.
+R3–R6 need `FIRECRAB_VM_LAUNCHER=systemd` in the API's environment.
+With the default launcher, only R1, R2, and R7 apply; record R3–R6 as `WARNING`.
+
+| ID | Work | Expect |
+| --- | --- | --- |
+| R1 | shim | `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent; the runtime directory has `shim.sock` and `console.log` |
+| R2 | API restart, default launcher | `systemctl restart firecrab-api` stops the VM; after startup it is `stopped`, and `exit.json` has `"stop_requested":true` |
+| R3 | systemd unit | `firecrab-vm-<simple id>.service` is active; the shim's parent is PID 1 and it runs as the API user |
+| R4 | API restart, systemd launcher | shim and Firecracker PIDs unchanged; VM stays `running`; journal has `adopted=1`; TAP still on its bridge; V9 and V11 work |
+| R5 | crash while the API is down | stop the API, `kill -9` Firecracker, start the API → `error`; its `fct*` TAP and nft rules are gone |
+| R6 | interrupted start | restart the API after the shim appears but before `running` → `error`; no unit remains |
+| R7 | normal stop | V11 → `stopped`; `exit.json` has `"stop_requested":true`; `systemctl --failed` lists no `firecrab-vm-*` unit |
+
 ## nginx scenario (NGX)
 
 One OCI guest that must hit env, DNAT, and the Shell repository together.
@@ -213,6 +230,7 @@ Linux-only (skip on macOS/Windows CLI, or run inside the management guest):
 | X4 | `GET /api/shells` has no `qa-*` |
 | X5 | custom OCI alias gone; catalog fixtures only if you chose to keep them |
 | X6 | Docker Hub not left with a QA secret |
+| X7 | no `firecrab-vm-*` unit remains for `qa-*` VMs; the API's `FIRECRAB_VM_LAUNCHER` is restored |
 
 ## CI map
 
@@ -221,12 +239,13 @@ Linux-only (skip on macOS/Windows CLI, or run inside the management guest):
 | `scripts/ci-qa-api.sh` | G4 G5 H1 H2 N1–N5 S1–S3 L1–L3 I1 I8 I9 V14 C3 C5 X1–X4 X6 |
 | `scripts/ci-qa-nginx.sh` | NGX1–NGX9 including V8a–V8d SSH |
 | `scripts/ci-qa-ssh.sh` | V8a–V8d (called from guest boot and nginx) |
+| `scripts/ci-qa-lifetime.sh` | R1–R7 X7 for one OCI reference (default `alpine:3.21`); root commands run through `sudo` on Linux or the management VM SSH on macOS |
 | `scripts/ci-qa-guest.sh` | I5 I6 V1 V2 V6 V7 V8 V9 V11 V12 V13 V15 N6 C1 C2 C2b C4 X5; expanded rows run for the first OCI reference, API guest flow for the remaining `alpine:3.21` `ubuntu:24.04` `fedora:42` references |
 | `firecrab-e2e` `test:dashboard` | dashboard rows that fake the API and console (`@dashboard`), including V15 in the web terminal |
 | GitHub-hosted macOS | Swift/Rust checks, signed helper, and diagnostic JSON; no runtime E2E |
 | GitHub-hosted Windows | Rust clippy/tests and diagnostic JSON; no runtime E2E |
 | Windows host manual run | `ci-qa-windows-e2e.ps1`; fresh install, then the API/nginx/guest scripts inside the managed distribution |
-| Native M3+ manual run | `ci-qa-macos-e2e.sh`; fresh install plus API/nginx/guest E2E; capability failure is fatal |
+| Native M3+ manual run | `ci-qa-macos-e2e.sh`; fresh install plus API/nginx/guest/lifetime E2E; capability failure is fatal |
 | microManager PR report | `micromanager-pr-report.py`; comments both hosted jobs' results, log tails, and the manual E2E commands on PRs that touch them |
 
 Not in GitHub Ubuntu CI: I2 I3 I4 I7 I10 U1.

@@ -1666,21 +1666,6 @@ impl Store {
         ipam::current_revision(&self.lock())
     }
 
-    /// Startup cleanup: a VM left in a live state by a previous run has no
-    /// process behind it anymore, so demote it to stopped.
-    pub fn reset_active_states(&self) -> Result<usize, PersistenceError> {
-        let changed = self.lock().execute(
-            "UPDATE vms SET state = ?1 WHERE state IN (?2, ?3, ?4)",
-            params![
-                encode_state(VmState::Stopped),
-                encode_state(VmState::Starting),
-                encode_state(VmState::Running),
-                encode_state(VmState::Stopping),
-            ],
-        )?;
-        Ok(changed)
-    }
-
     /// Imports `legacy` (the old JSON store) if it exists, then renames it
     /// with a `.imported` suffix so re-opening never imports it again.
     fn import_legacy(&self, legacy: &Path) -> Result<(), PersistenceError> {
@@ -1962,38 +1947,6 @@ mod tests {
         store.clear_vm_shells(vm.id).unwrap();
         store.delete_shell(shell_id).unwrap();
         assert!(store.shell_detail(shell_id).unwrap().is_none());
-    }
-
-    #[test]
-    fn reset_demotes_live_states_to_stopped() {
-        let directory = tempdir().unwrap();
-        let store = Store::open(&directory.path().join("firecrab.db")).unwrap();
-        let states = [
-            VmState::Created,
-            VmState::Starting,
-            VmState::Running,
-            VmState::Stopping,
-            VmState::Stopped,
-            VmState::Error,
-        ];
-        let mut ids = Vec::new();
-        for state in states {
-            let mut vm = record(Uuid::new_v4(), "vm");
-            vm.state = state;
-            store.insert(&vm).unwrap();
-            ids.push((vm.id, state));
-        }
-
-        assert_eq!(store.reset_active_states().unwrap(), 3);
-
-        let all = store.load_all().unwrap();
-        for (id, before) in ids {
-            let expected = match before {
-                VmState::Starting | VmState::Running | VmState::Stopping => VmState::Stopped,
-                other => other,
-            };
-            assert_eq!(all.get(&id).unwrap().state, expected, "{before:?}");
-        }
     }
 
     #[test]

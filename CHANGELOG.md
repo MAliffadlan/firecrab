@@ -26,7 +26,15 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Changed
 
-- None.
+- Each MicroVM now runs under a per-VM `firecrab-vm` shim (`firecrab-api vm-shim`)
+  that owns Firecracker, writes `console.log`, and records the exit status in
+  `exit.json`. The API controls the VM through the shim's socket.
+- API startup settles VMs left active by the previous run from evidence
+  (live shim, `exit.json`) instead of marking them all `stopped`, and
+  re-applies their networking ([#123]).
+- `FIRECRAB_VM_LAUNCHER=systemd` (opt-in) runs each VM's shim in a
+  `firecrab-vm-<id>.service` unit started by the helper, so VMs survive API
+  restarts and upgrades; the default still stops VMs with the API ([#123]).
 
 ### Deprecated
 
@@ -530,6 +538,7 @@ network helper.
 [#303]: https://github.com/SteelCrab/firecrab/issues/303
 [#306]: https://github.com/SteelCrab/firecrab/issues/306
 [#312]: https://github.com/SteelCrab/firecrab/pull/312
+[#123]: https://github.com/SteelCrab/firecrab/issues/123
 [88ba35d]: https://github.com/SteelCrab/firecrab/commit/88ba35d
 [34193f5]: https://github.com/SteelCrab/firecrab/commit/34193f5
 [729bb47]: https://github.com/SteelCrab/firecrab/commit/729bb47

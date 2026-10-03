@@ -209,6 +209,32 @@ pub enum NetworkRequest {
         /// each one's bridge. Empty means no Firecrab DHCP interfaces.
         micro_networks: Vec<MicroNetworkSpec>,
     },
+    /// Run a VM's shim in its own transient systemd unit
+    /// (`firecrab-vm-<uuid>.service`) so the VM outlives the API process.
+    ///
+    /// The helper takes the program from the connecting API's own executable
+    /// and the unit's uid/gid from its peer credentials; it never runs a path
+    /// from this request with more privilege than the API already has. The
+    /// runtime directory must be the API's own private directory.
+    StartVmUnit {
+        /// The VM; also names the unit.
+        vm_id: Uuid,
+        /// The start's runtime directory, absolute.
+        runtime_dir: PathBuf,
+        /// Firecracker binary, absolute; run as the API's own user.
+        firecracker: PathBuf,
+        /// Whether Firecracker gets `--enable-pci`.
+        #[serde(default)]
+        enable_pci: bool,
+        /// The shim's SIGTERM-to-SIGKILL grace.
+        stop_grace_ms: u64,
+    },
+    /// Stop a VM's unit (and so its shim and Firecracker); a no-op when the
+    /// unit does not exist.
+    StopVmUnit {
+        /// The VM whose unit to stop.
+        vm_id: Uuid,
+    },
     /// Install an already-downloaded host bundle over this host's binaries and
     /// restart both services (`firecrab update --apply`).
     ///

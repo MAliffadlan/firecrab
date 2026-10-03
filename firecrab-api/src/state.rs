@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use uuid::Uuid;
 
-use crate::firecracker::{self, VmProcess};
+use crate::firecracker::{self, ShimLauncher, VmProcess};
 use crate::image_install::ImageInstallTracker;
 use crate::model::VmRecord;
 use crate::network::NetworkClient;
@@ -42,11 +42,13 @@ pub struct RuntimeConfig {
     /// never reaches this bound. Only a guest that never gets far enough to
     /// run the script at all does.
     pub network_ready_timeout: Duration,
+    /// How each VM's shim is started.
+    pub shim: ShimLauncher,
 }
 
 impl RuntimeConfig {
     /// Builds config from environment-derived defaults.
-    fn from_defaults(storage: &StorageRegistry) -> Self {
+    fn from_defaults(storage: &StorageRegistry, network: &NetworkClient) -> Self {
         Self {
             vms_dir: storage.default_vms_dir(),
             firecracker_binary: firecracker::default_firecracker_binary(),
@@ -63,8 +65,24 @@ impl RuntimeConfig {
             // template plus room for a loaded host — see the field's doc for
             // why overshooting costs nothing in the ordinary failure case.
             network_ready_timeout: Duration::from_secs(180),
+            shim: default_shim_launcher(network),
         }
     }
+}
+
+#[cfg(not(test))]
+fn default_shim_launcher(network: &NetworkClient) -> ShimLauncher {
+    ShimLauncher::from_setting(
+        std::env::var("FIRECRAB_VM_LAUNCHER").ok().as_deref(),
+        network,
+    )
+}
+
+/// A test binary re-executed as `vm-shim` would run the test suite instead,
+/// so tests always keep their shims in-process.
+#[cfg(test)]
+fn default_shim_launcher(_network: &NetworkClient) -> ShimLauncher {
+    ShimLauncher::InProcess
 }
 
 /// How many `run_start` calls may copy/grow a rootfs disk at once. Each
@@ -125,18 +143,17 @@ impl AppState {
         Self::with_db_file(templates, persistence::default_db_file()).await
     }
 
-    /// Builds state backed by an explicit database path, resetting any
-    /// leftover live states from a previous run to `Stopped` and loading
-    /// every record into the in-memory cache.
+    /// Builds state backed by an explicit database path, loading every
+    /// record into the in-memory cache. Records the previous run left
+    /// active are settled by [`crate::reconcile::reconcile`].
     pub(crate) async fn with_db_file(
         templates: TemplateRegistry,
         db_file: PathBuf,
     ) -> Result<Self, PersistenceError> {
         let (store, vms) = tokio::task::spawn_blocking(move || {
             let store = Store::open(&db_file)?;
-            // A fresh server has no processes, so live states from the
-            // previous run are ghosts — demote them before serving.
-            store.reset_active_states()?;
+            // Live states from the previous run stay as they are: the VM
+            // may still be running, and `reconcile::reconcile` decides.
             let vms = store.load_all()?;
             Ok::<_, PersistenceError>((store, vms))
         })
@@ -144,7 +161,8 @@ impl AppState {
         .expect("persistence startup task panicked")?;
 
         let storage = StorageRegistry::from_env();
-        let runtime = RuntimeConfig::from_defaults(&storage);
+        let network = NetworkClient::from_env();
+        let runtime = RuntimeConfig::from_defaults(&storage, &network);
         Ok(AppState {
             vms: Arc::new(Mutex::new(vms)),
             templates: Arc::new(templates),
@@ -153,7 +171,7 @@ impl AppState {
             runtime: Arc::new(runtime),
             storage: Arc::new(storage),
             disk_prep_permits: Arc::new(Semaphore::new(DISK_PREP_CONCURRENCY)),
-            network: NetworkClient::from_env(),
+            network,
             network_mutations: Arc::new(AsyncMutex::new(())),
             image_installs: ImageInstallTracker::from_env(),
             image_packages: ImageInstallTracker::from_env(),
@@ -248,6 +266,7 @@ impl AppState {
             ready_timeout: self.runtime.ready_timeout,
             stop_grace: self.runtime.stop_grace,
             network_ready_timeout: self.runtime.network_ready_timeout,
+            shim: self.runtime.shim.clone(),
         };
         self.storage = Arc::new(storage);
         self.runtime = Arc::new(runtime);

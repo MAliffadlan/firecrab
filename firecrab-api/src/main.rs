@@ -21,12 +21,14 @@ mod oci;
 mod package;
 mod persistence;
 mod process_metrics;
+mod reconcile;
 mod rootfs;
 mod server;
 mod shells;
 mod state;
 mod storage;
 mod templates;
+mod vm_shim;
 
 use std::error::Error;
 use std::io;
@@ -59,8 +61,28 @@ enum StartupError {
     Serve(#[source] io::Error),
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // `firecrab-api vm-shim …` runs one VM's shim instead of the API; see
+    // `vm_shim`. Checked before anything else so the shim never opens the
+    // database or binds the API port.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new(vm_shim::SUBCOMMAND)) {
+        return vm_shim::run(args.collect());
+    }
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[ERROR] failed to start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(serve_api())
+}
+
+async fn serve_api() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -96,12 +118,11 @@ async fn run() -> Result<(), StartupError> {
     // at startup (not only on VM start) is what brings back a MicroNetwork
     // that has no VMs in it yet — nothing else would ever touch it.
     //
-    // Best-effort: if the net-helper isn't up yet, this just means the host
-    // side lags until the next per-VM start, which re-applies the same thing
-    // (see setup_vm_network) — not worth failing API startup over.
-    if let Err(error) = handlers::micro_networks::ensure_all_networks(&state).await {
-        tracing::warn!(error, "initial network resync failed");
-    }
+    // Settles the VMs the previous run left active and resyncs host
+    // networking. Best-effort: if the net-helper isn't up yet, the host side
+    // lags until the next per-VM start, which re-applies the same thing (see
+    // setup_vm_network) — not worth failing API startup over.
+    reconcile::reconcile(&state).await;
     // Fetch the shared bootstrap builder source now, in the background, so
     // the request that needs it doesn't have to — see spawn_warmup.
     microboot::spawn_warmup(state.clone());

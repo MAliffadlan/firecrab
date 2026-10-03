@@ -88,6 +88,7 @@ Run the common checks:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --document-private-items
 npm ci --prefix firecrab-frontend
 npm run lint --prefix firecrab-frontend
 npm run build --prefix firecrab-frontend
@@ -100,6 +101,14 @@ Run browser E2E checks without guest boot:
 npm ci --prefix firecrab-e2e
 npm run install-browsers --prefix firecrab-e2e
 FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e
+```
+
+Changes to VM start, stop, or the API's lifetime also need the VM lifetime checks (R1–R7), which restart the API on a real host:
+
+```sh
+FIRECRAB_QA_VM_LAUNCHER=systemd scripts/ci-qa-lifetime.sh alpine:3.21   # Linux, from the repository root
+FIRECRAB_MICROMANAGER_HOME="$HOME/Library/Application Support/Firecrab/micromanager" \
+  scripts/ci-qa-macos-e2e.sh lifetime                                # macOS
 ```
 
 For platform scenarios, manual steps, expected results, and cleanup, see the [English TEST guide](public-docs/TEST.md) or [Korean TEST guide](public-docs/TEST.ko.md).
@@ -118,6 +127,72 @@ ci: …
 
 Keep each [pull request](https://github.com/SteelCrab/firecrab/pulls) focused. Explain what changed and why, link related issues, and report test results.
 Record applicable TEST items as PASS, FAILED, or WARNING.
+
+### Writing the PR body
+
+Use the commit subject format for the title (`type(scope): description`). Write the body in English, in sections of short bullets, and drop any section that does not apply:
+
+````markdown
+## New Features
+
+- `FIRECRAB_VM_LAUNCHER=systemd` runs each VM's shim in its own systemd unit
+
+## Security
+
+- The helper derives the unit name and uid/gid itself; nothing privileged comes from the request
+
+## Fixes
+
+- A requested stop exits the shim 0, so a normal stop leaves no failed unit
+
+## Docs
+
+- `public-docs/operations.md`: `FIRECRAB_VM_LAUNCHER`
+
+## Validation
+
+1. Test
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --document-private-items
+cargo test --workspace --locked
+```
+
+Notes: none
+
+2. E2E
+
+```sh
+scripts/ci-qa-macos-e2e.sh browser
+```
+
+Notes: WARNING A8 skipped `a failed register job leaves no current catalog row`
+
+3. QA
+
+```sh
+scripts/ci-qa-macos-e2e.sh api
+scripts/ci-qa-macos-e2e.sh nginx
+scripts/ci-qa-macos-e2e.sh guest
+```
+
+Notes: FAILED V8d `ssh root@172.168.0.2` never became ready on the macOS management VM
+
+Related: #123, #336
+
+One short paragraph on scope: what is deliberately left out, follow-up work, and the merge order of stacked PRs.
+````
+
+- Keep each bullet to one change a user or operator can see: a behavior, an API field, a command, or a file.
+- Validation always has the three parts in this order: Test, E2E, QA. Each lists the exact commands that ran, then one `Notes:` line.
+- Write `Notes: none` when every check passed. Otherwise note only the exceptions: a skipped or partial [TEST](public-docs/TEST.md) item as WARNING and a failed one as FAILED, each with its ID and what happened.
+- A part that did not run keeps its heading and says why in `Notes:`. Name the platform when it is not obvious from the commands (Linux, macOS microManager, Windows, GitHub CI).
+- Link issues and related PRs on the `Related:` line. A stacked PR names the PR it is based on and the merge order.
+- Do not add generated-by or tool attribution lines.
+
+See [#216](https://github.com/SteelCrab/firecrab/pull/216) for an example.
 
 ## Issues
 

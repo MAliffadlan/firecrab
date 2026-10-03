@@ -991,16 +991,34 @@ pub async fn stop_vm(
         .get(&id)
         .cloned();
     if let Some(VmProcess {
-        pid, mut exited, ..
+        pid,
+        control,
+        mut exited,
+        ..
     }) = entry
     {
-        firecracker::sigterm(pid);
+        control.terminate();
         if tokio::time::timeout(state.runtime.stop_grace, exited.changed())
             .await
             .is_err()
         {
-            firecracker::sigkill(pid);
-            let _ = tokio::time::timeout(state.runtime.stop_grace, exited.changed()).await;
+            control.kill();
+            if tokio::time::timeout(state.runtime.stop_grace, exited.changed())
+                .await
+                .is_err()
+            {
+                // The shim did not confirm the exit — it may be gone or wedged.
+                // Kill Firecracker directly so a VM recorded as stopped is never
+                // still running.
+                tracing::error!(
+                    request_id = %request_id.0,
+                    vm_id = %id,
+                    pid,
+                    "vm shim did not confirm the stop; killing Firecracker directly"
+                );
+                firecracker::sigkill(pid);
+                let _ = tokio::time::timeout(state.runtime.stop_grace, exited.changed()).await;
+            }
         }
     }
 
@@ -1341,11 +1359,10 @@ async fn finish_run_start(
     let paths = crate::artifacts::VmArtifactPaths::for_vm(&vms_dir, vm.id);
     let runtime = paths.runtime(runtime_id);
     let process = firecracker::spawn_vm(
-        &state.runtime.firecracker_binary,
+        &state.runtime,
         &runtime,
         vm.id,
         enable_pci,
-        state.runtime.ready_timeout,
         Arc::clone(&state.process_metrics),
     )
     .await
@@ -1360,13 +1377,14 @@ async fn finish_run_start(
     // The guest scripts bring their own interface up manually instead
     // (`handlers::bootstrap`'s pushed script); this only skips the host's
     // passive wait, not networking itself.
-    if !is_microboot {
-        // Not registered with register_and_watch yet, so `process` dropping
-        // on an early return here still kills it (spawn_vm's Command sets
-        // kill_on_drop) — no separate cleanup needed on this path.
-        wait_for_network_ready(process.console(), state.runtime.network_ready_timeout)
-            .await
-            .map_err(|error| format!("network readiness check failed: {error}"))?;
+    if !is_microboot
+        && let Err(error) =
+            wait_for_network_ready(process.console(), state.runtime.network_ready_timeout).await
+    {
+        // Not registered with register_and_watch yet: kill it and wait, so
+        // the failed start leaves no guest behind.
+        process.abort(state.runtime.stop_grace).await;
+        return Err(format!("network readiness check failed: {error}"));
     }
 
     Ok(process)
@@ -1964,16 +1982,19 @@ async fn fail_start_with(
     reason: Option<String>,
 ) -> AppError {
     finish_startup_timeline(state, id, StartupStepOutcome::Failed, reason);
-    let pid = state
+    let process = state
         .processes
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&id)
-        .map(|process| process.pid);
+        .map(|process| (process.pid, process.control.clone()));
     if let Some(record) = set_memory_state(state, id, VmState::Error) {
         let _ = persist_update(state, &record, request_id).await;
     }
-    if let Some(pid) = pid {
+    if let Some((pid, control)) = process {
+        control.kill();
+        // Not through the shim alone: a failed start must not leave a guest
+        // running if the shim is what failed.
         firecracker::sigkill(pid);
     }
     AppError::internal(request_id)
@@ -2544,7 +2565,7 @@ pub(crate) mod test_support {
         let socket_path = root.join(format!("net-helper-{}.sock", Uuid::new_v4()));
         crate::network::test_support::spawn_always_ok_helper(&socket_path);
 
-        AppState::with_db_file(templates, root.join("data/firecrab.db"))
+        let state = AppState::with_db_file(templates, root.join("data/firecrab.db"))
             .await
             .unwrap()
             .with_test_runtime(RuntimeConfig {
@@ -2553,8 +2574,13 @@ pub(crate) mod test_support {
                 ready_timeout: Duration::from_secs(5),
                 stop_grace: Duration::from_millis(500),
                 network_ready_timeout: Duration::from_millis(300),
+                shim: crate::firecracker::ShimLauncher::InProcess,
             })
-            .with_test_network(crate::network::NetworkClient::with_socket_path(socket_path))
+            .with_test_network(crate::network::NetworkClient::with_socket_path(socket_path));
+        // As `main` does before serving, so tests that reopen state against
+        // the same directory see a restart.
+        crate::reconcile::reconcile(&state).await;
+        state
     }
 
     pub(crate) fn seed_vm(state: &AppState, vm: &VmRecord) {
@@ -3194,6 +3220,55 @@ while True:
         .unwrap();
 
         assert_eq!(started.state, VmState::Running);
+    }
+
+    #[tokio::test]
+    async fn stop_kills_the_vmm_directly_when_its_shim_does_not_answer() {
+        let directory = short_tempdir();
+        let root = directory.path();
+        let binary = fake_firecracker(root, SERVE_LOOP);
+        let state = test_state_with_binary(root, binary).await;
+        let mut vm = record("stuck-shim", Uuid::new_v4());
+        vm.state = VmState::Running;
+        seed_vm(&state, &vm);
+        // Stands in for a Firecracker whose shim no longer answers.
+        let mut vmm = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let (_exited_tx, exited) = tokio::sync::watch::channel(false);
+        let (control, requests) = crate::vm_shim::client::ShimControl::for_test();
+        drop(requests);
+        state.processes.lock().unwrap().insert(
+            vm.id,
+            VmProcess {
+                pid: vmm.id(),
+                exited,
+                console: std::sync::Arc::new(crate::console::ConsoleBroker::new()),
+                control,
+            },
+        );
+
+        let _ = stop_vm(
+            State(state.clone()),
+            Extension(RequestId(Uuid::new_v4())),
+            axum::extract::Path(vm.id.to_string()),
+        )
+        .await;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = vmm.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = vmm.kill();
+                panic!("stop left the VMM running after its shim stopped answering");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
     }
 
     #[tokio::test]
