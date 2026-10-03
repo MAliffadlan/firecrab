@@ -2,7 +2,7 @@
 //! serves its console, control, and exit status on a Unix socket, so the
 //! API controls a VM without being the Firecracker process's parent.
 //!
-//! It runs as a subcommand of this binary (`firecrab-api vm-shim …`, argv[0]
+//! It runs as a subcommand of this binary (`firecrab-api vm-shim …`, `argv[0]`
 //! `firecrab-vm`) rather than as a separate executable, so it is always the
 //! same version as the installed API and needs nothing new from packaging or
 //! self-update.
@@ -22,9 +22,9 @@ use uuid::Uuid;
 use crate::artifacts::HostRuntimePaths;
 use server::ShimConfig;
 
-/// argv[1] that turns this binary into a shim.
+/// `argv[1]` that turns this binary into a shim.
 pub(crate) const SUBCOMMAND: &str = "vm-shim";
-/// argv[0] the API gives the shim, so process listings name it.
+/// `argv[0]` the API gives the shim, so process listings name it.
 pub(crate) const PROCESS_NAME: &str = "firecrab-vm";
 
 /// A shim command line that cannot be run.
