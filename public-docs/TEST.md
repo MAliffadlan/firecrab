@@ -309,21 +309,24 @@ CPU, RAM, disk, and egress edits apply only in created, stopped, or error. Envir
 ## VM lifetime
 
 Run these on a running VM (V7) with root on the API host; on macOS, run the host commands in the management VM over SSH.
-R3–R6 need `FIRECRAB_VM_LAUNCHER=systemd` in the API's environment; with the default launcher, record them as WARNING.
+Every VM runs in its own `firecrab-vm-<simple id>.service` unit.
 
-- [ ] **R1 — Shim:** `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent; the runtime directory has `shim.sock` and `console.log`.
-- [ ] **R2 — API restart, default launcher:** the VM stops with the API and is `stopped` after startup; `exit.json` has `"stop_requested":true`.
-- [ ] **R3 — systemd unit:** `firecrab-vm-<simple id>.service` is active; the shim's parent is PID 1 and it runs as the API user.
-- [ ] **R4 — API restart, systemd launcher:** shim and Firecracker PIDs are unchanged, the VM stays `running`, the journal reports `adopted=1`, the TAP stays on its bridge, and V9 and V11 still work.
+- [ ] **R1 — Shim in its unit:** `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent and the main process of an active `firecrab-vm-<simple id>.service`; its parent is PID 1, it runs as the API user, and the runtime directory has `shim.sock` and `console.log`.
+- [ ] **R2 — Stop from outside the API:** `systemctl stop` of the unit records `stopped`, `exit.json` has `"stop_requested":true`, and the TAP is gone.
+- [ ] **R3 — Quick restart:** a start right after a stop reaches `running`.
+- [ ] **R4 — API restart:** shim and Firecracker PIDs are unchanged, the VM stays `running`, the journal reports `adopted=1`, the TAP stays on its bridge, and V9 and V11 still work.
 - [ ] **R5 — Crash while the API is down:** after `kill -9` of Firecracker, the started API records `error` and removes the TAP and nft rules.
 - [ ] **R6 — Interrupted start:** restarting the API after the shim appears but before `running` records `error` and leaves no unit.
 - [ ] **R7 — Normal stop:** V11 records `stopped`, `exit.json` has `"stop_requested":true`, and no `firecrab-vm-*` unit is failed.
 
 ```sh
-# R1, R3: the shim, its parent, and its unit (systemd launcher)
+# R1: the shim, its parent, and its unit
 VM=<vm id>
 ps -o pid,ppid,user,args -p "$(pgrep -f "[v]m-shim --vm-id $VM")"
 systemctl list-units --all --plain --no-legend 'firecrab-vm-*'
+
+# R2: stop the VM from outside the API
+sudo systemctl stop "firecrab-vm-$(echo "$VM" | tr -d -).service"
 
 # R4: restart the API and compare PIDs
 pgrep -f "[v]m-shim --vm-id $VM"
@@ -340,7 +343,7 @@ sudo systemctl start firecrab-api
 systemctl --failed --plain --no-legend | grep firecrab-vm- || echo none
 ```
 
-`scripts/ci-qa-lifetime.sh [OCI reference]` runs R1–R7 and X7, imports the image when it is missing, and restores the launcher setting it changed.
+`scripts/ci-qa-lifetime.sh [OCI reference]` runs R1–R7 and X7 and imports the image when it is missing.
 
 ## nginx combined scenario
 
@@ -474,7 +477,7 @@ npm test --prefix firecrab-e2e
 - [ ] **X4:** no QA shell remains.
 - [ ] **X5:** custom OCI alias is gone; retain catalog fixtures only by explicit choice.
 - [ ] **X6:** no QA Docker Hub secret remains; restore any prior login.
-- [ ] **X7:** no `firecrab-vm-*` unit remains for a QA VM; the API's `FIRECRAB_VM_LAUNCHER` is restored.
+- [ ] **X7:** no `firecrab-vm-*` unit remains for a QA VM.
 
 Inspect the four resource lists after cleanup:
 

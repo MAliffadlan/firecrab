@@ -47,10 +47,13 @@ A full installation is unnecessary for unit tests and frontend builds.
 
 Run these commands from the repository root.
 
-**Linux:** Run each command in a separate terminal.
+**Linux:** Build the API and network helper, then run each command in a separate terminal.
+VMs run in systemd units the helper starts, so the host needs systemd; rerun the helper script after rebuilding either binary.
 
 ```sh
-# Terminal 1: network helper
+cargo build -p firecrab-api -p firecrab-net-helper
+
+# Terminal 1: network helper (copies both binaries to a root-owned directory)
 ./scripts/dev-net-helper.sh
 
 # Terminal 2: API
@@ -106,7 +109,7 @@ FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e
 Changes to VM start, stop, or the API's lifetime also need the VM lifetime checks (R1–R7), which restart the API on a real host:
 
 ```sh
-FIRECRAB_QA_VM_LAUNCHER=systemd scripts/ci-qa-lifetime.sh alpine:3.21   # Linux, from the repository root
+scripts/ci-qa-lifetime.sh alpine:3.21                               # Linux, from the repository root
 FIRECRAB_MICROMANAGER_HOME="$HOME/Library/Application Support/Firecrab/micromanager" \
   scripts/ci-qa-macos-e2e.sh lifetime                                # macOS
 ```
@@ -135,7 +138,7 @@ Use the commit subject format for the title (`type(scope): description`). Write 
 ````markdown
 ## New Features
 
-- `FIRECRAB_VM_LAUNCHER=systemd` runs each VM's shim in its own systemd unit
+- Each VM's shim runs in its own systemd unit, so VMs survive API restarts
 
 ## Security
 
@@ -147,7 +150,7 @@ Use the commit subject format for the title (`type(scope): description`). Write 
 
 ## Docs
 
-- `public-docs/operations.md`: `FIRECRAB_VM_LAUNCHER`
+- `public-docs/troubleshooting.md`: VM units that outlive the API
 
 ## Validation
 

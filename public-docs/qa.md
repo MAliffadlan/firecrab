@@ -167,15 +167,14 @@ Env may change in `running`.
 ## VM lifetime
 
 Needs a running VM (V7) and root on the API host; on macOS, use the management VM over SSH.
-R3–R6 need `FIRECRAB_VM_LAUNCHER=systemd` in the API's environment.
-With the default launcher, only R1, R2, and R7 apply; record R3–R6 as `WARNING`.
+Every VM runs in its own `firecrab-vm-<simple id>.service` unit.
 
 | ID | Work | Expect |
 | --- | --- | --- |
-| R1 | shim | `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent; the runtime directory has `shim.sock` and `console.log` |
-| R2 | API restart, default launcher | `systemctl restart firecrab-api` stops the VM; after startup it is `stopped`, and `exit.json` has `"stop_requested":true` |
-| R3 | systemd unit | `firecrab-vm-<simple id>.service` is active; the shim's parent is PID 1 and it runs as the API user |
-| R4 | API restart, systemd launcher | shim and Firecracker PIDs unchanged; VM stays `running`; journal has `adopted=1`; TAP still on its bridge; V9 and V11 work |
+| R1 | shim in its unit | `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent and the main process of an active `firecrab-vm-<simple id>.service`; its parent is PID 1 and it runs as the API user; the runtime directory has `shim.sock` and `console.log` |
+| R2 | stop from outside the API | `systemctl stop firecrab-vm-<simple id>.service` → `stopped`; `exit.json` has `"stop_requested":true`; the TAP is gone |
+| R3 | quick restart | stop, then start at once → `running` (the previous unit's name does not block the new one) |
+| R4 | API restart | shim and Firecracker PIDs unchanged; VM stays `running`; journal has `adopted=1`; TAP still on its bridge; V9 and V11 work |
 | R5 | crash while the API is down | stop the API, `kill -9` Firecracker, start the API → `error`; its `fct*` TAP and nft rules are gone |
 | R6 | interrupted start | restart the API after the shim appears but before `running` → `error`; no unit remains |
 | R7 | normal stop | V11 → `stopped`; `exit.json` has `"stop_requested":true`; `systemctl --failed` lists no `firecrab-vm-*` unit |
@@ -230,7 +229,7 @@ Linux-only (skip on macOS/Windows CLI, or run inside the management guest):
 | X4 | `GET /api/shells` has no `qa-*` |
 | X5 | custom OCI alias gone; catalog fixtures only if you chose to keep them |
 | X6 | Docker Hub not left with a QA secret |
-| X7 | no `firecrab-vm-*` unit remains for `qa-*` VMs; the API's `FIRECRAB_VM_LAUNCHER` is restored |
+| X7 | no `firecrab-vm-*` unit remains for `qa-*` VMs |
 
 ## CI map
 

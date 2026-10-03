@@ -2,10 +2,10 @@
 //! serves its console, control, and exit status on a Unix socket, so the
 //! API controls a VM without being the Firecracker process's parent.
 //!
-//! It runs as a subcommand of this binary (`firecrab-api vm-shim …`, `argv[0]`
-//! `firecrab-vm`) rather than as a separate executable, so it is always the
-//! same version as the installed API and needs nothing new from packaging or
-//! self-update.
+//! It runs as a subcommand of this binary (`firecrab-api vm-shim …`) in the
+//! VM's own systemd unit, rather than as a separate executable, so it is
+//! always the same version as the installed API and needs nothing new from
+//! packaging or self-update.
 
 pub(crate) mod client;
 pub(crate) mod protocol;
@@ -24,8 +24,6 @@ use server::ShimConfig;
 
 /// `argv[1]` that turns this binary into a shim.
 pub(crate) const SUBCOMMAND: &str = "vm-shim";
-/// `argv[0]` the API gives the shim, so process listings name it.
-pub(crate) const PROCESS_NAME: &str = "firecrab-vm";
 
 /// A shim command line that cannot be run.
 #[derive(Debug, Error)]
@@ -49,11 +47,14 @@ pub(crate) enum ShimArgsError {
     },
 }
 
-/// The arguments after `vm-shim` that make the shim run `config`.
+/// The arguments after `vm-shim` that make the shim run `config`: the
+/// command line the network helper builds for a VM unit, kept here so tests
+/// can round-trip it through [`parse_args`].
 ///
 /// The runtime directory is made absolute against this process's working
 /// directory: the default storage root is relative (`data/vms`), and the
 /// shim must not depend on being started from the same place.
+#[cfg(test)]
 pub(crate) fn command_args(config: &ShimConfig) -> Vec<OsString> {
     let runtime_dir =
         std::path::absolute(&config.runtime.dir).unwrap_or_else(|_| config.runtime.dir.clone());

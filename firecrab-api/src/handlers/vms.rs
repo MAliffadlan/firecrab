@@ -19,7 +19,9 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::extract::ValidatedJson;
-use crate::firecracker::{self, FirecrackerProcess, VmNetwork, VmProcess};
+#[cfg(test)]
+use crate::firecracker::VmProcess;
+use crate::firecracker::{self, FirecrackerProcess, VmNetwork};
 use crate::ipam::{IpamError, SubnetSpec};
 use crate::model::{
     CreateVmRequest, Lease, StartupStep, StartupStepOutcome, StartupStepRun,
@@ -990,36 +992,8 @@ pub async fn stop_vm(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&id)
         .cloned();
-    if let Some(VmProcess {
-        pid,
-        control,
-        mut exited,
-        ..
-    }) = entry
-    {
-        control.terminate();
-        if tokio::time::timeout(state.runtime.stop_grace, exited.changed())
-            .await
-            .is_err()
-        {
-            control.kill();
-            if tokio::time::timeout(state.runtime.stop_grace, exited.changed())
-                .await
-                .is_err()
-            {
-                // The shim did not confirm the exit — it may be gone or wedged.
-                // Kill Firecracker directly so a VM recorded as stopped is never
-                // still running.
-                tracing::error!(
-                    request_id = %request_id.0,
-                    vm_id = %id,
-                    pid,
-                    "vm shim did not confirm the stop; killing Firecracker directly"
-                );
-                firecracker::sigkill(pid);
-                let _ = tokio::time::timeout(state.runtime.stop_grace, exited.changed()).await;
-            }
-        }
+    if let Some(process) = entry {
+        firecracker::stop_registered(id, process, state.runtime.stop_grace).await;
     }
 
     // Only a running VM can reach Stopping (see VmState::can_transition), so

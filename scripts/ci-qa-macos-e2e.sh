@@ -109,12 +109,9 @@ sys.exit(1)
     printf 'PASS G2 capability, fresh install, service status, and management SSH\n'
 }
 
-# R1–R7 with each launcher: the default one stops VMs with the API (R2), the
-# systemd one keeps them (R3–R6).
+# R1–R7: VMs in systemd units across stops, restarts, and crashes.
 run_lifetime() {
-    local reference=${FIRECRAB_QA_LIFETIME_REFERENCE:-alpine:3.21}
-    FIRECRAB_QA_VM_LAUNCHER=process "$root/scripts/ci-qa-lifetime.sh" "$reference"
-    FIRECRAB_QA_VM_LAUNCHER=systemd "$root/scripts/ci-qa-lifetime.sh" "$reference"
+    "$root/scripts/ci-qa-lifetime.sh" "${FIRECRAB_QA_LIFETIME_REFERENCE:-alpine:3.21}"
 }
 
 case "$PHASE" in

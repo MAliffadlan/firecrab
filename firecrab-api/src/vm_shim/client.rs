@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::protocol::{
-    ExitStatus, FrameError, PROTOCOL_VERSION, ShimEvent, ShimRequest, read_event, write_request,
+    ExitReport, FrameError, PROTOCOL_VERSION, ShimEvent, ShimRequest, read_event, write_request,
 };
 
 /// Requests queued for the shim before `input` waits for room.
@@ -40,7 +40,7 @@ pub(crate) enum SessionEvent {
     /// Raw guest console bytes.
     Output(Vec<u8>),
     /// Firecracker exited.
-    Exited(ExitStatus),
+    Exited(ExitReport),
     /// The connection closed without an exit report: the shim died, or
     /// another client took the connection over.
     Lost,
@@ -208,8 +208,8 @@ async fn receive_events(mut reader: OwnedReadHalf, events: mpsc::UnboundedSender
     loop {
         let event = match read_event(&mut reader).await {
             Ok(Some(ShimEvent::Output(bytes))) => SessionEvent::Output(bytes),
-            Ok(Some(ShimEvent::Exited(status))) => {
-                let _ = events.send(SessionEvent::Exited(status));
+            Ok(Some(ShimEvent::Exited(exit))) => {
+                let _ = events.send(SessionEvent::Exited(exit));
                 return;
             }
             // A second greeting is a protocol violation; treat the session
@@ -361,7 +361,7 @@ threading.Thread(target=_echo, daemon=True).start()
 
         session.control.terminate();
         match exit_of(&mut session.events).await {
-            SessionEvent::Exited(status) => assert!(status.clean(), "{status:?}"),
+            SessionEvent::Exited(exit) => assert!(exit.status.clean(), "{exit:?}"),
             other => panic!("expected a clean exit, got {other:?}"),
         }
         assert!(next(&mut session.events).await.is_none());
@@ -383,7 +383,7 @@ threading.Thread(target=_echo, daemon=True).start()
 
         session.control.kill();
         match exit_of(&mut session.events).await {
-            SessionEvent::Exited(status) => assert_eq!(status.signal, Some(libc::SIGKILL)),
+            SessionEvent::Exited(exit) => assert_eq!(exit.status.signal, Some(libc::SIGKILL)),
             other => panic!("expected SIGKILL, got {other:?}"),
         }
     }
@@ -409,7 +409,7 @@ threading.Thread(target=_echo, daemon=True).start()
         session.control.terminate();
 
         match exit_of(&mut session.events).await {
-            SessionEvent::Exited(status) => assert!(status.clean(), "{status:?}"),
+            SessionEvent::Exited(exit) => assert!(exit.status.clean(), "{exit:?}"),
             other => panic!("terminate after a large paste must still stop the VM, got {other:?}"),
         }
     }

@@ -49,7 +49,6 @@ systemctl restart firecrab-api
 | `FIRECRAB_STATIC_ROOT` | Installed dashboard | Static UI path |
 | `FIRECRAB_STORAGE_ROOTS` | `default=data` | Fixed storage roots |
 | `FIRECRAB_NET_HELPER_SOCK` | `/run/firecrab/net-helper.sock` | Helper socket |
-| `FIRECRAB_VM_LAUNCHER` | `process` | `systemd` runs each VM's shim in a `firecrab-vm-<id>.service` unit so VMs keep running across API restarts |
 
 Do not expose an unprotected listener to another network.
 
