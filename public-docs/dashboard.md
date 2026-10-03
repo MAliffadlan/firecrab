@@ -87,7 +87,19 @@ npm run dev --prefix firecrab-frontend
 - Inspect rail: four equal cards (general, specs, network, usage) then ports + storage; a bottom white bar toggles it
 - Terminal Network group: ipv4, ipv6 (`—` when the network is IPv4-only), mac, egress, network id
 - List poll: 3 seconds
-- Detail: start progress and logs
+- Detail header: `NAME`, full `ID`, and `VM-STATUS`; start progress and logs below.
+- The list's State cell has two bold text labels: VM for lifecycle state, API for
+  Firecrab API's latest VM reconciliation result. Green means running/reconnected,
+  amber means starting/stopping or a reconciliation warning, red means an error,
+  and gray means inactive or no result. Hover or focus exposes accessible state
+  descriptions; API tooltips include the check time and diagnostic information.
+  Reconciliation results are reconnected, VM not found, connection mismatch,
+  network recovery failed, startup interrupted, or exited while the API was offline.
+  Detail's `API-STATUS` section identifies Firecrab API (`firecrab-api`), then
+  shows the result, information, diagnostics, and check time in English or Korean.
+  Dates use `YYYY-MM-DD HH:mm:ss` with the viewer's UTC offset.
+  This is the latest startup snapshot, not live health; an accepted new VM start
+  clears the old result. VMs that were inactive at API startup have no result.
 - While `running`, list / detail / terminal show guest OS CPU percent and memory used (MemTotal − MemAvailable) when the Firecrab Metrics Agent is in the guest (systemd on Ubuntu/Rocky, OpenRC on Alpine)
 - Detail and terminal: sparklines from recent samples
 - Agent missing: values stay `null`, start still succeeds

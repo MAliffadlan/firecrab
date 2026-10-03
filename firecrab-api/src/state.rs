@@ -1,7 +1,7 @@
 //! Shared application state: the in-memory VM record cache, live process
 //! table, and runtime configuration every handler operates against.
 
-use firecrab_api_types::UpdateCheckResponse;
+use firecrab_api_types::{UpdateCheckResponse, VmReconciliation};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -99,6 +99,8 @@ const DISK_PREP_CONCURRENCY: usize = 2;
 pub struct AppState {
     /// In-memory cache of every VM record, mirrored to [`AppState::store`].
     pub vms: Arc<Mutex<HashMap<Uuid, VmRecord>>>,
+    /// Results from this API run's startup check; never persisted as live health.
+    pub(crate) reconciliation: Arc<Mutex<HashMap<Uuid, VmReconciliation>>>,
     /// Verified boot template registry.
     pub templates: Arc<TemplateRegistry>,
     /// SQLite-backed durable storage.
@@ -168,6 +170,7 @@ impl AppState {
             templates: Arc::new(templates),
             store,
             processes: Arc::new(Mutex::new(HashMap::new())),
+            reconciliation: Arc::new(Mutex::new(HashMap::new())),
             runtime: Arc::new(runtime),
             storage: Arc::new(storage),
             disk_prep_permits: Arc::new(Semaphore::new(DISK_PREP_CONCURRENCY)),

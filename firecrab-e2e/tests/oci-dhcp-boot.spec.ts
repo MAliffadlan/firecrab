@@ -248,10 +248,10 @@ test("boots the imported dual-stack guest and authenticates SSH over IPv4 and IP
   // Row actions live behind the Actions toggle now.
   await row.getByRole("button", { name: /^Actions$|^작업$/ }).click();
   await row.getByRole("menuitem", { name: "start" }).click();
-  await expect(row.locator(".state-badge")).toHaveText(/running|error/, { timeout: 240_000 });
-  if ((await row.locator(".state-badge").textContent()) !== "running") {
+  await expect(row.locator(".vm-status-label")).toHaveAttribute("data-state", /running|error/, { timeout: 240_000 });
+  if ((await row.locator(".vm-status-label").getAttribute("data-state")) !== "running") {
     await row.locator("button.link-button").click();
-    await expect(page.locator(".console-title")).toBeVisible();
+    await expect(page.locator(".vm-detail-heading")).toBeVisible();
     const logText = (await page.locator("pre.detail-log").textContent()) ?? "";
     const banner = (await page.locator(".banner").textContent().catch(() => "")) ?? "";
     throw new Error(

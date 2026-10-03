@@ -16,10 +16,12 @@
 //! and loses its TAP and firewall policy; the host networks and the
 //! re-adopted VMs' policies and TAPs are then re-applied.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use firecrab_api_types::{VmReconciliation, VmReconciliationOutcome};
 use uuid::Uuid;
 
 use crate::artifacts::{HostRuntimePaths, VmArtifactPaths};
@@ -51,7 +53,7 @@ pub(crate) struct ReconcileReport {
     /// version, another VM, an unreadable greeting): stopped through the
     /// helper, or recorded `error` when that fails.
     pub mismatched: Vec<Uuid>,
-    /// Re-adopted VMs whose TAP could not be re-attached.
+    /// Re-adopted running VMs whose network resync or TAP attach failed.
     pub network_mismatches: Vec<Uuid>,
     /// `firecrab-vm-*` units still loaded that run no re-adopted VM.
     /// Reported, never stopped.
@@ -70,6 +72,7 @@ enum Evidence {
 /// serves, so nothing else changes VM state meanwhile.
 pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
     let mut report = ReconcileReport::default();
+    let mut results = HashMap::new();
     let active: Vec<VmRecord> = state
         .vms
         .lock()
@@ -89,6 +92,14 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
     let mut adopted: Vec<(VmRecord, FirecrackerProcess)> = Vec::new();
     let mut released: Vec<Uuid> = Vec::new();
     for vm in active {
+        let checked_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as u64);
+        let mut result = VmReconciliation {
+            outcome: VmReconciliationOutcome::Gone,
+            checked_at_ms,
+            detail: None,
+        };
         let runtime = vm.last_runtime_id.map(|runtime_id| {
             VmArtifactPaths::for_vm(&state.vms_dir_for(&vm.storage_root), vm.id).runtime(runtime_id)
         });
@@ -102,6 +113,7 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
                 VmState::Starting => {
                     stop_interrupted_start(session, state.runtime.stop_grace).await;
                     report.interrupted.push(vm.id);
+                    result.outcome = VmReconciliationOutcome::Interrupted;
                     VmState::Error
                 }
                 _ => {
@@ -109,6 +121,8 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
                     let process =
                         firecracker::adopt(vm.id, runtime, session, state.process_metrics.clone());
                     report.adopted.push(vm.id);
+                    result.outcome = VmReconciliationOutcome::Reconnected;
+                    results.insert(vm.id, result);
                     adopted.push((vm, process));
                     continue;
                 }
@@ -116,6 +130,8 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
             Evidence::Mismatch(error) => {
                 tracing::warn!(vm_id = %vm.id, %error, "stopping a VM shim this API cannot control");
                 report.mismatched.push(vm.id);
+                result.outcome = VmReconciliationOutcome::Mismatched;
+                result.detail = Some(error.to_string());
                 VmState::Stopped
             }
             Evidence::Exited(exit) => {
@@ -125,6 +141,17 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
                     VmState::Error
                 };
                 report.ended.push((vm.id, outcome));
+                result.outcome = VmReconciliationOutcome::Exited;
+                result.detail = Some(format!(
+                    "exit code: {}; signal: {}; stop requested: {}",
+                    exit.status
+                        .code
+                        .map_or_else(|| "none".to_owned(), |code| code.to_string()),
+                    exit.status
+                        .signal
+                        .map_or_else(|| "none".to_owned(), |signal| signal.to_string()),
+                    exit.stop_requested
+                ));
                 outcome
             }
             Evidence::Gone => {
@@ -143,9 +170,15 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
             Ok(()) => true,
             Err(error) => {
                 tracing::warn!(vm_id = %vm.id, %error, "failed to stop the VM unit");
+                let detail = result.detail.get_or_insert_with(String::new);
+                if !detail.is_empty() {
+                    detail.push_str("; ");
+                }
+                detail.push_str(&format!("failed to stop VM unit: {error}"));
                 false
             }
         };
+        results.insert(vm.id, result);
         if uncontrollable && !unit_stopped {
             // It may well still be running: not `stopped`, and its TAP stays.
             record_state(state, vm.id, VmState::Error).await;
@@ -158,16 +191,26 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
     for &id in &released {
         crate::handlers::vms::teardown_vm_network(state, id).await;
     }
-    if let Err(error) = crate::handlers::micro_networks::ensure_all_networks(state).await {
+    let network_error = crate::handlers::micro_networks::ensure_all_networks(state)
+        .await
+        .err();
+    if let Some(error) = &network_error {
         tracing::warn!(error, "startup network resync failed");
     }
     for (vm, ..) in adopted
         .iter()
         .filter(|(vm, ..)| vm.state == VmState::Running)
     {
+        let mut errors: Vec<String> = network_error.iter().cloned().collect();
         if let Err(error) = state.network.create_tap(vm.id, vm.micro_network_id).await {
             tracing::warn!(vm_id = %vm.id, %error, "re-adopted VM's TAP could not be re-attached");
+            errors.push(format!("failed to re-attach TAP: {error}"));
+        }
+        if !errors.is_empty() {
             report.network_mismatches.push(vm.id);
+            let result = results.get_mut(&vm.id).expect("adopted VM has a result");
+            result.outcome = VmReconciliationOutcome::NetworkFailed;
+            result.detail = Some(errors.join("; "));
         }
     }
     for (vm, process) in adopted {
@@ -199,6 +242,10 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
         );
     }
 
+    *state
+        .reconciliation
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = results;
     tracing::info!(
         adopted = report.adopted.len(),
         interrupted = report.interrupted.len(),
@@ -453,6 +500,30 @@ mod tests {
         }
     }
 
+    /// Both Dashboard reads expose the same startup snapshot.
+    async fn api_result(host: &Host, id: Uuid) -> VmReconciliation {
+        use crate::handlers::vms::{get_vm, list_vms};
+        use crate::server::RequestId;
+        use axum::{
+            Extension, Json,
+            extract::{Path, State},
+        };
+
+        let Json(detail) = get_vm(
+            State(host.state.clone()),
+            Extension(RequestId(Uuid::new_v4())),
+            Path(id.to_string()),
+        )
+        .await
+        .unwrap();
+        let Json(list) = list_vms(State(host.state.clone())).await;
+        let listed = list.iter().find(|vm| vm.id == id).unwrap();
+        assert_eq!(listed.reconciliation, detail.reconciliation);
+        let result = detail.reconciliation.expect("active VM was checked");
+        assert!(result.checked_at_ms > 0);
+        result
+    }
+
     #[tokio::test]
     async fn a_running_vm_whose_shim_answers_is_adopted_and_its_network_reverified() {
         let host = host().await;
@@ -462,6 +533,10 @@ mod tests {
         let report = reconcile(&host.state).await;
 
         assert_eq!(report.adopted, vec![id]);
+        assert_eq!(
+            api_result(&host, id).await.outcome,
+            VmReconciliationOutcome::Reconnected
+        );
         assert_eq!(memory_state(&host, id), Some(VmState::Running));
         assert!(host.state.processes.lock().unwrap().contains_key(&id));
         let calls = host.helper_log.lock().unwrap().clone();
@@ -527,6 +602,10 @@ mod tests {
         let report = reconcile(&host.state).await;
 
         assert_eq!(report.interrupted, vec![id]);
+        assert_eq!(
+            api_result(&host, id).await.outcome,
+            VmReconciliationOutcome::Interrupted
+        );
         assert_eq!(memory_state(&host, id), Some(VmState::Error));
         assert_eq!(db_state(&host, id), Some(VmState::Error));
         assert!(
@@ -548,6 +627,10 @@ mod tests {
         let report = reconcile(&host.state).await;
 
         assert_eq!(report.ended, vec![(id, VmState::Stopped)]);
+        assert_eq!(
+            api_result(&host, id).await.outcome,
+            VmReconciliationOutcome::Exited
+        );
         assert_eq!(db_state(&host, id), Some(VmState::Stopped));
         let calls = host.helper_log.lock().unwrap().clone();
         assert!(calls.contains(&"remove_vm_policy"), "{calls:?}");
@@ -591,6 +674,10 @@ mod tests {
         let report = reconcile(&host.state).await;
 
         assert_eq!(report.gone, vec![id]);
+        assert_eq!(
+            api_result(&host, id).await.outcome,
+            VmReconciliationOutcome::Gone
+        );
         assert_eq!(db_state(&host, id), Some(VmState::Stopped));
         let calls = host.helper_log.lock().unwrap().clone();
         assert!(calls.contains(&"delete_tap"), "{calls:?}");
@@ -608,6 +695,9 @@ mod tests {
         let report = reconcile(&host.state).await;
 
         assert_eq!(report.mismatched, vec![id]);
+        let result = api_result(&host, id).await;
+        assert_eq!(result.outcome, VmReconciliationOutcome::Mismatched);
+        assert!(result.detail.unwrap().contains("version"));
         assert_eq!(db_state(&host, id), Some(VmState::Stopped));
         let calls = host.helper_log.lock().unwrap().clone();
         assert!(calls.contains(&"stop_vm_unit"), "{calls:?}");
@@ -663,12 +753,71 @@ mod tests {
         let report = reconcile(&host.state).await;
 
         assert_eq!(report.mismatched, vec![id]);
+        let result = api_result(&host, id).await;
+        assert_eq!(result.outcome, VmReconciliationOutcome::Mismatched);
+        assert!(result.detail.unwrap().contains("failed to stop VM unit"));
         assert_eq!(db_state(&host, id), Some(VmState::Error));
         let calls = host.helper_log.lock().unwrap().clone();
         assert!(
             !calls.contains(&"delete_tap"),
             "a VM that may still run keeps its TAP: {calls:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn network_failures_are_visible_even_when_the_vm_is_still_running() {
+        for operation in ["ensure_firewall", "create_tap"] {
+            let host = host_failing(Some(operation)).await;
+            let (id, runtime) = seed_active(&host, operation, VmState::Running);
+            surviving_shim(&host, id, &runtime).await;
+
+            let report = reconcile(&host.state).await;
+
+            assert_eq!(report.adopted, vec![id]);
+            assert_eq!(report.network_mismatches, vec![id]);
+            assert_eq!(memory_state(&host, id), Some(VmState::Running));
+            let result = api_result(&host, id).await;
+            assert_eq!(result.outcome, VmReconciliationOutcome::NetworkFailed);
+            let diagnostic = result.detail.unwrap();
+            assert!(
+                diagnostic.contains(if operation == "create_tap" {
+                    "TAP"
+                } else {
+                    operation
+                }),
+                "{diagnostic}"
+            );
+
+            let control = host.state.processes.lock().unwrap()[&id].control.clone();
+            control.terminate();
+            wait_for(&host, id, VmState::Stopped).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn inactive_vms_have_no_result_and_a_new_api_run_drops_old_results() {
+        let host = host().await;
+        let inactive = record("inactive", Uuid::new_v4());
+        seed_vm(&host.state, &inactive);
+        let (id, _) = seed_active(&host, "gone", VmState::Running);
+
+        reconcile(&host.state).await;
+        assert!(
+            !host
+                .state
+                .reconciliation
+                .lock()
+                .unwrap()
+                .contains_key(&inactive.id)
+        );
+        assert_eq!(
+            api_result(&host, id).await.outcome,
+            VmReconciliationOutcome::Gone
+        );
+
+        // A later startup checks only records left active by the preceding API.
+        reconcile(&host.state).await;
+        assert!(host.state.reconciliation.lock().unwrap().is_empty());
     }
 
     #[test]
