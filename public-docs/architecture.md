@@ -31,7 +31,7 @@ Runs directly on the host, without microManager.
 2. systemd starts the privileged `firecrab-net-helper`, which opens `/run/firecrab/net-helper.sock`.
 3. The unprivileged `firecrab-api` starts and serves the dashboard and API at `127.0.0.1:5523`.
 4. The browser connects directly to that address.
-5. Each running MicroVM gets one Firecracker process using host KVM.
+5. Each running MicroVM gets one `firecrab-vm` shim process, which runs one Firecracker process using host KVM.
 
 ### macOS
 
@@ -102,7 +102,8 @@ The installed API also serves the built dashboard. Development uses Vite, proxyi
 | `firecrab-net-helper` | Bridge, TAP, DHCP/DNS, firewall, NAT/DNAT, and Linux update application | Privileged, bounded capabilities |
 | `firecrab-api-types` | Shared REST request/response models | Shared crate |
 | `firecrab-helper-protocol` | Typed envelopes, framing, and protocol version 2 | Shared crate |
-| Firecracker | Boots a guest kernel and rootfs through KVM | One process per running VM |
+| `firecrab-vm` shim | Owns one Firecracker process; serves its console, stop/kill requests, and exit status on `shim.sock`; writes `console.log` and `exit.json` | One process per running VM, same account as the API (`firecrab-api vm-shim`) |
+| Firecracker | Boots a guest kernel and rootfs through KVM | One process per running VM, child of its shim |
 | SQLite and filesystem | Durable resource records and artifacts | API-managed state |
 
 | Resource | Meaning |
@@ -125,9 +126,9 @@ The numbers match the diagram.
 2. The API records `starting` and responds immediately; startup continues in a background task.
 3. It prepares the VM's writable rootfs `d/<generation-id>.ext4` from the M2Image.
 4. It asks net-helper over the Unix socket to reconcile the MicroNetwork bridge, create the VM TAP, and apply firewall and DHCP state.
-5. It writes runtime configuration `fc.json` and starts Firecracker.
+5. It writes runtime configuration `fc.json` and starts the VM's shim, which starts Firecracker; the API attaches to the shim's socket.
 6. Firecracker boots the guest kernel/rootfs with KVM; the TAP connects the bridge to the guest's virtio network interface.
-7. The guest confirms DHCP and DNS, then sends `FIRECRAB_NETWORK_READY` over serial. The console broker reads it and the API records `running`.
+7. The guest confirms DHCP and DNS, then sends `FIRECRAB_NETWORK_READY` over serial. The shim forwards the console to the API's console broker, which reads it, and the API records `running`.
 
 A host-side DHCP lease alone is not sufficient to mark a VM running.
 The startup timeline records disk preparation, configuration, process start, and readiness.
@@ -218,7 +219,10 @@ See [CLI](firecrab-cli.md) and [Operations](operations.md) for commands and fail
   r/<runtime-id>/
     fc.json
     fc.sock
+    shim.sock
     console.log
+    exit.json
+    shim.err
   ssh/
 ```
 
@@ -229,10 +233,10 @@ MicroStorage registers an already mounted directory; Firecrab does not partition
 | --- | --- | --- |
 | VM, network, storage, lease, and port-forward records | SQLite WAL | Loaded at API startup |
 | M2Images and VM disks | Filesystem | Paths and hashes are verified |
-| Process handles and job progress | API memory | Not recovered after restart |
+| Shim connections and job progress | API memory | Not recovered after restart |
 | Bridge, TAP, nftables, and dnsmasq state | Linux runtime | Reconciled from desired state |
 
-API startup demotes stale active VM records because the new process owns no matching handles.
+The shim is still tied to the API: stopping or restarting the API stops every VM, and API startup demotes stale active VM records. Keeping VMs running across an API restart is tracked by [issue #123](https://github.com/SteelCrab/firecrab/issues/123); the shim's reconnectable socket and `exit.json` are its first step.
 SQLite and artifacts remain the durable source of truth.
 
 ### Networking
