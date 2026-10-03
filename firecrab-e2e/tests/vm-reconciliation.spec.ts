@@ -114,14 +114,40 @@ test.describe("VM startup reconciliation @dashboard", () => {
         await expect(apiLabel).toHaveAttribute("data-outcome", outcome);
         await expect(apiLabel).toHaveAccessibleName(new RegExp(locale === "ko" ? korean : english));
         await expect(apiLabel).toHaveCSS("color", API_COLORS[outcome]);
-        await expect(apiLabel).toHaveAttribute("title", /Firecrab API[\s\S]*2026-10-03 13:00:00 UTC\+09:00/);
-        if (outcome === "networkFailed") await expect(apiLabel).toHaveAttribute("title", new RegExp(DIAGNOSTIC));
+        await apiLabel.hover();
+        const tooltip = page.getByRole("tooltip");
+        await expect(tooltip).toHaveCount(1);
+        await expect(tooltip).toBeVisible();
+        await expect(tooltip.getByRole("heading")).toHaveText("API-STATUS");
+        await expect(tooltip.locator(".api-status-service")).toHaveText("Firecrab API firecrab-api");
+        await expect(tooltip.locator(".reconciliation-badge")).toHaveText(locale === "ko" ? korean : english);
+        await expect(tooltip.locator("time")).toHaveText("2026-10-03 13:00:00 UTC+09:00");
+        if (outcome === "networkFailed") {
+          await expect(tooltip.locator(".reconciliation-diagnostic")).toHaveText(DIAGNOSTIC);
+          await page.screenshot({ path: testInfo.outputPath(`tooltip-api-${locale}.png`), fullPage: true });
+        }
+        await tooltip.hover();
+        await expect(tooltip).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(tooltip).toHaveCount(0);
+
+        await row.locator(".vm-status-label").hover();
+        await expect(tooltip).toBeVisible();
+        await expect(tooltip.getByRole("heading")).toHaveText("VM-STATUS");
+        await expect(tooltip).toContainText(vm.name);
+        await expect(tooltip).toContainText(vm.id);
+        await page.keyboard.press("Escape");
+        await expect(tooltip).toHaveCount(0);
       }
       for (const id of [7, 8]) {
         const row = page.locator(".vm-table tbody tr").filter({ hasText: `vm-unchecked-${id}` });
         await expect(row.locator(".api-status-label")).toHaveAttribute("data-outcome", "unchecked");
         await expect(row.locator(".api-status-label")).toHaveCSS("color", "rgba(91, 102, 115, 0.55)");
         await expect(row.locator(".api-status-label")).toHaveAccessibleName(/No reconciliation result|확인 결과 없음/);
+        await row.locator(".api-status-label").hover();
+        await expect(page.getByRole("tooltip")).toContainText(locale === "ko" ? "확인 결과 없음" : "No reconciliation result");
+        await expect(page.getByRole("tooltip").locator("time")).toHaveCount(0);
+        await page.keyboard.press("Escape");
       }
       await page.screenshot({ path: testInfo.outputPath(`list-${locale}.png`), fullPage: true });
 
@@ -176,6 +202,18 @@ test.describe("VM startup reconciliation @dashboard", () => {
     await expect(page.locator(".vm-state-labels svg")).toHaveCount(0);
     await expect(page.locator(".vm-state-labels .state-label")).toHaveText(["VM", "API"]);
     await page.screenshot({ path: testInfo.outputPath("list-mobile-ko.png"), fullPage: true });
+    await page.locator(".api-status-label").focus();
+    const tooltip = page.getByRole("tooltip");
+    await expect(tooltip).toBeVisible();
+    const tooltipBounds = await tooltip.boundingBox();
+    expect(tooltipBounds!.x).toBeGreaterThanOrEqual(0);
+    expect(tooltipBounds!.x + tooltipBounds!.width).toBeLessThanOrEqual(390);
+    expect(tooltipBounds!.y).toBeGreaterThanOrEqual(0);
+    expect(tooltipBounds!.y + tooltipBounds!.height).toBeLessThanOrEqual(844);
+    expect(await tooltip.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("tooltip-mobile-ko.png"), fullPage: true });
+    await page.keyboard.press("Escape");
+    await expect(tooltip).toHaveCount(0);
     await page.getByRole("button", { name: vm.name, exact: true }).click();
     const detail = page.locator(".reconciliation-detail");
     await expect(detail).toBeVisible();

@@ -91,8 +91,10 @@ npm run dev --prefix firecrab-frontend
 - The list's State cell has two bold text labels: VM for lifecycle state, API for
   Firecrab API's latest VM reconciliation result. Green means running/reconnected,
   amber means starting/stopping or a reconciliation warning, red means an error,
-  and gray means inactive or no result. Hover or focus exposes accessible state
-  descriptions; API tooltips include the check time and diagnostic information.
+  and gray means inactive or no result. Hover or keyboard focus opens a visible
+  information tooltip: VM includes its name, UUID, lifecycle state, and description;
+  API includes Firecrab API's service name, result, check time, and diagnostics.
+  Tooltips stay open while hovered, fit the viewport, and dismiss with Escape.
   Reconciliation results are reconnected, VM not found, connection mismatch,
   network recovery failed, startup interrupted, or exited while the API was offline.
   Detail's `API-STATUS` section identifies Firecrab API (`firecrab-api`), then
