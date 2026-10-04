@@ -269,7 +269,9 @@ SQLite and artifacts remain the durable source of truth.
 - Persistent IPv4/MAC leases live in SQLite. Internet access requires both network and VM policies to allow it.
 - Host-to-guest port forwarding uses nftables DNAT; different MicroNetworks are isolated by default.
 - The current implementation also blocks L2 traffic between VM TAPs; same-network traffic is tracked by [issue #72](https://github.com/SteelCrab/firecrab/issues/72).
-- Desired firewall state is applied as one nftables transaction. Manual Firecrab rules may be overwritten during reconciliation.
+- Desired firewall state is applied as one nftables transaction. An unchanged snapshot is skipped only after reading matching Firecrab-owned tables/chains/maps/rules from the kernel; counters and handles do not count as drift. Unrelated host tables remain intact.
+- Startup network recovery repairs TAP attachment/link state, bridge MTU/gateway prefixes, forwarding, owned nft rules, and DHCP files/process state, with up to three attempts. DHCP retains its newest reservation snapshot when recovering from an older request.
+- Persistent failures appear as per-VM `networkFailed` diagnostics while the VM remains `running`. `POST /api/network/reconcile` retries after the host/helper is repaired and updates running VMs' results without restarting their processes. Manual Firecrab rules may be overwritten during reconciliation.
 
 ### Security boundaries
 

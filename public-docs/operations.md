@@ -118,3 +118,20 @@ scripts/ci-m2-guest-boot.sh alpine-3.24.1
 - [firecrab CLI](firecrab-cli.md)
 - [Networking](networking.md)
 - [Troubleshooting](troubleshooting.md)
+
+## Retry VM network recovery
+
+A surviving VM can report `networkFailed` after API startup. Inspect its
+`reconciliation.detail` and helper logs, repair the reported host/helper problem,
+then retry without restarting the VM:
+
+```sh
+curl -fsS -X POST http://127.0.0.1:5523/api/network/reconcile
+curl -fsS http://127.0.0.1:5523/api/vms
+```
+
+The retry returns `204` on success or `503 network_recovery_failed` on failure.
+It makes up to three attempts and refreshes running VMs' diagnostics/check times.
+Stopped or exited VMs' historical results are retained. Verification covers owned
+nft state, TAP attachment, bridge state/MTU/gateway, forwarding, DHCP files and
+serving-process liveness. Traffic acceptance is tested separately by lifetime QA.

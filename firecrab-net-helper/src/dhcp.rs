@@ -68,6 +68,9 @@ pub enum DhcpError {
     /// Couldn't signal the running dnsmasq process to reload.
     #[error("failed to reload the running dnsmasq process")]
     Reload(#[source] io::Error),
+    /// A new dnsmasq exited before it could serve the snapshot.
+    #[error("dnsmasq exited during startup: {0}")]
+    Exited(String),
     /// Couldn't inspect the supervised dnsmasq process.
     #[error("failed to inspect the running dnsmasq process")]
     Inspect(#[source] io::Error),
@@ -88,6 +91,9 @@ struct DhcpState {
     child: Option<Child>,
     /// Lease generation of the snapshot currently applied, if any.
     applied_revision: Option<u64>,
+    /// Retained so a delayed older request can repair service drift without
+    /// rolling back the newest successfully applied reservations.
+    applied_leases: Vec<DhcpLeaseEntry>,
     /// The MicroNetwork set the running dnsmasq's base config was rendered
     /// for. dnsmasq only reads its main config file at startup — SIGHUP
     /// re-reads the `dhcp-hostsfile` and nothing else — so a network being
@@ -342,12 +348,37 @@ pub async fn sync_dhcp_leases(
     let networks_changed = state.served_networks.as_deref() != Some(micro_networks);
     let dnsmasq_running = owned_child_running(&mut state)?
         || (state.child.is_none() && running_orphan_pid().await.is_some());
+    let (revision, leases) = if !networks_changed
+        && state
+            .applied_revision
+            .is_some_and(|applied| revision < applied)
+    {
+        (
+            state.applied_revision.unwrap(),
+            state.applied_leases.clone(),
+        )
+    } else {
+        (revision, dhcpv6_reservations_only(leases, micro_networks))
+    };
+    let hosts_path = Path::new(HOSTS_FILE);
+    let hosts_content = render_hosts_file(&leases);
+    let base_content = render_base_config(hosts_path, micro_networks);
+    let base_matches = file_matches(&base_config_path(hosts_path), &base_content).await;
+    let hosts_match = file_matches(hosts_path, &hosts_content).await;
     if can_skip_snapshot(
         state.applied_revision,
         revision,
         networks_changed,
         dnsmasq_running,
+        base_matches && hosts_match,
     ) {
+        // Re-read the known-good reservations even if the process previously
+        // loaded a tampered hosts file. Liveness alone cannot prove that.
+        if let Some(child) = state.child.as_mut() {
+            reload(child)?;
+        } else if let Some(pid) = running_orphan_pid().await {
+            reload_pid(pid)?;
+        }
         return Ok(());
     }
     // Without a bridge to serve, dnsmasq's config has no `interface=` line,
@@ -357,13 +388,12 @@ pub async fn sync_dhcp_leases(
         stop_running_dnsmasq(&mut state).await;
         state.served_networks = Some(Vec::new());
         state.applied_revision = Some(revision);
+        state.applied_leases = leases;
         return Ok(());
     }
 
-    let hosts_path = Path::new(HOSTS_FILE);
     let candidate_path = hosts_path.with_extension("tmp");
-    let leases = dhcpv6_reservations_only(leases, micro_networks);
-    write_atomic_candidate(&candidate_path, &render_hosts_file(&leases)).await?;
+    write_atomic_candidate(&candidate_path, &hosts_content).await?;
     validate(&candidate_path, micro_networks).await?;
     tokio::fs::rename(&candidate_path, hosts_path)
         .await
@@ -372,7 +402,7 @@ pub async fn sync_dhcp_leases(
             source,
         })?;
 
-    if networks_changed {
+    if networks_changed || !base_matches || !dnsmasq_running {
         // Restart rather than reload, and tear down an orphan from a prior
         // net-helper lifetime too: whatever is running was configured for a
         // different set of interfaces, so reusing it would leave the new
@@ -398,6 +428,7 @@ pub async fn sync_dhcp_leases(
 
     release_stale_leases(&leases, micro_networks).await;
     state.applied_revision = Some(revision);
+    state.applied_leases = leases;
     Ok(())
 }
 
@@ -418,8 +449,11 @@ fn can_skip_snapshot(
     revision: u64,
     networks_changed: bool,
     dnsmasq_running: bool,
+    files_match: bool,
 ) -> bool {
-    dnsmasq_running && is_stale_snapshot(applied_revision, revision, networks_changed)
+    dnsmasq_running
+        && files_match
+        && is_stale_snapshot(applied_revision, revision, networks_changed)
 }
 
 /// Reaps an exited supervised child and reports whether it is still running.
@@ -471,7 +505,27 @@ async fn running_orphan_pid() -> Option<u32> {
     let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
         .await
         .ok()?;
-    (proc_state(&stat) != Some('Z')).then_some(pid)
+    if !proc_state(&stat).is_some_and(|state| state != 'Z') {
+        return None;
+    }
+    let command = tokio::fs::read(format!("/proc/{pid}/cmdline")).await.ok()?;
+    is_firecrab_dnsmasq(&command).then_some(pid)
+}
+
+/// A stale/reused PID file must never turn an unrelated process into our
+/// reload/stop target. Orphans must serve this helper's own config file.
+fn is_firecrab_dnsmasq(command: &[u8]) -> bool {
+    let mut arguments = command.split(|byte| *byte == 0);
+    let Some(program) = arguments
+        .next()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+    else {
+        return false;
+    };
+    Path::new(program)
+        .file_name()
+        .is_some_and(|name| name == "dnsmasq")
+        && arguments.any(|argument| argument == b"--conf-file=/run/firecrab/dnsmasq.conf")
 }
 
 /// Extracts the one-character process state after `/proc/<pid>/stat`'s
@@ -491,6 +545,18 @@ fn reload_pid(pid: u32) -> Result<(), DhcpError> {
     }
     Ok(())
 }
+/// A live process plus matching file bytes is the minimum evidence needed
+/// for a duplicate revision. Missing, edited, or unreadable files are repaired.
+async fn file_matches(path: &Path, expected: &str) -> bool {
+    let Ok(content) = tokio::fs::read_to_string(path).await else {
+        return false;
+    };
+    let Ok(metadata) = tokio::fs::metadata(path).await else {
+        return false;
+    };
+    content == expected && metadata.permissions().mode() & 0o444 == 0o444
+}
+
 /// Writes `content` to `path` and fsyncs it before returning, so a crash
 /// right after this call can never leave a half-written candidate file.
 async fn write_atomic_candidate(path: &Path, content: &str) -> Result<(), DhcpError> {
@@ -602,13 +668,20 @@ async fn spawn_dnsmasq(
     )
     .await?;
 
-    Command::new("dnsmasq")
+    let mut child = Command::new("dnsmasq")
         .arg("--keep-in-foreground")
         .arg(format!("--conf-file={}", config_path.display()))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(DhcpError::Spawn)
+        .map_err(DhcpError::Spawn)?;
+    // Bind/configuration failures happen immediately. Do not cache this
+    // revision as served by a child that has already exited.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    if let Some(status) = child.try_wait().map_err(DhcpError::Inspect)? {
+        return Err(DhcpError::Exited(status.to_string()));
+    }
+    Ok(child)
 }
 
 /// Tells a running dnsmasq to re-read its hosts file.
@@ -725,6 +798,23 @@ mod tests {
     #[test]
     fn parse_lease_file_of_an_empty_string_is_empty() {
         assert!(parse_lease_file("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_dhcp_revision_requires_unchanged_readable_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts.conf");
+        assert!(!file_matches(&path, "reservation").await);
+        write_atomic_candidate(&path, "reservation").await.unwrap();
+        assert!(file_matches(&path, "reservation").await);
+        tokio::fs::write(&path, "tampered").await.unwrap();
+        assert!(!file_matches(&path, "reservation").await);
+        assert!(!can_skip_snapshot(Some(5), 5, false, true, false));
+        write_atomic_candidate(&path, "reservation").await.unwrap();
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .unwrap();
+        assert!(!file_matches(&path, "reservation").await);
     }
 
     #[test]
@@ -984,7 +1074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_ignores_a_stale_or_duplicate_revision_while_dnsmasq_is_alive() {
+    async fn empty_network_snapshot_stops_dnsmasq_even_at_an_unchanged_revision() {
         let actor = DhcpActor::new();
         {
             let mut state = actor.state.lock().await;
@@ -998,9 +1088,9 @@ mod tests {
             );
         }
 
-        // Would fail trying to actually spawn/bind dnsmasq for real if it
-        // got past the staleness check — reaching `Ok(())` here proves the
-        // stale revision short-circuited before any of that.
+        // A live child with no served networks is unsafe even at an unchanged
+        // revision. Stop it, then preserve the newest lease generation when
+        // a delayed older snapshot arrives.
         assert!(
             sync_dhcp_leases(
                 &actor,
@@ -1022,14 +1112,13 @@ mod tests {
             .is_ok()
         );
 
-        let mut child = actor
-            .state
-            .lock()
-            .await
-            .child
-            .take()
-            .expect("stand-in child remains tracked");
-        child.kill().await.expect("stop stand-in dnsmasq");
+        let state = actor.state.lock().await;
+        assert!(state.child.is_none());
+        assert_eq!(state.applied_revision, Some(5));
+        assert_eq!(
+            state.applied_leases,
+            vec![lease(1, "172.30.0.5", "02:fc:00:00:00:05")]
+        );
     }
 
     #[tokio::test]
@@ -1072,8 +1161,20 @@ mod tests {
 
     #[test]
     fn a_stale_snapshot_is_reapplied_when_dnsmasq_is_dead() {
-        assert!(can_skip_snapshot(Some(5), 5, false, true));
-        assert!(!can_skip_snapshot(Some(5), 5, false, false));
+        assert!(can_skip_snapshot(Some(5), 5, false, true, true));
+        assert!(!can_skip_snapshot(Some(5), 5, false, false, true));
+    }
+
+    #[test]
+    fn orphan_pid_must_belong_to_dnsmasq_serving_our_config() {
+        assert!(is_firecrab_dnsmasq(
+            b"dnsmasq\0--keep-in-foreground\0--conf-file=/run/firecrab/dnsmasq.conf\0"
+        ));
+        assert!(!is_firecrab_dnsmasq(b"sleep\x0060\0"));
+        assert!(!is_firecrab_dnsmasq(
+            b"/usr/sbin/dnsmasq\0--conf-file=/etc/dnsmasq.conf\0"
+        ));
+        assert!(!is_firecrab_dnsmasq(b""));
     }
 
     #[test]

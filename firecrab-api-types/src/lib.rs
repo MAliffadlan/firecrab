@@ -367,7 +367,7 @@ pub struct StartupStepRun {
     pub detail: Option<String>,
 }
 
-/// What the latest API startup learned about a VM left active.
+/// What the latest API startup or operator network retry learned about a VM.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum VmReconciliationOutcome {
@@ -379,7 +379,7 @@ pub enum VmReconciliationOutcome {
     Exited,
 }
 
-/// A startup snapshot, not a continuous VM or network health check.
+/// A startup/operator retry snapshot, not a continuous health check.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct VmReconciliation {
@@ -400,7 +400,7 @@ pub struct VmResponse {
     pub name: String,
     /// Current lifecycle state.
     pub state: VmState,
-    /// Latest API startup check; cleared when a new start is accepted.
+    /// Latest API startup/network retry check; cleared when a new start is accepted.
     #[serde(default)]
     pub reconciliation: Option<VmReconciliation>,
     /// Template alias this VM was created from.

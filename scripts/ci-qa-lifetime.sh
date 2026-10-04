@@ -18,6 +18,7 @@ API=${API%/}
 REFERENCE=${1:-alpine:3.21}
 WAIT_FACTOR=${FIRECRAB_QA_WAIT_FACTOR:-1}
 SUBNET=${FIRECRAB_QA_LIFETIME_SUBNET:-172.219.0.0/24}
+HOST_PORT=${FIRECRAB_QA_LIFETIME_PORT:-18081}
 
 pass() { printf 'PASS %s\n' "$1"; }
 warning() { printf 'WARNING %s: %s\n' "$1" "$2"; }
@@ -35,9 +36,9 @@ host() {
             -o ConnectTimeout=10 \
             -o StrictHostKeyChecking=accept-new \
             -o "UserKnownHostsFile=$(dirname -- "$key")/known_hosts" \
-            "root@${FIRECRAB_QA_MANAGER_HOST}" "$1" </dev/null
+            "root@${FIRECRAB_QA_MANAGER_HOST}" "set -e; $1" </dev/null
     else
-        sudo sh -c "$1" </dev/null
+        sudo sh -ec "$1" </dev/null
     fi
 }
 
@@ -100,13 +101,23 @@ installed_alias() {
         done
         [ "$status" = succeeded ] || fail R1 "timed out importing $REFERENCE"
     fi
-    printf '%s\n' "$alias"
+    TEMPLATE=$alias
 }
 
 NET=
 VM=
 IMPORTED=
+KEY=
+KNOWN_HOSTS=
+API_STOPPED=0
+HELPER_STOPPED=0
+SENTINEL=
 cleanup() {
+    if [ "$HELPER_STOPPED" = 1 ]; then host "systemctl start firecrab-net-helper" || true; fi
+    if [ "$API_STOPPED" = 1 ]; then host "systemctl start firecrab-api" || true; api_ready || true; fi
+    if [ -n "$SENTINEL" ]; then host "nft delete table inet $SENTINEL" || true; fi
+    if [ -n "$KEY" ]; then rm -f "$KEY"; fi
+    if [ -n "$KNOWN_HOSTS" ]; then rm -f "$KNOWN_HOSTS"; fi
     if [ -n "${VM:-}" ]; then
         curl -sS -o /dev/null --max-time 120 -X POST "$API/api/vms/$VM/stop" || true
         curl -sS -o /dev/null --max-time 30 -X DELETE "$API/api/vms/$VM" || true
@@ -120,7 +131,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-TEMPLATE=$(installed_alias)
+installed_alias
 printf 'VM lifetime: template=%s api=%s\n' "$TEMPLATE" "$API"
 
 NET=$(curl -fsS -X POST "$API/api/micro-networks" \
@@ -129,7 +140,7 @@ NET=$(curl -fsS -X POST "$API/api/micro-networks" \
     python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 VM=$(curl -fsS -X POST "$API/api/vms" \
     -H 'content-type: application/json' \
-    -d "{\"name\":\"qa-lifetime-$$\",\"template\":\"$TEMPLATE\",\"cpu\":1,\"ram\":${FIRECRAB_QA_RAM:-512},\"diskGb\":${FIRECRAB_QA_DISK_GB:-2},\"microNetworkId\":\"$NET\"}" |
+    -d "{\"name\":\"qa-lifetime-$$\",\"template\":\"$TEMPLATE\",\"cpu\":1,\"ram\":${FIRECRAB_QA_RAM:-512},\"diskGb\":${FIRECRAB_QA_DISK_GB:-2},\"microNetworkId\":\"$NET\",\"portForwards\":[{\"hostPort\":$HOST_PORT,\"guestPort\":80,\"protocol\":\"tcp\"}]}" |
     python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 SIMPLE=$(printf '%s' "$VM" | tr -d -)
 TAP=$(python3 -c 'import hashlib, sys, uuid; print("fct" + hashlib.sha256(uuid.UUID(sys.argv[1]).bytes).hexdigest()[:12])' "$VM")
@@ -172,6 +183,63 @@ SHIM=$(shim_pid)
 VMM=$(vmm_pid)
 pass "R3 a start right after a stop reached running"
 
+# Establish real guest traffic before testing lifetime/recovery. The injected
+# static toolbox provides httpd for the default Alpine fixture.
+IPV4=$(curl -fsS "$API/api/vms/$VM" | json_field ipv4)
+DETAIL=$(curl -fsS "$API/api/micro-networks/$NET")
+BRIDGE=$(printf '%s' "$DETAIL" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bridge"]["name"])')
+GATEWAY=$(printf '%s' "$DETAIL" | python3 -c 'import json,sys; print(json.load(sys.stdin)["subnet"]["gateway"])')
+PREFIX=${SUBNET#*/}
+BRIDGE_MTU=$(host "cat /sys/class/net/$BRIDGE/mtu")
+KEY=$(mktemp)
+KNOWN_HOSTS=$(mktemp)
+chmod 600 "$KEY" "$KNOWN_HOSTS"
+curl -fsS "$API/api/vms/$VM/ssh-key" > "$KEY"
+PUBLIC_KEY=$(curl -fsS "$API/api/vms/$VM/ssh-host-key" | json_field publicKey)
+printf '%s %s\n' "$IPV4" "$PUBLIC_KEY" > "$KNOWN_HOSTS"
+SSH_TRANSPORT=()
+if [ -n "${FIRECRAB_QA_MANAGER_HOST:-}" ]; then
+    printf -v proxy '%q ' ssh -i "$FIRECRAB_QA_MANAGER_KEY" -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -o "UserKnownHostsFile=$(dirname -- "$FIRECRAB_QA_MANAGER_KEY")/known_hosts" \
+        "root@$FIRECRAB_QA_MANAGER_HOST"
+    proxy+='-W %h:%p'
+    SSH_TRANSPORT=(-o "ProxyCommand=$proxy")
+fi
+guest() {
+    ssh "${SSH_TRANSPORT[@]}" -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+        -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" \
+        -o ConnectTimeout=5 "root@$IPV4" "$@"
+}
+for _ in $(seq 1 $((60 * WAIT_FACTOR))); do
+    guest true >/dev/null 2>&1 && break
+    sleep 2
+done
+guest "mkdir -p /tmp/qa-lifetime; printf '%s\n' '$VM' > /tmp/qa-lifetime/index.html; /etc/firecrab/busybox httpd -p 80 -h /tmp/qa-lifetime" \
+    || fail R4 "guest HTTP fixture could not start"
+traffic() {
+    host "ping -c 1 -W 3 $IPV4 >/dev/null && test \"\$(curl -fsS --max-time 5 http://127.0.0.1:$HOST_PORT/)\" = '$VM'" || return 1
+    guest true >/dev/null
+}
+traffic || fail R4 "guest ping/SSH/forwarded HTTP failed before API restart"
+check_recovered() {
+    local id=$1
+    api_ready || fail "$id" "API did not come back"
+    [ "$(shim_pid)" = "$SHIM" ] || fail "$id" "shim PID changed"
+    [ "$(vmm_pid)" = "$VMM" ] || fail "$id" "Firecracker PID changed"
+    [ "$(vm_state)" = running ] || fail "$id" "VM is not running"
+    curl -fsS "$API/api/vms/$VM" | python3 -c 'import json,sys; assert json.load(sys.stdin)["reconciliation"]["outcome"] == "reconnected"' \
+        || fail "$id" "network recovery did not report success"
+    host "ip -o link show $TAP | grep -q 'master $BRIDGE'" || fail "$id" "TAP attachment is wrong"
+    host "ip -o addr show dev $BRIDGE | grep -q '$GATEWAY/$PREFIX'" || fail "$id" "gateway prefix is wrong"
+    host "nft list chain inet firecrab vm_${SIMPLE}_dnat_out | grep -q '$IPV4:80'" || fail "$id" "DNAT policy is absent"
+    host "nft list map inet firecrab vm_egress | grep -q '$IPV4'" || fail "$id" "egress dispatch is absent"
+    host "nft list table netdev firecrab_l2_$SIMPLE | grep -q 'ether saddr'" || fail "$id" "anti-spoofing policy is absent"
+    traffic || fail "$id" "guest ping/SSH/forwarded HTTP failed"
+}
+stop_api() { API_STOPPED=1; host "systemctl stop firecrab-api"; }
+start_api() { host "systemctl start firecrab-api"; api_ready || fail R4 "API did not come back"; API_STOPPED=0; }
+
 # R4: an API restart re-adopts the running VM.
 host "systemctl restart firecrab-api"
 api_ready || fail R4 "API did not come back"
@@ -180,7 +248,7 @@ api_ready || fail R4 "API did not come back"
 [ "$(settled_state)" = running ] || fail R4 "VM is $(vm_state) after the restart, expected running"
 host "journalctl -u firecrab-api -b --no-pager | grep 'startup reconciliation finished' | tail -1" |
     grep -Eq 'adopted=[1-9]' || fail R4 "the last reconciliation adopted no VM"
-host "ip -o link show $TAP | grep -q ' master '" || fail R4 "$TAP is not attached to a bridge"
+check_recovered R4
 if command -v firecrab >/dev/null 2>&1; then
     # Ctrl+] detaches; reaching it proves the console WebSocket attached.
     printf '\035' | firecrab --api "$API" vm console "$VM" >/dev/null 2>&1 || fail R4 "console did not attach after adoption"
@@ -189,6 +257,57 @@ else
     pass "R4 API restart kept shim $SHIM, re-adopted the VM, and kept $TAP"
     warning R4 "firecrab CLI not on PATH; console after adoption not checked"
 fi
+
+# DHCP and forwarding drift are host-wide. Run these injections only on a
+# disposable test host with no other active VMs.
+curl -fsS "$API/api/vms" | python3 -c 'import json,sys; own=sys.argv[1]; assert not any(vm["id"] != own and vm["state"] in ("starting","running","stopping") for vm in json.load(sys.stdin))' "$VM" \
+    || fail R4b "network drift QA requires a host with no other active VMs"
+
+# R4b: nft drift while the helper remains alive. Only this QA VM's
+# policy is damaged; a foreign table must survive the owned-table replay.
+SENTINEL=firecrab_qa_$SIMPLE
+host "nft add table inet $SENTINEL"
+stop_api
+host "nft flush chain inet firecrab vm_${SIMPLE}_dnat_out; nft delete element inet firecrab vm_egress '{ $IPV4 }'; nft flush table netdev firecrab_l2_$SIMPLE"
+start_api
+check_recovered R4b
+host "nft list table inet $SENTINEL >/dev/null" || fail R4b "unrelated host table was changed"
+pass "R4b owned nft drift repaired with the helper alive; foreign table preserved"
+
+# R4c: a detached/down TAP and wrong bridge link/address configuration.
+stop_api
+host "ip link set $TAP nomaster; ip link set $TAP down; ip link set $BRIDGE down; ip link set $BRIDGE mtu 1300; ip addr del $GATEWAY/$PREFIX dev $BRIDGE; ip addr add $GATEWAY/25 dev $BRIDGE; sysctl -w net.ipv4.ip_forward=0 >/dev/null"
+start_api
+check_recovered R4c
+[ "$(host "cat /sys/class/net/$BRIDGE/mtu")" = "$BRIDGE_MTU" ] || fail R4c "bridge MTU was not restored"
+host "test \"\$(cat /proc/sys/net/ipv4/ip_forward)\" = 1" || fail R4c "IPv4 forwarding was not restored"
+pass "R4c TAP, bridge state, MTU, gateway prefix and forwarding repaired"
+
+# R4d: same DHCP revision, corrupt files, and a crashed serving process.
+stop_api
+host "printf 'invalid\n' > /run/firecrab/dnsmasq-hosts.conf; printf 'interface=lo\n' > /run/firecrab/dnsmasq.conf; kill -9 \"\$(cat /run/firecrab/dnsmasq.pid)\""
+start_api
+check_recovered R4d
+host "grep -q '$IPV4' /run/firecrab/dnsmasq-hosts.conf; grep -q 'interface=$BRIDGE' /run/firecrab/dnsmasq.conf; kill -0 \"\$(cat /run/firecrab/dnsmasq.pid)\"" || fail R4d "serving DHCP snapshot was not restored"
+guest '/etc/firecrab/busybox udhcpc -i eth0 -n -q -t 3 -T 2 -s /etc/firecrab/dhcp.script' || fail R4d "guest could not obtain its reserved address again"
+traffic || fail R4d "traffic failed after DHCP renewal"
+pass "R4d DHCP config/reservations and serving process repaired at unchanged revision"
+
+# R4e: persistent helper outage is observable; explicit retry recovers it
+# without restarting the API, shim, or Firecracker.
+stop_api
+HELPER_STOPPED=1
+host "systemctl stop firecrab-net-helper"
+start_api
+curl -fsS "$API/api/vms/$VM" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["state"] == "running" and d["reconciliation"]["outcome"] == "networkFailed" and d["reconciliation"]["detail"]' || fail R4e "helper failure was not visible"
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/api/network/reconcile")" = 503 ] || fail R4e "retry during helper outage should fail with 503"
+host "systemctl start firecrab-net-helper"
+HELPER_STOPPED=0
+curl -fsS -o /dev/null -X POST "$API/api/network/reconcile" || fail R4e "operator network retry failed"
+check_recovered R4e
+pass "R4e helper outage reported; operator retry restored networking with unchanged VM PIDs"
+host "nft delete table inet $SENTINEL"
+SENTINEL=
 
 # R5: a crash while the API is down is recorded from exit.json.
 host "systemctl stop firecrab-api; kill -9 $VMM; sleep 2; systemctl start firecrab-api"

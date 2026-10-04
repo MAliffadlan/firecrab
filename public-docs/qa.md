@@ -175,7 +175,11 @@ Every VM runs in its own `firecrab-vm-<simple id>.service` unit.
 | R1 | shim in its unit | `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent and the main process of an active `firecrab-vm-<simple id>.service`; its parent is PID 1 and it runs as the API user; the runtime directory has `shim.sock` and `console.log` |
 | R2 | stop from outside the API | `systemctl stop firecrab-vm-<simple id>.service` → `stopped`; `exit.json` has `"stop_requested":true`; the TAP is gone |
 | R3 | quick restart | stop, then start at once → `running` (the previous unit's name does not block the new one) |
-| R4 | API restart | shim and Firecracker PIDs unchanged; VM stays `running`; journal has `adopted=1`; TAP still on its bridge; V9 and V11 work |
+| R4 | API restart | shim and Firecracker PIDs unchanged; VM stays `running`; journal has `adopted=1`; TAP still on its bridge; guest ping/SSH/forwarded HTTP and V9/V11 work |
+| R4b | owned nft drift with helper alive | corrupt QA VM DNAT/egress/L2 policy while API is down; restart repairs it, guest ping/SSH/forwarded HTTP work, unchanged VM PIDs, unrelated table preserved |
+| R4c | TAP/bridge drift | detach/down TAP, bridge down/wrong MTU/gateway prefix/forwarding; restart repairs all, guest traffic works, unchanged VM PIDs |
+| R4d | DHCP drift/failure | corrupt hosts/base config and kill dnsmasq at unchanged revision; restart restores serving reservations; guest renews DHCP and traffic works |
+| R4e | helper outage and operator retry | startup and retry failures report `networkFailed`/503; helper restoration + `POST /api/network/reconcile` gives 204 and `reconnected`, unchanged VM PIDs, guest traffic works |
 | R5 | crash while the API is down | stop the API, `kill -9` Firecracker, start the API → `error`; its `fct*` TAP and nft rules are gone |
 | R6 | interrupted start | restart the API after the shim appears but before `running` → `error`; no unit remains |
 | R7 | normal stop | V11 → `stopped`; `exit.json` has `"stop_requested":true`; `systemctl --failed` lists no `firecrab-vm-*` unit |
@@ -239,7 +243,7 @@ Linux-only (skip on macOS/Windows CLI, or run inside the management guest):
 | `scripts/ci-qa-api.sh` | G4 G5 H1 H2 N1–N5 S1–S3 L1–L3 I1 I8 I9 V14 C3 C5 X1–X4 X6 |
 | `scripts/ci-qa-nginx.sh` | NGX1–NGX9 including V8a–V8d SSH |
 | `scripts/ci-qa-ssh.sh` | V8a–V8d (called from guest boot and nginx) |
-| `scripts/ci-qa-lifetime.sh` | R1–R7 X7 for one OCI reference (default `alpine:3.21`); root commands run through `sudo` on Linux or the management VM SSH on macOS |
+| `scripts/ci-qa-lifetime.sh` | R1–R7 (including R4b–R4e) X7 for one OCI reference (default `alpine:3.21`); root commands run through `sudo` on Linux or the management VM SSH on macOS |
 | `scripts/ci-qa-guest.sh` | I5 I6 V1 V2 V6 V7 V8 V9 V11 V12 V13 V15 N6 C1 C2 C2b C4 X5; expanded rows run for the first OCI reference, API guest flow for the remaining `alpine:3.21` `ubuntu:24.04` `fedora:42` references |
 | `firecrab-e2e` `test:dashboard` | dashboard rows that fake the API and console (`@dashboard`), including V15 in the web terminal |
 | GitHub-hosted macOS | Swift/Rust checks, signed helper, and diagnostic JSON; no runtime E2E |

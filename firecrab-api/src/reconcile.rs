@@ -191,27 +191,20 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
     for &id in &released {
         crate::handlers::vms::teardown_vm_network(state, id).await;
     }
-    let network_error = crate::handlers::micro_networks::ensure_all_networks(state)
-        .await
-        .err();
-    if let Some(error) = &network_error {
-        tracing::warn!(error, "startup network resync failed");
-    }
-    for (vm, ..) in adopted
+    let running: Vec<_> = adopted
         .iter()
         .filter(|(vm, ..)| vm.state == VmState::Running)
-    {
-        let mut errors: Vec<String> = network_error.iter().cloned().collect();
-        if let Err(error) = state.network.create_tap(vm.id, vm.micro_network_id).await {
-            tracing::warn!(vm_id = %vm.id, %error, "re-adopted VM's TAP could not be re-attached");
-            errors.push(format!("failed to re-attach TAP: {error}"));
-        }
-        if !errors.is_empty() {
-            report.network_mismatches.push(vm.id);
-            let result = results.get_mut(&vm.id).expect("adopted VM has a result");
-            result.outcome = VmReconciliationOutcome::NetworkFailed;
-            result.detail = Some(errors.join("; "));
-        }
+        .map(|(vm, ..)| vm.clone())
+        .collect();
+    let recovery = {
+        let _guard = state.network_mutations.lock().await;
+        recover_networks_locked(state, &running).await
+    };
+    for (id, detail) in recovery.failures {
+        report.network_mismatches.push(id);
+        let result = results.get_mut(&id).expect("adopted VM has a result");
+        result.outcome = VmReconciliationOutcome::NetworkFailed;
+        result.detail = Some(detail);
     }
     for (vm, process) in adopted {
         firecracker::register_and_watch(state, vm.id, process);
@@ -257,6 +250,112 @@ pub(crate) async fn reconcile(state: &AppState) -> ReconcileReport {
         "startup reconciliation finished"
     );
     report
+}
+
+#[derive(Default)]
+struct NetworkRecovery {
+    error: Option<String>,
+    failures: HashMap<Uuid, String>,
+}
+
+/// Reapply bridges/services and TAPs under the same API mutation lock as VM
+/// starts/stops. The second services pass includes any restored TAP's policy.
+/// A restarting helper/DHCP service gets three bounded attempts.
+async fn recover_networks_locked(state: &AppState, running: &[VmRecord]) -> NetworkRecovery {
+    let mut recovery = NetworkRecovery::default();
+    for attempt in 1..=3 {
+        recovery = NetworkRecovery::default();
+        let first_error = crate::handlers::micro_networks::ensure_all_networks_locked(state)
+            .await
+            .err();
+        for vm in running {
+            if let Err(error) = state.network.create_tap(vm.id, vm.micro_network_id).await {
+                recovery
+                    .failures
+                    .insert(vm.id, format!("failed to re-attach TAP: {error}"));
+            }
+        }
+        // Even a first-pass failure may be recoverable after TAP repair.
+        // Always retain a persistent failure from the final services pass.
+        recovery.error = if running.is_empty() {
+            first_error
+        } else {
+            crate::handlers::micro_networks::ensure_all_networks_locked(state)
+                .await
+                .err()
+        };
+        if let Some(error) = &recovery.error {
+            for vm in running {
+                let detail = recovery.failures.entry(vm.id).or_default();
+                if !detail.is_empty() {
+                    detail.push_str("; ");
+                }
+                detail.push_str(error);
+            }
+        }
+        if recovery.error.is_none() && recovery.failures.is_empty() {
+            return recovery;
+        }
+        tracing::warn!(attempt, error = ?recovery.error, failures = ?recovery.failures,
+            "network verification/recovery failed");
+        if attempt < 3 {
+            tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
+        }
+    }
+    recovery
+}
+
+/// Explicit operator retry without restarting the API or any live VM.
+/// Updates only currently running VMs; historical exit/start results stay.
+pub(crate) async fn retry_networks(state: &AppState) -> Result<(), String> {
+    let _guard = state.network_mutations.lock().await;
+    let running: Vec<_> = state
+        .vms
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .values()
+        .filter(|vm| vm.state == VmState::Running)
+        .cloned()
+        .collect();
+    let recovery = recover_networks_locked(state, &running).await;
+    let error = recovery
+        .error
+        .clone()
+        .or_else(|| recovery.failures.values().next().cloned());
+    let checked_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let vms = state.vms.lock().unwrap_or_else(|p| p.into_inner());
+    let mut results = state
+        .reconciliation
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for vm in running {
+        // Exit monitors can settle a VM while helper requests are in flight.
+        if !vms
+            .get(&vm.id)
+            .is_some_and(|vm| vm.state == VmState::Running)
+        {
+            continue;
+        }
+        let detail = recovery.failures.get(&vm.id).cloned();
+        results.insert(
+            vm.id,
+            VmReconciliation {
+                outcome: if detail.is_some() {
+                    VmReconciliationOutcome::NetworkFailed
+                } else {
+                    VmReconciliationOutcome::Reconnected
+                },
+                checked_at_ms,
+                detail: detail.or_else(|| {
+                    Some("network verification/recovery completed by operator retry".to_owned())
+                }),
+            },
+        );
+    }
+    error.map_or(Ok(()), Err)
 }
 
 /// What the previous run left for one VM: a shim still serving it, or the
@@ -766,8 +865,14 @@ mod tests {
 
     #[tokio::test]
     async fn network_failures_are_visible_even_when_the_vm_is_still_running() {
-        for operation in ["ensure_firewall", "create_tap"] {
+        for operation in [
+            "ensure_micro_network_bridge",
+            "ensure_firewall",
+            "sync_dhcp_leases",
+            "create_tap",
+        ] {
             let host = host_failing(Some(operation)).await;
+            crate::handlers::micro_networks::test_support::seed_internet_micro_network(&host.state);
             let (id, runtime) = seed_active(&host, operation, VmState::Running);
             surviving_shim(&host, id, &runtime).await;
 
@@ -780,10 +885,10 @@ mod tests {
             assert_eq!(result.outcome, VmReconciliationOutcome::NetworkFailed);
             let diagnostic = result.detail.unwrap();
             assert!(
-                diagnostic.contains(if operation == "create_tap" {
-                    "TAP"
-                } else {
-                    operation
+                diagnostic.contains(match operation {
+                    "create_tap" => "TAP",
+                    "sync_dhcp_leases" => "dhcp sync",
+                    _ => operation,
                 }),
                 "{diagnostic}"
             );
@@ -792,6 +897,86 @@ mod tests {
             control.terminate();
             wait_for(&host, id, VmState::Stopped).await;
         }
+    }
+
+    #[tokio::test]
+    async fn startup_retries_a_transient_helper_failure() {
+        let host = host_failing(Some("create_tap")).await;
+        let (id, runtime) = seed_active(&host, "transient-helper", VmState::Running);
+        surviving_shim(&host, id, &runtime).await;
+        let socket = host._directory.path().join("recording-helper.sock");
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            fs::remove_file(&socket).unwrap();
+            crate::network::test_support::spawn_recording_helper(&socket, None);
+        });
+        let report = reconcile(&host.state).await;
+        assert!(report.network_mismatches.is_empty());
+        assert_eq!(
+            api_result(&host, id).await.outcome,
+            VmReconciliationOutcome::Reconnected
+        );
+        assert!(host.helper_log.lock().unwrap().contains(&"create_tap"));
+        let process = host.state.processes.lock().unwrap()[&id].clone();
+        process.control.terminate();
+        wait_for(&host, id, VmState::Stopped).await;
+    }
+
+    #[tokio::test]
+    async fn operator_retry_recovers_failed_network_without_replacing_the_vm() {
+        use crate::server::RequestId;
+        use axum::{Extension, extract::State, http::StatusCode};
+        let host = host_failing(Some("sync_dhcp_leases")).await;
+        let (id, runtime) = seed_active(&host, "network-retry", VmState::Running);
+        surviving_shim(&host, id, &runtime).await;
+        reconcile(&host.state).await;
+        let process = host.state.processes.lock().unwrap()[&id].clone();
+        let handler = || {
+            crate::handlers::network::reconcile_network(
+                State(host.state.clone()),
+                Extension(RequestId(Uuid::new_v4())),
+            )
+        };
+        let failed = handler().await.unwrap_err();
+        use axum::response::IntoResponse;
+        assert_eq!(
+            failed.into_response().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            api_result(&host, id).await.outcome,
+            VmReconciliationOutcome::NetworkFailed
+        );
+        assert!(
+            host.helper_log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|operation| **operation == "sync_dhcp_leases")
+                .count()
+                >= 6,
+            "startup and operator recovery retry the failing service"
+        );
+
+        let socket = host._directory.path().join("recording-helper.sock");
+        fs::remove_file(&socket).unwrap();
+        let (_helper, calls) = crate::network::test_support::spawn_recording_helper(&socket, None);
+        assert_eq!(handler().await.unwrap(), StatusCode::NO_CONTENT);
+        let result = api_result(&host, id).await;
+        assert_eq!(result.outcome, VmReconciliationOutcome::Reconnected);
+        assert!(result.detail.unwrap().contains("operator retry"));
+        assert_eq!(memory_state(&host, id), Some(VmState::Running));
+        assert_eq!(process.pid, host.state.processes.lock().unwrap()[&id].pid);
+        assert!(std::sync::Arc::ptr_eq(
+            &process.console,
+            &host.state.processes.lock().unwrap()[&id].console
+        ));
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls.contains(&"create_tap"));
+        assert!(calls.contains(&"ensure_firewall"));
+        assert!(!calls.contains(&"start_vm_unit") && !calls.contains(&"stop_vm_unit"));
+        process.control.terminate();
+        wait_for(&host, id, VmState::Stopped).await;
     }
 
     #[tokio::test]

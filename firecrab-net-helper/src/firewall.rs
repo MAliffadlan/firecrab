@@ -101,6 +101,12 @@ pub enum FirewallError {
     /// Writing the ruleset to `nft`'s stdin failed.
     #[error("failed to write ruleset to nft stdin")]
     WriteStdin(#[source] std::io::Error),
+    /// Forwarding could not be restored.
+    #[error("failed to restore host IP forwarding")]
+    Forwarding(#[source] std::io::Error),
+    /// The kernel ruleset could not be read as nft JSON.
+    #[error("invalid nft ruleset snapshot: {0}")]
+    InvalidSnapshot(String),
     /// `nft` rejected the ruleset.
     #[error("nft rejected the ruleset: {stderr}")]
     NftFailed {
@@ -127,6 +133,9 @@ struct FirewallState {
     /// uplink change and a MicroNetwork being added/removed re-apply, without
     /// this state needing to mirror every input that goes into rendering.
     applied_ruleset: Option<String>,
+    /// Last successful transaction, read back from the kernel. Volatile
+    /// handles and counter values are excluded; rule order is preserved.
+    kernel_snapshot: Option<Vec<serde_json::Value>>,
     /// vm_id -> (uplink, complete policy) of every VM whose policy is
     /// currently installed. Keeping the full value lets an identical
     /// re-apply be a true no-op, while a changed lease, egress setting, or
@@ -187,11 +196,12 @@ pub async fn ensure_firewall(
     // hooks forward/postrouting, so each backend is punched here — even when
     // the Firecrab ruleset is unchanged, so a UFW reload or firewalld
     // restart is repaired on the next reconcile.
+    crate::bridge::enable_ip_forward().map_err(FirewallError::Forwarding)?;
     crate::host_acl::ensure_all(&default_uplink, micro_networks).await;
     // Routing a dual-stack network's traffic needs host-wide IPv6
     // forwarding, which no IPv4-only deployment should have switched on for
-    // it. Best-effort like the host ACL punches above: a host that refuses
-    // the sysctl still gets its v4 ruleset applied.
+    // it. Failure is reported rather than declaring a non-routing host
+    // successfully recovered.
     if micro_networks.iter().any(|network| network.ipv6.is_some()) {
         let mut uplinks: Vec<&str> = vec![default_uplink.as_str()];
         uplinks.extend(
@@ -199,12 +209,11 @@ pub async fn ensure_firewall(
                 .iter()
                 .filter_map(|network| network.uplink.as_deref()),
         );
-        if let Err(error) = crate::bridge::enable_ipv6_forward(&uplinks) {
-            println!("[WARN] failed to enable IPv6 forwarding: {error}");
-        }
+        crate::bridge::enable_ipv6_forward(&uplinks).map_err(FirewallError::Forwarding)?;
     }
     if state.applied_ruleset.as_deref() == Some(base_ruleset.as_str())
         && state.applied_vms == desired_vms
+        && snapshot_matches(&state).await?
     {
         return Ok(());
     }
@@ -219,7 +228,9 @@ pub async fn ensure_firewall(
         &list_tables().await?,
         &vm_policies,
     ));
+    state.kernel_snapshot = None;
     run_nft(&ruleset).await?;
+    let kernel_snapshot = read_owned_snapshot().await?;
     // Best-effort iptables compat: coexist with Docker's FORWARD DROP policy.
     ensure_iptables_compat(
         &bridge_names(micro_networks),
@@ -228,6 +239,7 @@ pub async fn ensure_firewall(
     .await;
     state.applied_vms = desired_vms;
     state.applied_ruleset = Some(base_ruleset);
+    state.kernel_snapshot = Some(kernel_snapshot);
     Ok(())
 }
 
@@ -254,8 +266,8 @@ fn render_reconciled_ruleset(
 }
 
 /// Install (or atomically replace) one VM's isolation + egress policy.
-/// Independent of every other VM: only this VM's named chains and map
-/// elements are touched.
+/// Ordinarily only this VM's named chains/maps change. A duplicate request
+/// with kernel drift replays the complete cached snapshot atomically.
 pub async fn apply_vm_policy(actor: &FirewallActor, policy: VmPolicy) -> Result<(), FirewallError> {
     let (connection, handle, _) = new_connection().map_err(FirewallError::Connection)?;
     tokio::spawn(connection);
@@ -266,12 +278,29 @@ pub async fn apply_vm_policy(actor: &FirewallActor, policy: VmPolicy) -> Result<
     let internet = network_internet_enabled(&state.networks, policy.ipv4);
     let previous = state.applied_vms.get(&policy.vm_id).cloned();
 
-    // `ensure_all_networks` now includes active policies in its atomic
-    // snapshot, so setup's immediately-following per-VM apply is normally
-    // identical. It needs no host mutation. Keeping this decision inside the
-    // helper's single-writer lock also prevents two simultaneous API requests
-    // from doing redundant nft work.
+    // A duplicate request is a no-op only with kernel evidence. A drifted
+    // shared table needs the whole cached desired snapshot, not an isolated
+    // VM replacement whose map/chains may no longer exist.
     if previous.as_ref() == Some(&(uplink.clone(), policy.clone())) {
+        if snapshot_matches(&state).await? {
+            return Ok(());
+        }
+        let policies = installable_policies(
+            &state
+                .applied_vms
+                .values()
+                .map(|(_, policy)| policy.clone())
+                .collect::<Vec<_>>(),
+            tap_exists,
+        );
+        let base = render_apply_ruleset(&default_uplink, &state.networks)?;
+        let mut ruleset =
+            render_reconciled_ruleset(&base, &default_uplink, &state.networks, &policies);
+        ruleset.push_str(&render_stale_l2_removal(&list_tables().await?, &policies));
+        state.kernel_snapshot = None;
+        run_nft(&ruleset).await?;
+        state.kernel_snapshot = Some(read_owned_snapshot().await?);
+        state.applied_ruleset = Some(base);
         return Ok(());
     }
 
@@ -283,6 +312,7 @@ pub async fn apply_vm_policy(actor: &FirewallActor, policy: VmPolicy) -> Result<
         Some((_, previous)) => render_vm_policy_replacement(&uplink, &previous, &policy, internet),
         None => render_vm_policy_for_network(&uplink, &policy, internet),
     };
+    state.kernel_snapshot = None;
     run_nft(&ruleset).await?;
     state.applied_vms.insert(policy.vm_id, (uplink, policy));
     Ok(())
@@ -295,6 +325,7 @@ pub async fn remove_vm_policy(actor: &FirewallActor, vm_id: Uuid) -> Result<(), 
     let Some((_, policy)) = state.applied_vms.get(&vm_id).cloned() else {
         return Ok(());
     };
+    state.kernel_snapshot = None;
     run_nft(&render_vm_policy_removal(vm_id, policy.ipv4, policy.ipv6)).await?;
     state.applied_vms.remove(&vm_id);
     Ok(())
@@ -308,6 +339,7 @@ pub async fn remove_firewall(actor: &FirewallActor) -> Result<(), FirewallError>
     run_nft(&render_remove_ruleset(&list_tables().await?)).await?;
     state.applied_vms.clear();
     state.applied_ruleset = None;
+    state.kernel_snapshot = None;
     state.networks.clear();
     Ok(())
 }
@@ -807,6 +839,83 @@ fn render_remove_ruleset(listing: &str) -> String {
          {}",
         render_stale_l2_removal(listing, &[])
     )
+}
+
+/// Cache equality alone says nothing about a firewall reloaded by another
+/// service while the API was down. Read failures propagate to reconciliation.
+async fn snapshot_matches(state: &FirewallState) -> Result<bool, FirewallError> {
+    let Some(expected) = &state.kernel_snapshot else {
+        return Ok(false);
+    };
+    Ok(*expected == read_owned_snapshot().await?)
+}
+
+async fn read_owned_snapshot() -> Result<Vec<serde_json::Value>, FirewallError> {
+    let output = Command::new("nft")
+        .args(["--json", "list", "ruleset"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(FirewallError::Spawn)?;
+    if !output.status.success() {
+        return Err(FirewallError::NftFailed {
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    owned_snapshot(&output.stdout)
+}
+
+fn owned_snapshot(bytes: &[u8]) -> Result<Vec<serde_json::Value>, FirewallError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| FirewallError::InvalidSnapshot(error.to_string()))?;
+    let objects = value["nftables"]
+        .as_array()
+        .ok_or_else(|| FirewallError::InvalidSnapshot("missing nftables array".to_owned()))?;
+    let mut snapshot = Vec::new();
+    for object in objects {
+        let Some((kind, data)) = object.as_object().and_then(|object| object.iter().next()) else {
+            return Err(FirewallError::InvalidSnapshot(
+                "invalid nft object".to_owned(),
+            ));
+        };
+        let table = if kind == "table" {
+            &data["name"]
+        } else {
+            &data["table"]
+        };
+        let owned = match (data["family"].as_str(), table.as_str()) {
+            (Some("inet"), Some(TABLE_INET)) | (Some("bridge"), Some(LEGACY_BRIDGE_TABLE)) => true,
+            (Some("netdev"), Some(name)) => name.starts_with(L2_TABLE_PREFIX),
+            _ => false,
+        };
+        if owned {
+            let mut object = object.clone();
+            object[kind].as_object_mut().unwrap().remove("handle");
+            strip_counter_values(&mut object);
+            snapshot.push(object);
+        }
+    }
+    Ok(snapshot)
+}
+
+fn strip_counter_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::Object(counter)) = object.get_mut("counter") {
+                counter.remove("packets");
+                counter.remove("bytes");
+            }
+            for child in object.values_mut() {
+                strip_counter_values(child);
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for child in array {
+                strip_counter_values(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The tables the kernel has right now, as `nft list tables` prints them.
@@ -1805,48 +1914,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_firewall_skips_nft_entirely_when_the_uplink_is_unchanged() {
-        let (connection, handle, _) = new_connection().unwrap();
-        tokio::spawn(connection);
-        let real_uplink = nat::detect_uplink(&handle).await.unwrap();
-
-        // Pre-seed the actor as if this uplink was already applied. No `nft`
-        // binary needs to exist or succeed for this call to return Ok, since
-        // it must short-circuit before ever calling run_nft/spawning nft.
-        let applied = render_apply_ruleset(&real_uplink, &[]).unwrap();
+    async fn desired_cache_without_a_kernel_snapshot_cannot_skip_verification() {
         let actor = FirewallActor::new();
-        actor.state.lock().await.applied_ruleset = Some(applied.clone());
+        let state = actor.state.lock().await;
+        assert!(!snapshot_matches(&state).await.unwrap());
+    }
 
-        assert!(ensure_firewall(&actor, &[], &[]).await.is_ok());
+    fn snapshot_fixture() -> serde_json::Value {
+        serde_json::json!({"nftables": [
+            {"metainfo": {"version": "1.1.0"}},
+            {"table": {"family": "inet", "name": "firecrab", "handle": 1}},
+            {"chain": {"family": "inet", "table": "firecrab", "name": "forward", "policy": "drop", "handle": 2}},
+            {"rule": {"family": "inet", "table": "firecrab", "chain": "forward", "handle": 3,
+                "expr": [{"counter": {"packets": 5, "bytes": 100}}, {"drop": null}]}},
+            {"map": {"family": "inet", "table": "firecrab", "name": "vm_egress", "elem": [["172.30.0.2", {"jump": {"target": "vm_eg"}}]]}},
+            {"table": {"family": "inet", "name": "host_admin", "handle": 4}}
+        ]})
+    }
+
+    #[test]
+    fn firewall_snapshot_ignores_counters_handles_and_unrelated_host_rules() {
+        let original = snapshot_fixture();
+        let mut changed = original.clone();
+        changed["nftables"][0]["metainfo"]["version"] = "different".into();
+        changed["nftables"][1]["table"]["handle"] = 99.into();
+        changed["nftables"][3]["rule"]["expr"][0]["counter"]["packets"] = 900.into();
+        changed["nftables"][3]["rule"]["expr"][0]["counter"]["bytes"] = 9000.into();
+        changed["nftables"][5]["table"]["name"] = "another_admin_table".into();
         assert_eq!(
-            actor.state.lock().await.applied_ruleset.as_deref(),
-            Some(applied.as_str())
+            owned_snapshot(&serde_json::to_vec(&original).unwrap()).unwrap(),
+            owned_snapshot(&serde_json::to_vec(&changed).unwrap()).unwrap()
         );
     }
 
-    #[tokio::test]
-    async fn applying_an_identical_vm_policy_skips_nft_entirely() {
-        let (connection, handle, _) = new_connection().unwrap();
-        tokio::spawn(connection);
-        let real_uplink = nat::detect_uplink(&handle).await.unwrap();
-
-        let actor = FirewallActor::new();
-        let policy = sample_policy(EgressPolicy::Internet, false);
-        actor
-            .state
-            .lock()
-            .await
-            .applied_vms
-            .insert(policy.vm_id, (real_uplink.clone(), policy.clone()));
-
-        // If the identical request spawned nft, this unprivileged unit test
-        // would fail on a host without NET_ADMIN. Returning Ok proves an
-        // idempotent reapply causes no unnecessary host-side mutation.
-        assert!(apply_vm_policy(&actor, policy.clone()).await.is_ok());
-        assert_eq!(
-            actor.state.lock().await.applied_vms.get(&policy.vm_id),
-            Some(&(real_uplink, policy))
+    #[test]
+    fn firewall_snapshot_detects_rule_map_chain_and_table_drift() {
+        let original = snapshot_fixture();
+        let expected = owned_snapshot(&serde_json::to_vec(&original).unwrap()).unwrap();
+        for index in 1..=4 {
+            let mut changed = original.clone();
+            changed["nftables"].as_array_mut().unwrap().remove(index);
+            assert_ne!(
+                expected,
+                owned_snapshot(&serde_json::to_vec(&changed).unwrap()).unwrap()
+            );
+        }
+        let mut changed = original;
+        changed["nftables"][3]["rule"]["expr"][1] = serde_json::json!({"accept": null});
+        assert_ne!(
+            expected,
+            owned_snapshot(&serde_json::to_vec(&changed).unwrap()).unwrap()
         );
+        assert!(owned_snapshot(br#"{}"#).is_err());
+        assert!(owned_snapshot(b"not json").is_err());
     }
 
     #[tokio::test]
