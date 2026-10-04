@@ -22,6 +22,11 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Added
 
+- Each MicroVM's systemd unit runs under host-side ceilings derived from its RAM
+  and vCPUs: `MemoryMax` is the guest RAM plus the larger of 256 MiB and an
+  eighth of it, and `CPUQuota` is one core per vCPU plus one. They apply from a
+  VM's next start, so a runaway Firecracker or shim cannot starve the host
+  ([#123]).
 - `POST /api/network/reconcile` retries networking for running VMs without
   restarting their API/shim/Firecracker processes and refreshes per-VM
   recovery diagnostics ([#123]).

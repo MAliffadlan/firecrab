@@ -318,7 +318,7 @@ CPU, RAM, 디스크, egress는 created, stopped, error에서만 수정한다. �
 실행 중인 VM(V7)과 API 호스트의 root 권한으로 수행한다. macOS에서는 호스트 명령을 management VM에 SSH로 접속해 실행한다.
 모든 VM은 각자의 `firecrab-vm-<simple id>.service` unit에서 실행된다.
 
-- [ ] **R1 — unit 안의 shim:** `firecrab-api vm-shim --vm-id <id>`가 Firecracker의 부모이자 active 상태인 `firecrab-vm-<simple id>.service`의 메인 프로세스이고, 부모는 PID 1, 실행 사용자는 API 사용자이며, 런타임 디렉터리에 `shim.sock`과 `console.log`가 있다.
+- [ ] **R1 — unit 안의 shim:** `firecrab-api vm-shim --vm-id <id>`가 Firecracker의 부모이자 active 상태인 `firecrab-vm-<simple id>.service`의 메인 프로세스이고, 부모는 PID 1, 실행 사용자는 API 사용자이며, 런타임 디렉터리에 `shim.sock`과 `console.log`가 있고, unit의 `MemoryMax`는 게스트 RAM에 256 MiB와 RAM의 1/8 중 큰 값을 더한 값, `CPUQuota`는 vCPU당 1코어에 1코어를 더한 값이다.
 - [ ] **R2 — API 밖에서 중지:** unit을 `systemctl stop`하면 `stopped`가 기록되고 `exit.json`에 `"stop_requested":true`가 있으며 TAP이 제거된다.
 - [ ] **R3 — 바로 재시작:** 중지 직후 시작하면 `running`이 된다.
 - [ ] **R4 — API 재시작:** shim과 Firecracker PID가 그대로이고 VM이 `running`을 유지하며, journal에 `adopted=1`이 남고 TAP이 bridge에 붙어 있고 V9와 V11이 동작한다.
@@ -335,6 +335,7 @@ CPU, RAM, 디스크, egress는 created, stopped, error에서만 수정한다. �
 VM=<vm id>
 ps -o pid,ppid,user,args -p "$(pgrep -f "[v]m-shim --vm-id $VM")"
 systemctl list-units --all --plain --no-legend 'firecrab-vm-*'
+systemctl show -p MemoryMax -p CPUQuotaPerSecUSec "firecrab-vm-$(echo "$VM" | tr -d -).service"
 
 # R2: API 밖에서 VM 중지
 sudo systemctl stop "firecrab-vm-$(echo "$VM" | tr -d -).service"

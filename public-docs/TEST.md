@@ -318,7 +318,7 @@ CPU, RAM, disk, and egress edits apply only in created, stopped, or error. Envir
 Run these on a running VM (V7) with root on the API host; on macOS, run the host commands in the management VM over SSH.
 Every VM runs in its own `firecrab-vm-<simple id>.service` unit.
 
-- [ ] **R1 — Shim in its unit:** `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent and the main process of an active `firecrab-vm-<simple id>.service`; its parent is PID 1, it runs as the API user, and the runtime directory has `shim.sock` and `console.log`.
+- [ ] **R1 — Shim in its unit:** `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent and the main process of an active `firecrab-vm-<simple id>.service`; its parent is PID 1, it runs as the API user, the runtime directory has `shim.sock` and `console.log`, and the unit's `MemoryMax` is the guest RAM plus the larger of 256 MiB and an eighth of it and its `CPUQuota` is one core per vCPU plus one.
 - [ ] **R2 — Stop from outside the API:** `systemctl stop` of the unit records `stopped`, `exit.json` has `"stop_requested":true`, and the TAP is gone.
 - [ ] **R3 — Quick restart:** a start right after a stop reaches `running`.
 - [ ] **R4 — API restart:** shim and Firecracker PIDs are unchanged, the VM stays `running`, the journal reports `adopted=1`, the TAP stays on its bridge, and V9 and V11 still work.
@@ -335,6 +335,7 @@ Every VM runs in its own `firecrab-vm-<simple id>.service` unit.
 VM=<vm id>
 ps -o pid,ppid,user,args -p "$(pgrep -f "[v]m-shim --vm-id $VM")"
 systemctl list-units --all --plain --no-legend 'firecrab-vm-*'
+systemctl show -p MemoryMax -p CPUQuotaPerSecUSec "firecrab-vm-$(echo "$VM" | tr -d -).service"
 
 # R2: stop the VM from outside the API
 sudo systemctl stop "firecrab-vm-$(echo "$VM" | tr -d -).service"
