@@ -121,6 +121,8 @@ scripts/ci-m2-guest-boot.sh alpine-3.24.1
 
 ## Retry VM network recovery
 
+The API unit permits startup while the helper runtime directory is absent;
+existing installations must rerun `install.sh` once to apply this unit change.
 A surviving VM can report `networkFailed` after API startup. Inspect its
 `reconciliation.detail` and helper logs, repair the reported host/helper problem,
 then retry without restarting the VM:

@@ -114,7 +114,7 @@ HELPER_STOPPED=0
 HELPER_BLOCK=
 SENTINEL=
 cleanup() {
-    if [ -n "$HELPER_BLOCK" ]; then host "rm -f '$HELPER_BLOCK'; systemctl daemon-reload" || true; fi
+    if [ -n "$HELPER_BLOCK" ]; then host "rm -f '$HELPER_BLOCK'; rmdir /run/systemd/system/firecrab-net-helper.service.d 2>/dev/null || true; systemctl daemon-reload" || true; fi
     if [ "$HELPER_STOPPED" = 1 ]; then host "systemctl start firecrab-net-helper" || true; fi
     if [ "$API_STOPPED" = 1 ]; then host "systemctl start firecrab-api" || true; api_ready || true; fi
     if [ -n "$SENTINEL" ]; then host "nft delete table inet $SENTINEL" || true; fi
@@ -308,11 +308,13 @@ start_api
 [ "$(host "systemctl is-active firecrab-net-helper" || true)" != active ] || fail R4e "helper outage was not held"
 curl -fsS "$API/api/vms/$VM" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["state"] == "running" and d["reconciliation"]["outcome"] == "networkFailed" and d["reconciliation"]["detail"]' || fail R4e "helper failure was not visible"
 [ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/api/network/reconcile")" = 503 ] || fail R4e "retry during helper outage should fail with 503"
-host "rm -f '$HELPER_BLOCK'; systemctl daemon-reload; systemctl start firecrab-net-helper"
+API_RETRY_PID=$(host "systemctl show -p MainPID --value firecrab-api")
+host "rm -f '$HELPER_BLOCK'; rmdir /run/systemd/system/firecrab-net-helper.service.d 2>/dev/null || true; systemctl daemon-reload; systemctl start firecrab-net-helper"
 HELPER_BLOCK=
 HELPER_STOPPED=0
 curl -fsS -o /dev/null -X POST "$API/api/network/reconcile" || fail R4e "operator network retry failed"
 check_recovered R4e
+[ "$(host "systemctl show -p MainPID --value firecrab-api")" = "$API_RETRY_PID" ] || fail R4e "API PID changed during operator retry"
 pass "R4e helper outage reported; operator retry restored networking with unchanged VM PIDs"
 host "nft delete table inet $SENTINEL"
 SENTINEL=

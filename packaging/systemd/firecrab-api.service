@@ -32,7 +32,9 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=full
-ReadWritePaths=@DATADIR@ /run/firecrab
+# A stopped/failed helper may have removed its RuntimeDirectory. Keep the
+# API available to report networkFailed and accept recovery retries then.
+ReadWritePaths=@DATADIR@ -/run/firecrab
 
 [Install]
 WantedBy=multi-user.target
