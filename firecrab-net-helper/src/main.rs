@@ -719,6 +719,8 @@ async fn dispatch(
             firecracker,
             enable_pci,
             stop_grace_ms,
+            memory_max_mib,
+            cpu_quota_percent,
         } => {
             let request = vm_unit::UnitRequest {
                 vm_id,
@@ -726,6 +728,8 @@ async fn dispatch(
                 firecracker,
                 enable_pci,
                 stop_grace_ms,
+                memory_max_mib,
+                cpu_quota_percent,
             };
             vm_unit::start(&request, peer)
                 .await
@@ -940,12 +944,37 @@ mod tests {
             firecracker: PathBuf::from("/usr/local/bin/firecracker"),
             enable_pci: false,
             stop_grace_ms: 5000,
+            memory_max_mib: None,
+            cpu_quota_percent: None,
         };
 
         assert_matches!(
             dispatch(request, &config, &own_peer()).await,
             Err(HelperFailure::InvalidRequest { .. })
         );
+    }
+
+    #[tokio::test]
+    async fn start_vm_unit_rejects_an_out_of_range_limit_as_invalid_request() {
+        let config = HelperConfig::from_values("unused", None, 1500).unwrap();
+        let request = NetworkRequest::StartVmUnit {
+            vm_id: Uuid::new_v4(),
+            runtime_dir: PathBuf::from("/run/firecrab/vms/x"),
+            firecracker: PathBuf::from("/usr/local/bin/firecracker"),
+            enable_pci: false,
+            stop_grace_ms: 5000,
+            memory_max_mib: Some(0),
+            cpu_quota_percent: None,
+        };
+
+        // The limit must reach the unit request: a dropped field would pass
+        // validation and fail later, on the missing Firecracker binary.
+        let Err(HelperFailure::InvalidRequest { detail }) =
+            dispatch(request, &config, &own_peer()).await
+        else {
+            panic!("expected an invalid request");
+        };
+        assert!(detail.contains("memory"), "{detail}");
     }
 
     #[tokio::test]

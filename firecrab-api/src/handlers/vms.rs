@@ -1347,6 +1347,7 @@ async fn finish_run_start(
         &runtime,
         vm.id,
         enable_pci,
+        crate::resource_limits::ResourceLimits::for_vm(vm.ram, vm.cpu),
         Arc::clone(&state.process_metrics),
     )
     .await

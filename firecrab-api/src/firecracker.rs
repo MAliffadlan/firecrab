@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::console::ConsoleBroker;
 use crate::model::{MacAddr, VmRecord, VmState};
+use crate::resource_limits::ResourceLimits;
 use crate::state::{AppState, RuntimeConfig};
 use crate::vm_shim::client::{SessionEvent, ShimConnectError, ShimControl, ShimSession};
 use crate::vm_shim::protocol::ExitReport;
@@ -651,6 +652,7 @@ pub(crate) async fn spawn_vm(
     runtime: &crate::artifacts::HostRuntimePaths,
     id: Uuid,
     enable_pci: bool,
+    limits: ResourceLimits,
     process_metrics: Arc<Mutex<crate::process_metrics::ProcessMetricsTracker>>,
 ) -> Result<FirecrackerProcess, FirecrackerError> {
     fs::create_dir_all(&runtime.dir).map_err(|source| FirecrackerError::CreateDirectory {
@@ -667,6 +669,7 @@ pub(crate) async fn spawn_vm(
             enable_pci,
             stop_grace: config.stop_grace,
         },
+        limits,
     )
     .await?;
     // A shim that cannot start Firecracker exits without ever accepting;
@@ -766,6 +769,7 @@ async fn abandon(shim: ShimHandle, stop_grace: Duration) {
 async fn launch_shim(
     launcher: &ShimLauncher,
     config: ShimConfig,
+    limits: ResourceLimits,
 ) -> Result<ShimHandle, FirecrackerError> {
     match launcher {
         ShimLauncher::SystemdUnit(network) => {
@@ -785,6 +789,7 @@ async fn launch_shim(
                     firecracker,
                     config.enable_pci,
                     config.stop_grace,
+                    limits,
                 )
                 .await
             {
@@ -1052,6 +1057,10 @@ mod tests {
         }
     }
 
+    fn typical_limits() -> ResourceLimits {
+        ResourceLimits::for_vm(512, 1)
+    }
+
     fn test_metrics() -> Arc<Mutex<crate::process_metrics::ProcessMetricsTracker>> {
         Arc::new(Mutex::new(
             crate::process_metrics::ProcessMetricsTracker::default(),
@@ -1311,6 +1320,7 @@ mod tests {
             &runtime,
             id,
             false,
+            typical_limits(),
             test_metrics(),
         )
         .await
@@ -1355,6 +1365,7 @@ mod tests {
             &runtime,
             id,
             false,
+            typical_limits(),
             test_metrics(),
         )
         .await
@@ -1379,6 +1390,7 @@ mod tests {
             &runtime,
             id,
             false,
+            typical_limits(),
             test_metrics(),
         )
         .await;
@@ -1409,6 +1421,7 @@ mod tests {
             &runtime,
             id,
             false,
+            typical_limits(),
             test_metrics(),
         )
         .await
@@ -1461,6 +1474,7 @@ mod tests {
                             firecracker,
                             enable_pci,
                             stop_grace_ms,
+                            ..
                         } = &envelope.request
                             && mode == UnitHelper::StartShims
                         {
@@ -1564,9 +1578,16 @@ mod tests {
         fs::write(&runtime.config, "{}").unwrap();
 
         let config = unit_config(directory.path(), &binary, Duration::from_secs(5));
-        let process = spawn_vm(&config, &runtime, id, false, test_metrics())
-            .await
-            .unwrap();
+        let process = spawn_vm(
+            &config,
+            &runtime,
+            id,
+            false,
+            typical_limits(),
+            test_metrics(),
+        )
+        .await
+        .unwrap();
 
         let started = requests.lock().unwrap().clone();
         assert_matches!(
@@ -1577,6 +1598,43 @@ mod tests {
                 firecracker,
                 ..
             }] if *vm_id == id && runtime_dir.is_absolute() && firecracker == &binary
+        );
+        stop_vm(process, Duration::from_secs(5)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_unit_request_carries_the_vms_resource_limits() {
+        let directory = short_tempdir();
+        let binary = fake_firecracker(
+            directory.path(),
+            &format!("signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)){SERVE_LOOP}"),
+        );
+        let requests = spawn_unit_helper(
+            &directory.path().join("helper.sock"),
+            UnitHelper::StartShims,
+        );
+        let id = Uuid::new_v4();
+        let runtime = runtime_for(&directory.path().join("vms"), id);
+        fs::write(&runtime.config, "{}").unwrap();
+
+        // Not the limits `typical_limits` gives the other tests, so a default
+        // slipping through cannot pass.
+        let config = unit_config(directory.path(), &binary, Duration::from_secs(5));
+        let limits = ResourceLimits::for_vm(2048, 4);
+        let process = spawn_vm(&config, &runtime, id, false, limits, test_metrics())
+            .await
+            .unwrap();
+
+        let started = requests.lock().unwrap().clone();
+        assert_matches!(
+            started.as_slice(),
+            [
+                firecrab_helper_protocol::network::NetworkRequest::StartVmUnit {
+                    memory_max_mib: Some(2304),
+                    cpu_quota_percent: Some(500),
+                    ..
+                }
+            ]
         );
         stop_vm(process, Duration::from_secs(5)).await.unwrap();
     }
@@ -1599,6 +1657,7 @@ mod tests {
             &runtime,
             id,
             false,
+            typical_limits(),
             test_metrics(),
         )
         .await
@@ -1622,6 +1681,7 @@ mod tests {
             &runtime,
             id,
             false,
+            typical_limits(),
             test_metrics(),
         )
         .await;
@@ -1666,6 +1726,7 @@ mod tests {
             &runtime,
             id,
             false,
+            typical_limits(),
             test_metrics(),
         )
         .await;
@@ -1694,6 +1755,7 @@ mod tests {
             &runtime,
             id,
             false,
+            typical_limits(),
             test_metrics(),
         )
         .await;
@@ -1722,6 +1784,7 @@ mod tests {
             &runtime,
             id,
             false,
+            typical_limits(),
             test_metrics(),
         )
         .await
@@ -1754,6 +1817,7 @@ mod tests {
             &runtime,
             id,
             true,
+            typical_limits(),
             test_metrics(),
         )
         .await
