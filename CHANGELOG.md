@@ -22,6 +22,10 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Added
 
+- VM list and detail responses expose per-VM API startup reconciliation outcomes,
+  timestamps, and diagnostics. The Dashboard displays them in English and Korean
+  alongside the VM lifecycle state, with hover/focus information panels for the
+  VM and API status labels ([#123]).
 - `firecrab service shell` opens a root shell in the managed Debian guest on
   macOS and Windows, and `firecrab service shell -- <command>` runs one command
   there. On Windows, `service run` remains an alias.

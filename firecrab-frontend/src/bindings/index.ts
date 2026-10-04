@@ -60,6 +60,8 @@ export * from "./UpdateVmResourcesRequest";
 export * from "./SshHostKeyResponse";
 export * from "./VmLogResponse";
 export * from "./VmResponse";
+export * from "./VmReconciliation";
+export * from "./VmReconciliationOutcome";
 export * from "./VmState";
 export * from "./VmUsageSample";
 export * from "./PortForward";

@@ -865,6 +865,11 @@ async fn claim_start(
         return Err(error);
     }
 
+    state
+        .reconciliation
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&id);
     Ok((id, claimed))
 }
 
@@ -1095,6 +1100,11 @@ pub async fn delete_vm(
             .insert(id, removed);
         return Err(AppError::internal(request_id.0));
     }
+    state
+        .reconciliation
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&id);
     // Best-effort, same reasoning as create_vm's sync call: this VM's
     // reservation just needs to eventually disappear from dnsmasq, not
     // synchronously with this response.
@@ -2018,6 +2028,12 @@ pub(crate) fn vm_response(state: &AppState, vm: &VmRecord, lease: Option<&Lease>
         id: vm.id,
         name: vm.name.clone(),
         state: vm.state,
+        reconciliation: state
+            .reconciliation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&vm.id)
+            .cloned(),
         template: vm.template.clone(),
         template_version: vm.template_version.clone(),
         cpu: vm.cpu,
@@ -2574,7 +2590,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::response::IntoResponse;
-    use firecrab_api_types::SshHostKeyCheckStatus;
+    use firecrab_api_types::{SshHostKeyCheckStatus, VmReconciliation, VmReconciliationOutcome};
     use tempfile::tempdir;
 
     use std::path::PathBuf;
@@ -2831,6 +2847,95 @@ mod tests {
 
         assert_eq!(body.len(), 1);
         assert_eq!(body[0].id, vm.id);
+        assert_eq!(body[0].reconciliation, None);
+    }
+
+    #[tokio::test]
+    async fn a_new_start_clears_the_startup_result_only_after_it_is_accepted() {
+        let directory = tempdir().unwrap();
+        let state = test_state(directory.path()).await;
+        let mut vm = record("restarted", Uuid::new_v4());
+        vm.state = VmState::Running;
+        seed_vm(&state, &vm);
+        let result = VmReconciliation {
+            outcome: VmReconciliationOutcome::Reconnected,
+            checked_at_ms: 1_700_000_000_000,
+            detail: None,
+        };
+        state
+            .reconciliation
+            .lock()
+            .unwrap()
+            .insert(vm.id, result.clone());
+
+        let rejected = claim_start(
+            State(state.clone()),
+            Extension(RequestId(Uuid::new_v4())),
+            Path(vm.id.to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.into_response().status(), StatusCode::CONFLICT);
+        assert_eq!(
+            state.reconciliation.lock().unwrap().get(&vm.id),
+            Some(&result)
+        );
+
+        set_memory_state(&state, vm.id, VmState::Stopped);
+        claim_start(
+            State(state.clone()),
+            Extension(RequestId(Uuid::new_v4())),
+            Path(vm.id.to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(!state.reconciliation.lock().unwrap().contains_key(&vm.id));
+        let Json(response) = get_vm(
+            State(state.clone()),
+            Extension(RequestId(Uuid::new_v4())),
+            Path(vm.id.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.state, VmState::Starting);
+        assert_eq!(response.reconciliation, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_claim_keeps_the_previous_reconciliation_result() {
+        let directory = tempdir().unwrap();
+        let state = test_state(directory.path()).await;
+        let vm = record("unpersisted-start", Uuid::new_v4());
+        seed_vm(&state, &vm);
+        let result = VmReconciliation {
+            outcome: VmReconciliationOutcome::Gone,
+            checked_at_ms: 1_700_000_000_000,
+            detail: None,
+        };
+        state
+            .reconciliation
+            .lock()
+            .unwrap()
+            .insert(vm.id, result.clone());
+        state.store.delete(vm.id).unwrap();
+
+        let error = claim_start(
+            State(state.clone()),
+            Extension(RequestId(Uuid::new_v4())),
+            Path(vm.id.to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(memory_state(&state, vm.id), Some(VmState::Created));
+        assert_eq!(
+            state.reconciliation.lock().unwrap().get(&vm.id),
+            Some(&result)
+        );
     }
 
     #[tokio::test]
@@ -3874,6 +3979,14 @@ while True:
         let state = test_state(directory.path()).await;
         let vm = record("condemned", Uuid::new_v4());
         seed_vm(&state, &vm);
+        state.reconciliation.lock().unwrap().insert(
+            vm.id,
+            VmReconciliation {
+                outcome: VmReconciliationOutcome::Gone,
+                checked_at_ms: 1_700_000_000_000,
+                detail: None,
+            },
+        );
         let paths = crate::artifacts::VmArtifactPaths::for_vm(&state.runtime.vms_dir, vm.id);
         paths.ensure_directories().unwrap();
         let generation = Uuid::new_v4();
@@ -3890,6 +4003,7 @@ while True:
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert!(state.vms.lock().unwrap().is_empty());
         assert!(state.store.load_all().unwrap().is_empty());
+        assert!(state.reconciliation.lock().unwrap().is_empty());
         assert!(!paths.dir.exists());
 
         let error = get_vm(

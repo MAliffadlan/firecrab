@@ -1006,6 +1006,58 @@ a.options-menu-item {
 }
 @keyframes pulse { 50% { opacity: 0.25; } }
 
+.vm-table .vm-state-cell { width: 5.8rem; }
+.vm-state-labels { display: inline-flex; align-items: center; gap: 0.65rem; }
+.state-label { display: inline-block; padding: 0.2rem 0; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 700; line-height: 1.2; letter-spacing: 0.04em; color: var(--dim); cursor: help; border-radius: 2px; }
+.vm-status-label.running, .api-status-label.reconnected { color: var(--ready); }
+.vm-status-label.starting, .vm-status-label.stopping, .api-status-label.mismatched, .api-status-label.interrupted { color: var(--amber); }
+.vm-status-label.error, .api-status-label.networkFailed { color: var(--error); }
+
+.status-tooltip {
+  position: fixed;
+  z-index: 1200;
+  width: min(23rem, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg-panel);
+  color: var(--ink);
+  box-shadow: 0 4px 16px rgba(23, 27, 34, 0.12);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+.status-tooltip h3 { margin: 0 0 0.65rem; font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em; color: var(--shell); }
+.status-tooltip dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.5rem 0.85rem; margin: 0; }
+.status-tooltip dt { color: var(--shell); font-family: var(--font-mono); font-size: 0.7rem; }
+.status-tooltip dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.status-tooltip .api-status-service code { display: block; margin-left: 0; }
+.status-tooltip .reconciliation-detail .reconciliation-badge { font-size: 0.8rem; }
+
+.reconciliation-badge {
+  display: block;
+  margin-top: 0.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--shell);
+}
+.reconciliation-badge.reconnected { color: var(--ready); }
+.reconciliation-badge.networkFailed { color: var(--error); }
+.reconciliation-badge.mismatched, .reconciliation-badge.interrupted { color: var(--amber); }
+.vm-api-status { margin-bottom: 1.25rem; padding-bottom: 1rem; border-bottom: 1px solid var(--line); }
+.vm-api-status h3 { margin: 0 0 0.65rem; font-family: var(--font-mono); font-size: 0.72rem; font-weight: 500; letter-spacing: 0.06em; color: var(--shell); }
+.api-status-fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.55rem 1rem; margin: 0; font-size: 0.82rem; }
+.api-status-fields dt { padding-top: 0.1rem; color: var(--shell); font-family: var(--font-mono); font-size: 0.7rem; }
+.api-status-fields dd { min-width: 0; margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.api-status-service code { margin-left: 0.5rem; font-size: 0.72rem; color: var(--shell); }
+.reconciliation-detail .reconciliation-badge { margin-top: 0; font-size: 0.82rem; }
+.reconciliation-detail time { font-family: var(--font-mono); font-size: 0.75rem; }
+.reconciliation-detail p { margin: 0.4rem 0 0; line-height: 1.5; }
+.reconciliation-detail p:first-child { margin-top: 0; }
+.reconciliation-detail .reconciliation-note { color: var(--shell); font-size: 0.72rem; }
+.reconciliation-detail .reconciliation-diagnostic { padding-left: 0.65rem; border-left: 2px solid var(--line); }
+
 /* M2Image 표의 상태 셀 — 뱃지와 "⋯" 옵션 메뉴 트리거를 한 줄에 나란히. */
 table.image-table .state-cell {
   display: flex;
@@ -1866,6 +1918,18 @@ table.image-table .image-package-url a:hover {
   flex-shrink: 0;
 }
 .console-panel .console-close:hover { color: var(--error); }
+
+.console-panel .vm-detail-bar { flex-wrap: nowrap; align-items: flex-start; padding: 0.8rem 1.25rem; }
+.vm-detail-heading { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto; flex: 1; min-width: 0; gap: 1rem; margin: 0; }
+.vm-detail-heading > div { min-width: 0; }
+.vm-detail-heading dt { font-size: 0.65rem; letter-spacing: 0.06em; color: var(--shell); }
+.vm-detail-heading dd { margin: 0.25rem 0 0; font-size: 0.8rem; color: var(--ink); overflow-wrap: anywhere; }
+.vm-detail-heading .state-badge { white-space: nowrap; }
+@media (max-width: 640px) {
+  .vm-detail-heading { grid-template-columns: minmax(0, 1fr); gap: 0.55rem; }
+  .vm-detail-heading > div { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: 0.5rem; align-items: baseline; }
+  .vm-detail-heading dd { margin: 0; }
+}
 
 .detail-body {
   padding: 1.25rem;

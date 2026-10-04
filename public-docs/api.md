@@ -99,6 +99,34 @@ The response has status `201` and includes the VM UUID.
 | `shellIds` | Optional Shell repository ids (latest revision pinned) |
 | `env` | Optional string map. Create omit = `{}`. PUT omit = keep stored; `{}` clears. Allowed while `running` (guest service restarts). POSIX keys, 64 entries, 256-byte keys, 4096-byte values, no NUL. Plaintext in the guest. |
 
+### API startup reconciliation
+
+VM list and detail responses include `reconciliation`, either `null` or:
+
+```json
+{
+  "outcome": "networkFailed",
+  "checkedAtMs": 1791000000000,
+  "detail": "failed to re-attach TAP: helper unavailable"
+}
+```
+
+| Outcome | Meaning |
+| --- | --- |
+| `reconnected` | Attached to a surviving running or stopping VM; any pending stop resumes. |
+| `gone` | No live shim or exit record; recorded `stopped`. |
+| `mismatched` | The shim could not be controlled; attempted to stop the VM unit. The VM is `error` if that stop failed. |
+| `networkFailed` | Attached to a running VM, but host network resync or its TAP attach failed. This does not change the VM's lifecycle state. |
+| `interrupted` | A start was interrupted by the API restart; attempted to stop the VM and recorded `error`. |
+| `exited` | Found an exit record; recorded `stopped` for a clean/requested exit, otherwise `error`. |
+
+`checkedAtMs` is Unix epoch milliseconds. `detail` is an optional diagnostic
+string and may be `null`. This is a snapshot from the latest API startup,
+not a live health check. Only VMs left `starting`, `running`, or `stopping`
+by the preceding API run are checked. Results stay in memory for this API run,
+are cleared on an accepted new VM start or deletion, and are recomputed at the
+next API startup. Older API versions omit the field.
+
 ## Guest `/etc/firecrab`
 
 The host file `/etc/firecrab/api.env` is operator API settings; see [Installation](installation.md).

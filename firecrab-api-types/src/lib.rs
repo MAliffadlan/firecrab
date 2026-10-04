@@ -367,6 +367,29 @@ pub struct StartupStepRun {
     pub detail: Option<String>,
 }
 
+/// What the latest API startup learned about a VM left active.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum VmReconciliationOutcome {
+    Reconnected,
+    Gone,
+    Mismatched,
+    NetworkFailed,
+    Interrupted,
+    Exited,
+}
+
+/// A startup snapshot, not a continuous VM or network health check.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VmReconciliation {
+    pub outcome: VmReconciliationOutcome,
+    /// When the API checked this VM, in milliseconds since the Unix epoch.
+    pub checked_at_ms: u64,
+    /// Diagnostic information, when available.
+    pub detail: Option<String>,
+}
+
 /// A VM record as returned by the list/detail/create/update endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -377,6 +400,9 @@ pub struct VmResponse {
     pub name: String,
     /// Current lifecycle state.
     pub state: VmState,
+    /// Latest API startup check; cleared when a new start is accepted.
+    #[serde(default)]
+    pub reconciliation: Option<VmReconciliation>,
     /// Template alias this VM was created from.
     pub template: String,
     /// Pinned template version the alias resolved to at creation time.
@@ -1607,6 +1633,11 @@ mod tests {
             id: Uuid::nil(),
             name: "test-vm".to_owned(),
             state: VmState::Created,
+            reconciliation: Some(VmReconciliation {
+                outcome: VmReconciliationOutcome::NetworkFailed,
+                checked_at_ms: 1_700_000_000_000,
+                detail: Some("TAP recovery failed".to_owned()),
+            }),
             template: "ubuntu-rootfs-26.04".to_owned(),
             template_version: "ubuntu-26.04-v1".to_owned(),
             cpu: 1,
@@ -1647,6 +1678,39 @@ mod tests {
         assert!(json.contains("\"memoryUsedPercent\":35.2"));
         assert!(json.contains("\"usageHistory\""));
         assert!(!json.contains("packageUpdate"));
+        let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        legacy.as_object_mut().unwrap().remove("reconciliation");
+        assert_eq!(
+            serde_json::from_value::<VmResponse>(legacy)
+                .unwrap()
+                .reconciliation,
+            None
+        );
+    }
+
+    #[test]
+    fn reconciliation_outcomes_match_dashboard_bindings() {
+        for (outcome, wire) in [
+            (VmReconciliationOutcome::Reconnected, "reconnected"),
+            (VmReconciliationOutcome::Gone, "gone"),
+            (VmReconciliationOutcome::Mismatched, "mismatched"),
+            (VmReconciliationOutcome::NetworkFailed, "networkFailed"),
+            (VmReconciliationOutcome::Interrupted, "interrupted"),
+            (VmReconciliationOutcome::Exited, "exited"),
+        ] {
+            let result = VmReconciliation {
+                outcome,
+                checked_at_ms: 1_700_000_000_000,
+                detail: None,
+            };
+            let json = serde_json::to_value(&result).unwrap();
+            assert_eq!(json["outcome"], wire);
+            assert_eq!(json["checkedAtMs"], 1_700_000_000_000_u64);
+            assert_eq!(
+                serde_json::from_value::<VmReconciliation>(json).unwrap(),
+                result
+            );
+        }
     }
 
     /// The dashboard switches on these exact strings
@@ -1705,6 +1769,7 @@ mod tests {
             id: Uuid::nil(),
             name: "test-vm".to_owned(),
             state: VmState::Starting,
+            reconciliation: None,
             template: "ubuntu-rootfs-26.04".to_owned(),
             template_version: "ubuntu-26.04-v1".to_owned(),
             cpu: 1,
