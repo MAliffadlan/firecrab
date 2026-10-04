@@ -111,8 +111,10 @@ KEY=
 KNOWN_HOSTS=
 API_STOPPED=0
 HELPER_STOPPED=0
+HELPER_BLOCK=
 SENTINEL=
 cleanup() {
+    if [ -n "$HELPER_BLOCK" ]; then host "rm -f '$HELPER_BLOCK'; systemctl daemon-reload" || true; fi
     if [ "$HELPER_STOPPED" = 1 ]; then host "systemctl start firecrab-net-helper" || true; fi
     if [ "$API_STOPPED" = 1 ]; then host "systemctl start firecrab-api" || true; api_ready || true; fi
     if [ -n "$SENTINEL" ]; then host "nft delete table inet $SENTINEL" || true; fi
@@ -297,11 +299,17 @@ pass "R4d DHCP config/reservations and serving process repaired at unchanged rev
 # without restarting the API, shim, or Firecracker.
 stop_api
 HELPER_STOPPED=1
-host "systemctl stop firecrab-net-helper"
+# firecrab-api Wants the helper, so starting it would otherwise undo our
+# outage. A private runtime drop-in holds off dependency activation only
+# for this test and is removed before recovery (including on failure).
+HELPER_BLOCK=/run/systemd/system/firecrab-net-helper.service.d/qa-lifetime-$SIMPLE.conf
+host "mkdir -p /run/systemd/system/firecrab-net-helper.service.d; printf '[Unit]\nConditionPathExists=/run/firecrab-qa-helper-$SIMPLE.enabled\n' > '$HELPER_BLOCK'; systemctl daemon-reload; systemctl stop firecrab-net-helper"
 start_api
+[ "$(host "systemctl is-active firecrab-net-helper" || true)" != active ] || fail R4e "helper outage was not held"
 curl -fsS "$API/api/vms/$VM" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["state"] == "running" and d["reconciliation"]["outcome"] == "networkFailed" and d["reconciliation"]["detail"]' || fail R4e "helper failure was not visible"
 [ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/api/network/reconcile")" = 503 ] || fail R4e "retry during helper outage should fail with 503"
-host "systemctl start firecrab-net-helper"
+host "rm -f '$HELPER_BLOCK'; systemctl daemon-reload; systemctl start firecrab-net-helper"
+HELPER_BLOCK=
 HELPER_STOPPED=0
 curl -fsS -o /dev/null -X POST "$API/api/network/reconcile" || fail R4e "operator network retry failed"
 check_recovered R4e
