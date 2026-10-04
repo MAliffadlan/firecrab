@@ -172,7 +172,7 @@ Every VM runs in its own `firecrab-vm-<simple id>.service` unit.
 
 | ID | Work | Expect |
 | --- | --- | --- |
-| R1 | shim in its unit | `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent and the main process of an active `firecrab-vm-<simple id>.service`; its parent is PID 1 and it runs as the API user; the runtime directory has `shim.sock` and `console.log` |
+| R1 | shim in its unit | `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent and the main process of an active `firecrab-vm-<simple id>.service`; its parent is PID 1 and it runs as the API user; the runtime directory has `shim.sock` and `console.log`; the unit's `MemoryMax` is the guest RAM plus the larger of 256 MiB and an eighth of it and its `CPUQuota` is one core per vCPU plus one (768 MiB and 200% for the 512 MiB, one-vCPU QA VM) |
 | R2 | stop from outside the API | `systemctl stop firecrab-vm-<simple id>.service` → `stopped`; `exit.json` has `"stop_requested":true`; the TAP is gone |
 | R3 | quick restart | stop, then start at once → `running` (the previous unit's name does not block the new one) |
 | R4 | API restart | shim and Firecracker PIDs unchanged; VM stays `running`; journal has `adopted=1`; TAP still on its bridge; guest ping/SSH/forwarded HTTP and V9/V11 work |

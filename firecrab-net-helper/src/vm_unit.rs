@@ -22,6 +22,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
+use firecrab_helper_protocol::network::{UNIT_CPU_QUOTA_PERCENT, UNIT_MEMORY_MAX_MIB};
 use thiserror::Error;
 use tokio::process::Command;
 use uuid::Uuid;
@@ -61,6 +62,11 @@ pub struct UnitRequest {
     pub enable_pci: bool,
     /// The shim's SIGTERM-to-SIGKILL grace.
     pub stop_grace_ms: u64,
+    /// Ceiling on the unit's memory in MiB (`MemoryMax`); `None` is unlimited.
+    pub memory_max_mib: Option<u32>,
+    /// Ceiling on the unit's CPU time as a percentage of one core
+    /// (`CPUQuota`); `None` is unlimited.
+    pub cpu_quota_percent: Option<u32>,
 }
 
 /// Why a VM unit request failed.
@@ -184,6 +190,24 @@ pub fn validate_request(request: &UnitRequest) -> Result<(), VmUnitError> {
             request.stop_grace_ms
         )));
     }
+    if let Some(memory) = request.memory_max_mib
+        && !UNIT_MEMORY_MAX_MIB.contains(&memory)
+    {
+        return Err(VmUnitError::Invalid(format!(
+            "memory limit {memory} MiB is outside {}..={} MiB",
+            UNIT_MEMORY_MAX_MIB.start(),
+            UNIT_MEMORY_MAX_MIB.end()
+        )));
+    }
+    if let Some(percent) = request.cpu_quota_percent
+        && !UNIT_CPU_QUOTA_PERCENT.contains(&percent)
+    {
+        return Err(VmUnitError::Invalid(format!(
+            "CPU quota {percent}% is outside {}..={}%",
+            UNIT_CPU_QUOTA_PERCENT.start(),
+            UNIT_CPU_QUOTA_PERCENT.end()
+        )));
+    }
     Ok(())
 }
 
@@ -268,6 +292,14 @@ pub fn start_args(
         format!("--property=TimeoutStopSec={stop_timeout}").into(),
         "--property=NoNewPrivileges=yes".into(),
     ];
+    // The API derives these from the VM's RAM and vCPUs. They only lower what
+    // the unit may use, so within sane bounds the helper applies them as given.
+    if let Some(memory) = request.memory_max_mib {
+        args.push(format!("--property=MemoryMax={memory}M").into());
+    }
+    if let Some(percent) = request.cpu_quota_percent {
+        args.push(format!("--property=CPUQuota={percent}%").into());
+    }
     if sandboxed {
         // The sandbox of `firecrab-api.service`; a unit must not be a way out
         // of it. Its `/tmp` is the API's own private one, not a third: paths
@@ -338,6 +370,8 @@ mod tests {
             firecracker: PathBuf::from("/usr/local/bin/firecracker"),
             enable_pci: false,
             stop_grace_ms: 5000,
+            memory_max_mib: None,
+            cpu_quota_percent: None,
         }
     }
 
@@ -582,6 +616,67 @@ mod tests {
             ]
         );
         assert!(args.iter().all(|arg: &OsString| !arg.is_empty()));
+    }
+
+    /// The `--property=` options `start_args` gives systemd-run, which come
+    /// before the `--` that starts the shim's own command line.
+    fn unit_options(unit_request: &UnitRequest) -> Vec<String> {
+        let program = Path::new("/usr/local/lib/firecrab/firecrab-api");
+        let text: Vec<String> = start_args(program, unit_request, &peer(), true)
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let separator = text.iter().position(|arg| arg == "--").unwrap();
+        text[..separator].to_vec()
+    }
+
+    #[test]
+    fn the_start_command_limits_the_unit_when_the_request_carries_limits() {
+        let directory = private_dir();
+        let mut unit_request = request(directory.path());
+        unit_request.memory_max_mib = Some(768);
+        unit_request.cpu_quota_percent = Some(200);
+
+        let options = unit_options(&unit_request);
+
+        assert!(options.contains(&"--property=MemoryMax=768M".to_owned()));
+        assert!(options.contains(&"--property=CPUQuota=200%".to_owned()));
+    }
+
+    #[test]
+    fn the_start_command_leaves_the_unit_unlimited_without_limits() {
+        let directory = private_dir();
+
+        let options = unit_options(&request(directory.path()));
+
+        assert!(
+            !options
+                .iter()
+                .any(|option| option.contains("MemoryMax") || option.contains("CPUQuota")),
+            "{options:?}"
+        );
+    }
+
+    #[test]
+    fn limits_outside_the_accepted_range_are_rejected_before_systemd_sees_them() {
+        let directory = private_dir();
+        for memory in [0, 127, 1_048_577] {
+            let mut unit_request = request(directory.path());
+            unit_request.memory_max_mib = Some(memory);
+            assert!(validate_request(&unit_request).is_err(), "{memory} MiB");
+        }
+        for percent in [0, 99, 6_401] {
+            let mut unit_request = request(directory.path());
+            unit_request.cpu_quota_percent = Some(percent);
+            assert!(validate_request(&unit_request).is_err(), "{percent}%");
+        }
+
+        for (memory, percent) in [(128, 100), (768, 200), (1_048_576, 6_400)] {
+            let mut unit_request = request(directory.path());
+            unit_request.memory_max_mib = Some(memory);
+            unit_request.cpu_quota_percent = Some(percent);
+            validate_request(&unit_request).unwrap();
+        }
     }
 
     #[test]

@@ -58,6 +58,7 @@ journalctl -u 'firecrab-vm-*' -b
 
 `VM unit runs no VM this API tracks; leaving it running` names a unit the API did not re-adopt; check it, then stop it with `sudo systemctl stop <unit>`.
 A start that fails with `the network helper could not start the VM's unit` names the rejected path: the API binary beside the helper and the Firecracker binary must be root-owned and not writable by group or others.
+A unit's memory and CPU ceilings are set from the VM's RAM and vCPUs each time it starts: `systemctl show -p MemoryMax -p CPUQuotaPerSecUSec firecrab-vm-<simple id>.service` prints them. A VM started before the upgrade that added them has none until its next start.
 
 ## Network helper is unavailable
 

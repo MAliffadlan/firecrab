@@ -22,6 +22,7 @@ mod package;
 mod persistence;
 mod process_metrics;
 mod reconcile;
+mod resource_limits;
 mod rootfs;
 mod server;
 mod shells;

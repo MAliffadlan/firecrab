@@ -244,6 +244,7 @@ MicroStorage registers an already mounted directory; Firecrab does not partition
 The helper starts each shim as a transient `firecrab-vm-<id>.service` unit owned by PID 1, so VMs keep running across API restarts and upgrades.
 The unit runs the `firecrab-api` installed beside the helper as the API's user; the helper refuses a program or Firecracker binary that anyone but root could change.
 When the API runs in `firecrab-api.service`, the unit gets that sandbox and shares its private `/tmp` (`JoinsNamespaceOf=`), so paths the API resolves mean the same files to the shim; an API run from a checkout has no sandbox, and neither do its units.
+Each unit also gets host-side ceilings from the VM's RAM and vCPUs when it starts: `MemoryMax` is the guest RAM plus the larger of 256 MiB and an eighth of it, and `CPUQuota` is one core per vCPU plus one. A healthy VM stays well below them; they stop a runaway Firecracker or shim from starving the API and the other VMs.
 A stop from outside the API (`systemctl stop` of the unit, a host shutdown) reaches the shim, which records it in `exit.json` and its final frame, so the VM is recorded `stopped`.
 Only one shim can run a VM at a time: each holds a lock on `<vm-id>/vm.lock`.
 

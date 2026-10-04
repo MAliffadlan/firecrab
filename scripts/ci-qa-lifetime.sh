@@ -157,7 +157,9 @@ start_vm
 [ "$(settled_state)" = running ] || fail R1 "VM did not reach running"
 
 # R1: Firecracker runs under this VM's shim, in the VM's own unit, owned by
-# PID 1 and run as the API user.
+# PID 1 and run as the API user, under the ceilings the API derives from the
+# VM's RAM and vCPUs: RAM plus max(256 MiB, RAM/8), and one core per vCPU
+# plus one (this VM has one vCPU, so 200%).
 SHIM=$(shim_pid)
 VMM=$(vmm_pid)
 [ -n "$SHIM" ] || fail R1 "no shim for $VM"
@@ -169,7 +171,13 @@ host "test -S '$RUNTIME/shim.sock' && test -f '$RUNTIME/console.log'" || fail R1
 [ "$(host "ps -o ppid= -p $SHIM" | tr -d ' ')" = 1 ] || fail R1 "shim $SHIM is not a child of PID 1"
 api_user=$(host "systemctl show -p User --value firecrab-api")
 [ "$(host "ps -o user= -p $SHIM" | tr -d ' ')" = "${api_user:-root}" ] || fail R1 "shim does not run as ${api_user:-root}"
-pass "R1 shim $SHIM owns Firecracker $VMM in $UNIT, parent PID 1, user ${api_user:-root}"
+RAM=${FIRECRAB_QA_RAM:-512}
+ALLOWANCE=$((RAM / 8))
+[ "$ALLOWANCE" -ge 256 ] || ALLOWANCE=256
+WANT_MEMORY_MAX=$(((RAM + ALLOWANCE) * 1024 * 1024))
+[ "$(host "systemctl show -p MemoryMax --value $UNIT")" = "$WANT_MEMORY_MAX" ] || fail R1 "$UNIT MemoryMax is not $WANT_MEMORY_MAX bytes"
+[ "$(host "systemctl show -p CPUQuotaPerSecUSec --value $UNIT")" = 2s ] || fail R1 "$UNIT CPUQuota is not 200%"
+pass "R1 shim $SHIM owns Firecracker $VMM in $UNIT, parent PID 1, user ${api_user:-root}, ceilings $((WANT_MEMORY_MAX / 1048576)) MiB and 200% CPU"
 
 # R2: a stop from outside the API (`systemctl stop`, as at host shutdown)
 # records stopped, whatever signal ended Firecracker.

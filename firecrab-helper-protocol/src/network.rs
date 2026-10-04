@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -110,6 +111,14 @@ impl<'de> Deserialize<'de> for MacAddr {
         text.parse().map_err(serde::de::Error::custom)
     }
 }
+
+/// What `StartVmUnit::memory_max_mib` may ask for. Sanity bounds, not policy:
+/// no guest runs in less than its smallest RAM, and the top is far beyond any
+/// host this runs on.
+pub const UNIT_MEMORY_MAX_MIB: RangeInclusive<u32> = 128..=1_048_576;
+
+/// What `StartVmUnit::cpu_quota_percent` may ask for: one core to 64 cores.
+pub const UNIT_CPU_QUOTA_PERCENT: RangeInclusive<u32> = 100..=6_400;
 
 /// The complete privileged surface. Interface names, CIDRs, or nftables text
 /// are deliberately absent: the helper derives all of those from its own
@@ -228,6 +237,14 @@ pub enum NetworkRequest {
         enable_pci: bool,
         /// The shim's SIGTERM-to-SIGKILL grace.
         stop_grace_ms: u64,
+        /// Ceiling on the unit's memory in MiB (`MemoryMax`). `None` leaves
+        /// it unlimited, as an API from before limits existed sends.
+        #[serde(default)]
+        memory_max_mib: Option<u32>,
+        /// Ceiling on the unit's CPU time as a percentage of one core
+        /// (`CPUQuota`; 200 is two cores' worth). `None` leaves it unlimited.
+        #[serde(default)]
+        cpu_quota_percent: Option<u32>,
     },
     /// Stop a VM's unit (and so its shim and Firecracker); a no-op when the
     /// unit does not exist.
@@ -1022,5 +1039,47 @@ mod tests {
         // not-yet-restarted helper and get UnsupportedVersion for the few
         // seconds between the swap and the restart. Do not bump.
         assert_eq!(PROTOCOL_VERSION, 2);
+    }
+
+    #[test]
+    fn a_start_vm_unit_request_without_limits_decodes_as_unlimited() {
+        // What an API from before the limits existed sends.
+        let json = serde_json::json!({
+            "operation": "start_vm_unit",
+            "vm_id": "00000000-0000-0000-0000-000000001234",
+            "runtime_dir": "/run/firecrab/vms/1234",
+            "firecracker": "/usr/local/bin/firecracker",
+            "stop_grace_ms": 5000,
+        });
+        let NetworkRequest::StartVmUnit {
+            memory_max_mib,
+            cpu_quota_percent,
+            ..
+        } = serde_json::from_value(json).unwrap()
+        else {
+            panic!("expected a StartVmUnit request");
+        };
+        assert_eq!(memory_max_mib, None);
+        assert_eq!(cpu_quota_percent, None);
+    }
+
+    #[test]
+    fn start_vm_unit_limits_round_trip_through_json() {
+        let request = NetworkRequest::StartVmUnit {
+            vm_id: Uuid::from_u128(0x1234),
+            runtime_dir: PathBuf::from("/run/firecrab/vms/1234"),
+            firecracker: PathBuf::from("/usr/local/bin/firecracker"),
+            enable_pci: false,
+            stop_grace_ms: 5000,
+            memory_max_mib: Some(768),
+            cpu_quota_percent: Some(200),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["memory_max_mib"], 768);
+        assert_eq!(json["cpu_quota_percent"], 200);
+        assert_eq!(
+            serde_json::from_value::<NetworkRequest>(json).unwrap(),
+            request
+        );
     }
 }

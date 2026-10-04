@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::model::Lease;
 
 use crate::network_policy::EgressPolicy;
+use crate::resource_limits::ResourceLimits;
 
 pub const DEFAULT_HELPER_SOCKET: &str = "/run/firecrab/net-helper.sock";
 const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -71,7 +72,8 @@ impl NetworkClient {
 
     /// Asks the helper to run `vm_id`'s shim in its own systemd unit, so the
     /// VM outlives this process. Returns once the unit has started; the
-    /// caller then connects to the shim's socket.
+    /// caller then connects to the shim's socket. The unit runs under
+    /// `limits`.
     pub async fn start_vm_unit(
         &self,
         vm_id: Uuid,
@@ -79,6 +81,7 @@ impl NetworkClient {
         firecracker: PathBuf,
         enable_pci: bool,
         stop_grace: Duration,
+        limits: ResourceLimits,
     ) -> Result<(), NetworkError> {
         self.call(NetworkRequest::StartVmUnit {
             vm_id,
@@ -86,6 +89,8 @@ impl NetworkClient {
             firecracker,
             enable_pci,
             stop_grace_ms: u64::try_from(stop_grace.as_millis()).unwrap_or(u64::MAX),
+            memory_max_mib: Some(limits.memory_max_mib),
+            cpu_quota_percent: Some(limits.cpu_quota_percent),
         })
         .await
     }
