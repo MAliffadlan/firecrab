@@ -41,6 +41,13 @@ curl -s -X POST http://127.0.0.1:5523/api/micro-networks \
 - Running VM: stored IPv4 and MAC lease
 - TAP attached to that network's bridge
 
+## Address lifecycle
+
+- A VM keeps its IPv4 and MAC lease while it is stopped, crashed, or missing after an API restart; only its TAP and firewall policy are removed
+- A later start gets the same address back, and no other VM is given it meanwhile; a VM moves to a new one only when an orphaned VM still holds that address on the host
+- Deleting the VM frees the lease; the lowest free address is handed out next
+- A network cannot be deleted while any VM still holds a lease in it
+
 ## Internet policy
 
 - Network field `internetEnabled` controls NAT for the subnet
