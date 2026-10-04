@@ -113,10 +113,15 @@ API_STOPPED=0
 HELPER_STOPPED=0
 HELPER_BLOCK=
 SENTINEL=
+IP_FORWARD_SAVED=
 cleanup() {
     if [ -n "$HELPER_BLOCK" ]; then host "rm -f '$HELPER_BLOCK'; rmdir /run/systemd/system/firecrab-net-helper.service.d 2>/dev/null || true; systemctl daemon-reload" || true; fi
     if [ "$HELPER_STOPPED" = 1 ]; then host "systemctl start firecrab-net-helper" || true; fi
     if [ "$API_STOPPED" = 1 ]; then host "systemctl start firecrab-api" || true; api_ready || true; fi
+    # Host-wide: put back what R4c found, whichever way the run ended.
+    case "$IP_FORWARD_SAVED" in
+        0 | 1) host "sysctl -w net.ipv4.ip_forward=$IP_FORWARD_SAVED >/dev/null" || true ;;
+    esac
     if [ -n "$SENTINEL" ]; then host "nft delete table inet $SENTINEL" || true; fi
     if [ -n "$KEY" ]; then rm -f "$KEY"; fi
     if [ -n "$KNOWN_HOSTS" ]; then rm -f "$KNOWN_HOSTS"; fi
@@ -277,6 +282,9 @@ host "nft list table inet $SENTINEL >/dev/null" || fail R4b "unrelated host tabl
 pass "R4b owned nft drift repaired with the helper alive; foreign table preserved"
 
 # R4c: a detached/down TAP and wrong bridge link/address configuration.
+# IPv4 forwarding is host-wide: save its value before breaking it so cleanup
+# can restore it even when this step fails.
+IP_FORWARD_SAVED=$(host "cat /proc/sys/net/ipv4/ip_forward")
 stop_api
 host "ip link set $TAP nomaster; ip link set $TAP down; ip link set $BRIDGE down; ip link set $BRIDGE mtu 1300; ip addr del $GATEWAY/$PREFIX dev $BRIDGE; ip addr add $GATEWAY/25 dev $BRIDGE; sysctl -w net.ipv4.ip_forward=0 >/dev/null"
 start_api
@@ -307,12 +315,12 @@ host "mkdir -p /run/systemd/system/firecrab-net-helper.service.d; printf '[Unit]
 start_api
 [ "$(host "systemctl is-active firecrab-net-helper" || true)" != active ] || fail R4e "helper outage was not held"
 curl -fsS "$API/api/vms/$VM" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["state"] == "running" and d["reconciliation"]["outcome"] == "networkFailed" and d["reconciliation"]["detail"]' || fail R4e "helper failure was not visible"
-[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/api/network/reconcile")" = 503 ] || fail R4e "retry during helper outage should fail with 503"
+[ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -X POST "$API/api/network/reconcile")" = 503 ] || fail R4e "retry during helper outage should fail with 503"
 API_RETRY_PID=$(host "systemctl show -p MainPID --value firecrab-api")
 host "rm -f '$HELPER_BLOCK'; rmdir /run/systemd/system/firecrab-net-helper.service.d 2>/dev/null || true; systemctl daemon-reload; systemctl start firecrab-net-helper"
 HELPER_BLOCK=
 HELPER_STOPPED=0
-curl -fsS -o /dev/null -X POST "$API/api/network/reconcile" || fail R4e "operator network retry failed"
+curl -fsS -o /dev/null --max-time 60 -X POST "$API/api/network/reconcile" || fail R4e "operator network retry failed"
 check_recovered R4e
 [ "$(host "systemctl show -p MainPID --value firecrab-api")" = "$API_RETRY_PID" ] || fail R4e "API PID changed during operator retry"
 pass "R4e helper outage reported; operator retry restored networking with unchanged VM PIDs"
