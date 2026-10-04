@@ -34,7 +34,7 @@ cargo run -p firecrab-api
 - JSON requests use `Content-Type: application/json`.
 - Request bodies are limited to 64 KiB.
 - Every response has `X-Request-Id`.
-- REST requests have a 10 second deadline.
+- REST requests have a 10 second deadline, except `POST /api/network/reconcile`.
 - Invalid paths return a JSON error.
 
 ## VM endpoints
@@ -135,7 +135,8 @@ succeeds, or `503 network_recovery_failed` when it cannot complete. Running VMs'
 `reconciliation` results and check times are updated; stopped/exited VMs retain
 their previous result. Inspect `GET /api/vms` for per-VM diagnostics. The same
 request can be repeated after repairing the helper or host service. This is an
-operator-triggered check, not a periodic health monitor.
+operator-triggered check, not a periodic health monitor. It has no 10 second
+deadline, so a slow recovery still answers `204` or `503` instead of `504`.
 
 ## Guest `/etc/firecrab`
 

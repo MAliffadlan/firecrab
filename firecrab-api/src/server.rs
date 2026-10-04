@@ -136,7 +136,18 @@ struct HttpPolicy {
 #[derive(Clone)]
 struct RequestLimits {
     permits: Arc<Semaphore>,
-    timeout: Duration,
+    /// `None` leaves a request without a deadline; it still takes a permit.
+    timeout: Option<Duration>,
+}
+
+impl RequestLimits {
+    /// The same permits for a route whose work can outlast the deadline.
+    fn without_deadline(&self) -> Self {
+        Self {
+            permits: Arc::clone(&self.permits),
+            timeout: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -148,7 +159,7 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
     };
     let limits = RequestLimits {
         permits: Arc::new(Semaphore::new(config.max_concurrent_requests)),
-        timeout: config.request_timeout,
+        timeout: Some(config.request_timeout),
     };
     let mut cors = CorsLayer::new()
         .allow_methods([
@@ -170,8 +181,9 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
     // stay open far longer than `enforce_limits`' request timeout allows,
     // and a request body limit means nothing for an upgraded connection.
     // Everything else keeps the full REST stack (CORS, body limit,
-    // timeout/concurrency); both sub-routers still get origin enforcement
-    // and request-id tagging, applied after the merge below.
+    // timeout/concurrency), except network recovery below; every sub-router
+    // still gets origin enforcement and request-id tagging, applied after
+    // the merge below.
     //
     // It also lives under a completely separate `/ws` prefix rather than
     // nested under `/api/vms/{id}/...`: dev-proxies (trunk's included) pick
@@ -205,10 +217,6 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
             get(handlers::vms::check_ssh_host_key),
         )
         .route("/api/network", get(handlers::network::get_network_info))
-        .route(
-            "/api/network/reconcile",
-            post(handlers::network::reconcile_network),
-        )
         .route("/api/host", get(handlers::network::get_host_status))
         // GET and POST share one path, matching this router's existing shape
         // for "read this resource / start work on it" pairs such as
@@ -345,13 +353,34 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
             "/api/vms/{id}/port-forwards",
             axum::routing::put(handlers::vms::update_vm_port_forwards),
         )
+        .layer(cors.clone())
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
+        .layer(middleware::from_fn_with_state(
+            limits.clone(),
+            enforce_limits,
+        ));
+
+    // Network recovery keeps that stack minus the deadline. A retry makes up
+    // to three attempts at several helper calls (5 s each) behind the lock VM
+    // starts and stops take, so it can outlast the deadline; a 504 would drop
+    // it partway and skip recording its results instead of answering the
+    // documented `204`/`503`.
+    let recovery = Router::new()
+        .route(
+            "/api/network/reconcile",
+            post(handlers::network::reconcile_network),
+        )
         .layer(cors)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
-        .layer(middleware::from_fn_with_state(limits, enforce_limits));
+        .layer(middleware::from_fn_with_state(
+            limits.without_deadline(),
+            enforce_limits,
+        ));
 
     let console = Router::new().route("/ws/vms/{id}/console", get(handlers::console::console_ws));
 
     let app = rest
+        .merge(recovery)
         .merge(console)
         // Unknown paths under the API/WebSocket prefixes answer with the JSON
         // error envelope even when the dashboard is served below, so a typo in
@@ -462,7 +491,10 @@ async fn enforce_limits(
         .try_acquire_owned()
         .map_err(|_| AppError::too_many_requests(id))?;
 
-    tokio::time::timeout(limits.timeout, next.run(request))
+    let Some(timeout) = limits.timeout else {
+        return Ok(next.run(request).await);
+    };
+    tokio::time::timeout(timeout, next.run(request))
         .await
         .map_err(|_| AppError::gateway_timeout(id))
 }
@@ -671,5 +703,113 @@ mod tests {
                 "{path} should answer JSON: {body}"
             );
         }
+    }
+
+    fn send(
+        app: &Router,
+        method: Method,
+        path: &'static str,
+    ) -> tokio::task::JoinHandle<axum::http::StatusCode> {
+        use tower::ServiceExt;
+        let app = app.clone();
+        tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        })
+    }
+
+    #[tokio::test]
+    async fn network_recovery_outlasts_the_rest_deadline_that_still_bounds_other_routes() {
+        use axum::http::StatusCode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("recording-helper.sock");
+        let (_helper, calls) = crate::network::test_support::spawn_recording_helper(&socket, None);
+        let mut state = test_state(directory.path()).await;
+        state.network = crate::network::NetworkClient::with_socket_path(socket);
+        let mut config = HttpConfig::from_values("127.0.0.1:3000", "", false, false).unwrap();
+        config.request_timeout = Duration::from_millis(100);
+        let app = build_router(state.clone(), &config);
+
+        // Each request first waits on a lock held past the deadline: recovery
+        // queues behind VM start/stop on `network_mutations`, and the update
+        // check serializes on its own cache.
+        let network_lock = state.network_mutations.lock().await;
+        let _update_lock = state.update_check.lock().await;
+        let recovery = send(&app, Method::POST, "/api/network/reconcile");
+        let update = send(&app, Method::GET, "/api/update");
+
+        assert_eq!(
+            update.await.unwrap(),
+            StatusCode::GATEWAY_TIMEOUT,
+            "an ordinary REST route is cut off at the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(network_lock);
+
+        assert_eq!(
+            recovery.await.unwrap(),
+            StatusCode::NO_CONTENT,
+            "recovery must answer its documented result, not a 504"
+        );
+        assert!(calls.lock().unwrap().contains(&"ensure_firewall"));
+    }
+
+    #[tokio::test]
+    async fn network_recovery_still_counts_against_the_concurrency_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = test_state(directory.path()).await;
+        let mut config = HttpConfig::from_values("127.0.0.1:3000", "", false, false).unwrap();
+        config.max_concurrent_requests = 1;
+        let app = build_router(state.clone(), &config);
+
+        // The first recovery takes the only permit and parks on the lock.
+        let _network_lock = state.network_mutations.lock().await;
+        let _first = send(&app, Method::POST, "/api/network/reconcile");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            send(&app, Method::POST, "/api/network/reconcile")
+                .await
+                .unwrap(),
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn network_recovery_keeps_the_rest_routes_cors_policy() {
+        use tower::ServiceExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let config =
+            HttpConfig::from_values("127.0.0.1:3000", "http://localhost:8080", false, false)
+                .unwrap();
+        let app = build_router(test_state(directory.path()).await, &config);
+
+        let preflight = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/network/reconcile")
+                    .header(header::ORIGIN, "http://localhost:8080")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            preflight.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&HeaderValue::from_static("http://localhost:8080"))
+        );
     }
 }
