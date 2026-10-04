@@ -77,14 +77,6 @@ pub enum BridgeError {
         /// The conflicting route's prefix length.
         route_prefix: u8,
     },
-    /// The bridge already has the gateway IP but at a different prefix.
-    #[error("bridge gateway {gateway}/{prefix} has a conflicting prefix")]
-    GatewayPrefixConflict {
-        /// The gateway address that was already assigned.
-        gateway: Ipv4Addr,
-        /// The prefix length that was requested instead.
-        prefix: u8,
-    },
     /// The bridge vanished between being created and being looked up again.
     #[error("bridge {name} disappeared while it was being configured")]
     MissingAfterCreate {
@@ -98,14 +90,6 @@ pub enum BridgeError {
         name: String,
         #[source]
         source: io::Error,
-    },
-    /// The bridge already has the IPv6 gateway but at a different prefix.
-    #[error("bridge IPv6 gateway {gateway}/{prefix} has a conflicting prefix")]
-    Ipv6GatewayPrefixConflict {
-        /// The gateway address that was already assigned.
-        gateway: Ipv6Addr,
-        /// The prefix length that was requested instead.
-        prefix: u8,
     },
     /// Writing the per-interface route_localnet sysctl failed.
     #[error("failed to enable route_localnet on {name}")]
@@ -547,10 +531,14 @@ async fn ensure_gateway(
             if address.header.prefix_len == config.prefix {
                 return Ok(());
             }
-            return Err(BridgeError::GatewayPrefixConflict {
-                gateway: config.gateway,
-                prefix: config.prefix,
-            });
+            // Only our gateway on our bridge is replaced. Other host
+            // addresses remain outside this operation's ownership.
+            handle
+                .address()
+                .del(address)
+                .execute()
+                .await
+                .map_err(BridgeError::Netlink)?;
         }
     }
 
@@ -564,8 +552,7 @@ async fn ensure_gateway(
 
 /// Adds `config`'s IPv6 gateway to the bridge if it isn't already assigned;
 /// a no-op for an IPv4-only network. The v6 counterpart of
-/// [`ensure_gateway`], including its "same address at a different prefix is
-/// a conflict, not something to silently re-add" rule.
+/// [`ensure_gateway`], repairing a drifted prefix on the owned gateway address.
 async fn ensure_gateway6(
     handle: &Handle,
     bridge_index: u32,
@@ -585,10 +572,12 @@ async fn ensure_gateway6(
             if address.header.prefix_len == ipv6.prefix {
                 return Ok(());
             }
-            return Err(BridgeError::Ipv6GatewayPrefixConflict {
-                gateway: ipv6.gateway,
-                prefix: ipv6.prefix,
-            });
+            handle
+                .address()
+                .del(address)
+                .execute()
+                .await
+                .map_err(BridgeError::Netlink)?;
         }
     }
 

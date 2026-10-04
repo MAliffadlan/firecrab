@@ -549,6 +549,7 @@ dependencies = [
  "futures-util",
  "libc",
  "rtnetlink",
+ "serde_json",
  "sha2",
  "tar",
  "tempfile",

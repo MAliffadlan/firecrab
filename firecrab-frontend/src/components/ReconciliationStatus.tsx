@@ -85,8 +85,8 @@ export default function ReconciliationStatus({
           {result && (
             <p className="reconciliation-note">
               {t(
-                "VM lifecycle check recorded when Firecrab API last started.",
-                "Firecrab API가 마지막으로 시작될 때 기록한 VM 상태 확인 결과입니다.",
+                "Latest API VM lifecycle check, including operator network recovery.",
+                "최근 API 시작 또는 운영자의 네트워크 복구 시 기록한 VM 상태 확인 결과입니다.",
               )}
             </p>
           )}

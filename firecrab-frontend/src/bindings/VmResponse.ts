@@ -12,7 +12,7 @@ export type VmResponse = {
   id: string;
   name: string;
   state: VmState;
-  /** Latest API startup check, absent when talking to an older API. */
+  /** Latest API startup/network retry check, absent with an older API. */
   reconciliation?: VmReconciliation | null;
   template: string;
   templateVersion: string;

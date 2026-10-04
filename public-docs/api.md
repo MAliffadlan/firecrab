@@ -34,7 +34,7 @@ cargo run -p firecrab-api
 - JSON requests use `Content-Type: application/json`.
 - Request bodies are limited to 64 KiB.
 - Every response has `X-Request-Id`.
-- REST requests have a 10 second deadline.
+- REST requests have a 10 second deadline, except `POST /api/network/reconcile`.
 - Invalid paths return a JSON error.
 
 ## VM endpoints
@@ -121,11 +121,22 @@ VM list and detail responses include `reconciliation`, either `null` or:
 | `exited` | Found an exit record; recorded `stopped` for a clean/requested exit, otherwise `error`. |
 
 `checkedAtMs` is Unix epoch milliseconds. `detail` is an optional diagnostic
-string and may be `null`. This is a snapshot from the latest API startup,
-not a live health check. Only VMs left `starting`, `running`, or `stopping`
+string and may be `null`. This is a snapshot from the latest API startup or explicit network retry,
+not a live health check. At startup, only VMs left `starting`, `running`, or `stopping`
 by the preceding API run are checked. Results stay in memory for this API run,
 are cleared on an accepted new VM start or deletion, and are recomputed at the
 next API startup. Older API versions omit the field.
+
+`POST /api/network/reconcile` retries host networking without restarting the API,
+shim, or Firecracker. It verifies/reconverges MicroNetwork bridges, running VMs'
+TAP attachment, Firecrab-owned nft rules, DHCP configuration/reservations and the
+serving process, with up to three attempts. It returns `204` when recovery
+succeeds, or `503 network_recovery_failed` when it cannot complete. Running VMs'
+`reconciliation` results and check times are updated; stopped/exited VMs retain
+their previous result. Inspect `GET /api/vms` for per-VM diagnostics. The same
+request can be repeated after repairing the helper or host service. This is an
+operator-triggered check, not a periodic health monitor. It has no 10 second
+deadline, so a slow recovery still answers `204` or `503` instead of `504`.
 
 ## Guest `/etc/firecrab`
 

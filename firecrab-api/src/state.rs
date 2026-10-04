@@ -99,7 +99,7 @@ const DISK_PREP_CONCURRENCY: usize = 2;
 pub struct AppState {
     /// In-memory cache of every VM record, mirrored to [`AppState::store`].
     pub vms: Arc<Mutex<HashMap<Uuid, VmRecord>>>,
-    /// Results from this API run's startup check; never persisted as live health.
+    /// Results from startup or explicit network retry; never persisted as live health.
     pub(crate) reconciliation: Arc<Mutex<HashMap<Uuid, VmReconciliation>>>,
     /// Verified boot template registry.
     pub templates: Arc<TemplateRegistry>,

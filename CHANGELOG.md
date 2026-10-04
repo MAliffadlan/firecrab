@@ -22,6 +22,9 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Added
 
+- `POST /api/network/reconcile` retries networking for running VMs without
+  restarting their API/shim/Firecracker processes and refreshes per-VM
+  recovery diagnostics ([#123]).
 - VM list and detail responses expose per-VM API startup reconciliation outcomes,
   timestamps, and diagnostics. The Dashboard displays them in English and Korean
   alongside the VM lifecycle state, with hover/focus information panels for the
@@ -55,6 +58,13 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Fixed
 
+- The API systemd unit starts even when a stopped/failed helper has removed
+  `/run/firecrab`, allowing network diagnostics and recovery retries. This unit
+  change requires existing installations to rerun `install.sh` once ([#123]).
+- API startup detects and repairs owned nft rule drift even with an unchanged
+  helper cache, DHCP file/process drift at the same lease revision, and TAP/
+  bridge/forwarding drift. Recovery makes three attempts; lifetime QA checks
+  guest ping, SSH and forwarded HTTP across restart and injected failures ([#123]).
 - None.
 
 ### Improved

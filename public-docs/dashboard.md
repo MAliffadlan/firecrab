@@ -100,8 +100,8 @@ npm run dev --prefix firecrab-frontend
   Detail's `API-STATUS` section identifies Firecrab API (`firecrab-api`), then
   shows the result, information, diagnostics, and check time in English or Korean.
   Dates use `YYYY-MM-DD HH:mm:ss` with the viewer's UTC offset.
-  This is the latest startup snapshot, not live health; an accepted new VM start
-  clears the old result. VMs that were inactive at API startup have no result.
+  This is the latest startup or explicit network retry snapshot, not live health; an accepted new VM start
+  clears the old result. VMs not checked at startup or by a network retry have no result.
 - While `running`, list / detail / terminal show guest OS CPU percent and memory used (MemTotal − MemAvailable) when the Firecrab Metrics Agent is in the guest (systemd on Ubuntu/Rocky, OpenRC on Alpine)
 - Detail and terminal: sparklines from recent samples
 - Agent missing: values stay `null`, start still succeeds
