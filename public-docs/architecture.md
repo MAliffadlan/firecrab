@@ -1,14 +1,13 @@
 # Firecrab architecture
 
-Firecrab is a single-host control plane for Firecracker microVMs.
-It manages images, networks, disks, VM state, and browser consoles.
+Firecrab is a single-host control plane for Firecracker microVMs, managing images, networks, disks, VM state, and browser consoles.
 This contributor view covers the v0.3.0 system and the current checkout's source development flow, including processes, ports, paths, and event order.
 For the simpler overview, see the [README](../README.md#architecture).
 
 ## Contents
 
 - [microManager system architecture](#micromanager-system-architecture): Linux, macOS, and Windows
-- [Source development on macOS](#source-development-on-macos): guest builds and frontend proxy
+- [Source development on macOS and Windows](#source-development-on-macos-and-windows): guest builds and frontend proxy
 - [Firecrab system architecture](#firecrab-system-architecture): components and VM startup
 - [Image and kernel supply](#image-and-kernel-supply): catalog, OCI, MicroBoot, and kernels
 - [Guest features](#guest-features): usage, shell repository, and SSH
@@ -64,17 +63,23 @@ The host requires Store WSL2 and usable nested `/dev/kvm`; native ARM64 installa
 3. WSL2 boots the managed distribution with systemd. OS and data share `distro\ext4.vhdx`; each start writes Windows and WSL versions to the guest's `/etc/firecrab/host-platform.json`.
 4. systemd starts net-helper, then `firecrab-api`.
 5. WSL localhost forwarding exposes the guest's loopback API on Windows at `127.0.0.1:5523`, without an SSH tunnel.
-6. The browser opens `http://127.0.0.1:5523`.
+6. The browser opens `http://127.0.0.1:5523`. With the source-built net-helper,
+   running MicroVMs' TCP forwards also bind loopback sockets for WSL to expose
+   at the same Windows localhost ports; stopping a VM removes its sockets.
 
 **Windows Preview:** the pinned Firecrab v0.2.2 guest cannot start MicroVMs on WSL2 yet.
-The dashboard, API, images, and networks work; newer net-helper fixes reach this guest when a newer bundle is pinned.
+The dashboard, API, images, and networks work. `service dev` builds the current
+checkout's net-helper with WSL2 fixes; release installation still needs a newer bundle pin.
 Managed files live under `%LOCALAPPDATA%\Firecrab\micromanager`.
 See [microManager on Windows](micromanager-windows.md) for lifecycle and shared WSL2 state.
 
-## Source development on macOS
+## Source development on macOS and Windows
 
-`service dev` builds the API and network helper inside the managed Debian VM.
-Frontend source runs through Vite on the Mac.
+`service dev` builds the API and network helper inside the managed Debian VM. Frontend source runs through Vite on the host.
+Windows uses the same snapshot, build, deployment, and rollback transaction;
+`wsl.exe` carries the archive and script instead of SSH, and Debian selects
+Linux x86_64 or ARM64 to match its architecture. WSL localhost forwarding
+connects the Windows frontend to the guest API.
 
 ![macOS source development: SSH upload, Debian build, systemd deployment, and frontend proxy](../assets/architecture/micromanager-source-dev.en.svg)
 
@@ -84,6 +89,7 @@ Frontend source runs through Vite on the Mac.
 4. **Frontend:** `npm run dev --prefix firecrab-frontend` serves `http://localhost:8080` and proxies `/api` and `/ws` through the Mac's `127.0.0.1:5523` SSH tunnel to the guest API. The installed dashboard remains available at port 5523.
 
 See [microManager on macOS](micromanager-macos.md#run-the-api-and-network-helper-from-local-source) for commands.
+Windows commands are in [microManager on Windows](micromanager-windows.md#develop-from-a-checkout).
 
 ## Firecrab system architecture
 
@@ -115,8 +121,7 @@ The installed API also serves the built dashboard. Development uses Vite, proxyi
 | MicroRegistry | Image/kernel catalog and package source; custom image registrations are local |
 | MicroBoot | API-only image bootstrap using a temporary builder VM |
 
-Every VM selects one MicroNetwork and an allowed storage root; there is no hidden default network.
-VM requests cannot supply arbitrary host filesystem paths.
+Every VM selects one MicroNetwork and an allowed storage root; there is no hidden default network. VM requests cannot supply arbitrary host filesystem paths.
 
 ### VM start flow
 
@@ -130,10 +135,8 @@ The numbers match the diagram.
 6. Firecracker boots the guest kernel/rootfs with KVM; the TAP connects the bridge to the guest's virtio network interface.
 7. The guest confirms DHCP and DNS, then sends `FIRECRAB_NETWORK_READY` over serial. The shim forwards the console to the API's console broker, which reads it, and the API records `running`.
 
-A host-side DHCP lease alone is not sufficient to mark a VM running.
-The startup timeline records disk preparation, configuration, process start, and readiness.
-Failure rolls back the process, firewall policy, and TAP where possible; an exit monitor removes runtime network state.
-Disk preparation concurrency is bounded to protect host I/O.
+A host-side DHCP lease alone is not sufficient to mark a VM running. The startup timeline records disk preparation, configuration, process start, and readiness.
+Failure rolls back the process, firewall policy, and TAP where possible; an exit monitor removes runtime network state. Disk preparation concurrency is bounded to protect host I/O.
 Network mutations are serialized so an old firewall snapshot cannot remove newer policy.
 
 ## Image and kernel supply
