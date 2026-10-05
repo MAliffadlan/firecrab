@@ -35,7 +35,7 @@ Each page covers one topic.
 | Failure checks | [Troubleshooting](troubleshooting.md) |
 | Linux, macOS, and Windows QA list | [QA work list](qa.md) |
 | Complete test checklist | [English](TEST.md) · [Korean](TEST.ko.md) |
-| Clippy warning regression check | [Clippy warning gate](ci.md) |
+| CI jobs, runtime E2E, and evidence | [CI and runtime E2E](ci.md) |
 
 ## Name aliases
 

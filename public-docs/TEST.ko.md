@@ -48,8 +48,11 @@ API 기본 주소:  http://127.0.0.1:5523
 - [ ] **A15 — 설치 진단:** 구문·스모크·도움말·점검·진단이 통과하고, 점검·진단은 호스트 상태를 바꾸지 않는다.
 - [ ] **A16 — 설치 생명주기:** 설치, 데몬·소켓 권한, KVM 그룹, CLI, 진단, 안전한 재설치, 제거, purge를 확인한다.
 - [ ] **A17 — 배포판 의존성:** Debian 12, Fedora, Arch, openSUSE Tumbleweed에서 의존성을 점검·설치한다.
+- [ ] **A18 — 개발 배포 계약:** 공통 게스트 빌드·배포·rollback 회귀 검사를 실행한다. 실제 `service dev` 검증은 별도로 기록한다.
+- [ ] **A19 — QA 실행기 계약:** VM 없이 게스트 실패·정리, 네이티브 Windows 단계별 결과 수집, 브라우저 모드·API 조건을 검증한다.
 
-저장소 루트에서 공통 로컬 점검을 실행한다. 주석의 ID는 해당 체크리스트 항목이다:
+Linux의 저장소 루트에서 워크스페이스 점검을 실행한다.
+주석의 ID는 해당 체크리스트 항목이다:
 
 ```sh
 # A1–A4
@@ -58,6 +61,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 cargo test -p firecrab-cli --locked
 cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+
+# A18 (Linux 또는 macOS; 빌드·서비스 명령은 stub 사용)
+python3 scripts/test-micromanager-dev.py
+python3 scripts/test-ci-qa-guest.py # A19
 
 # A5
 npm ci --prefix firecrab-frontend
@@ -88,14 +95,25 @@ bash -n install.sh
 # A11 (macOS)
 swift test --package-path micromanager-macos --scratch-path target/swift-micromanager-tests
 
-# A12 (Windows PowerShell)
-pwsh -File scripts/test-install-cli.ps1
-firecrab service doctor --json
-
 # A17 (지원하는 각 배포판 컨테이너에서 실행)
 ./install.sh --check
 ./install.sh --deps-only
 ```
+
+PowerShell에서 네이티브 Windows CLI를 점검한다(A12):
+
+```powershell
+cargo clippy -p firecrab-cli --all-targets -- -D warnings
+cargo test -p firecrab-cli --locked
+cargo build -p firecrab-cli --locked
+pwsh -File scripts/test-install-cli.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-ci-qa-windows.ps1
+.\target\debug\firecrab.exe service doctor --json
+```
+
+macOS는 같은 CLI Clippy·테스트 명령과 [CI 안내](ci.md)의 Swift·helper 검사를 실행한다.
+API·helper 워크스페이스 검사는 Linux에서 수행하고 소스 배포 빌드는 관리 게스트에서 실행한다.
+호스팅 doctor 검사는 유효한 JSON과 종료 코드 0 또는 1을 허용하지만 런타임 G2/G3는 `ready: true`를 요구한다.
 
 ```text
 A13 릴리스 대상:
@@ -115,11 +133,21 @@ A17 필수 도구: ip nft dnsmasq mkfs.ext4 firecracker sha256sum
 - [ ] **G4 — 전체:** 호스트 API는 200, 대시보드는 HTML 200.
 - [ ] **G5 — 전체:** 없는 경로는 요청 ID를 포함한 JSON 404.
 - [ ] **G6 — macOS/Windows:** `service shell`은 관리 Debian 게스트에서 명령을 root로 실행하고, 각 인자를 그대로 전달하며, 명령의 종료 코드를 돌려준다. 명령 없이 실행하면 root 로그인 셸이 열린다.
+- [ ] **G6a — Windows:** 명령은 root로 실행되고 작업 디렉터리는 `/root`다.
+- [ ] **G6b — Windows:** 기본 셸은 stdin을 읽고 종료 코드 19를 전달한다.
+- [ ] **G6c — Windows:** `service run` 별칭도 같은 셸을 연다.
+- [ ] **G6d — Windows:** 한글·따옴표·빈 문자열·공백·달러 기호·백슬래시·셸 메타 문자가 리터럴 인자로 유지된다.
+- [ ] **G6e — Windows:** stdout/stderr가 분리되고 종료 코드 23이 호스트에 전달된다.
+- [ ] **G6f — Windows:** 명령 stdin의 한글과 줄이 유지되고 EOF로 명령이 종료된다.
+- [ ] **G6g — Windows:** 없는 명령은 오류를 내며 실패하고 후속 셸은 정상 실행된다.
+- [ ] **G6h — Windows:** 셸 종료 후 API/helper가 active이고 호스트 API가 응답한다.
 - [ ] **H1 — 업데이트 상태:** 읽기 전용 상태 확인 성공.
 - [ ] **H2 — 호스트 네트워크:** uplink가 있으며 loopback·내부 helper 인터페이스는 선택 목록에 없다.
 - [ ] **U1 — 업데이트 적용(별도 선택 실행):** 적용 후 호스트가 복구되고 API가 200을 반환한다.
 
-호스팅 macOS·Windows 러너는 빌드·단위 테스트·진단만 수행한다. 런타임 E2E는 M3 이상 네이티브 Mac 또는 WSL2가 있는 Windows 호스트에서 준비 상태를 확인한 뒤 수행한다. 첫 부팅이 느리면 QA 대기 배수로 nginx/SSH 대기 시간을 늘린다.
+호스팅 macOS·Windows 러너는 빌드·단위 테스트·진단만 수행한다.
+런타임 E2E는 M3 이상 네이티브 Mac 또는 WSL2가 있는 Windows 호스트에서 준비 상태를 확인한 뒤 수행한다.
+첫 부팅이 느리면 QA 대기 배수로 nginx/SSH 대기 시간을 늘린다. 패키지 설치나 Playwright 제한 시간은 늘어나지 않는다.
 
 ```sh
 # G1: Linux
@@ -139,6 +167,8 @@ firecrab service shell -- printf '[%s]\n' "it's here" 'a b' '$HOME'   # [it's he
 firecrab service shell -- sh -c 'exit 7'; echo $?                    # 7
 firecrab service shell                                               # root 로그인, `exit`로 종료
 ```
+
+Windows G6a–G6h: WSL2 microManager가 설치된 호스트에서 `cargo test -p firecrab-cli --test windows_service_shell -- --ignored --test-threads=1`을 실행한다. 기본 셸 검사는 stdin으로 수행하며 터미널 키보드·크기 변경·Ctrl-C는 별도 대화형 검사다.
 
 ```text
 런타임 조건: doctor → ready: true
@@ -450,8 +480,18 @@ firecrab host list
 - [ ] **B8 — IPv6 네트워크:** IPv4 전용 및 자동 ULA 듀얼스택 생성. 전자는 IPv6 설정이 없고 후자는 ULA /64, SLAAC, NAT66 확인.
 - [ ] **B9 — DHCP fixture 가져오기:** 로컬 DHCP 부팅 이미지를 검사·가져오기.
 - [ ] **B10 — DHCP 듀얼스택 게스트:** HTTP 포트 포워딩으로 부팅하고 네트워크 준비 로그, IPv4·IPv6, 포워딩된 IPv4와 직접 IPv6의 키 전용 root SSH 확인.
+- [ ] **B11 — 콘솔 세션 종료:** 모의 게스트 종료 후 Session ended를 유지하고 New session으로 다시 연결한다.
+- [ ] **B12 — 콘솔 자동 재연결:** 다른 모의 소켓 종료에서는 자동으로 다시 연결한다.
+- [ ] **B13 — 실제 콘솔 재접속:** exit로 두 화면의 세션이 종료되고, 새 세션에서 명령을 실행하며 VM은 계속 실행된다.
+- [ ] **B14 — 영어 재연결 UI:** 목록·상세에서 API 결과 6종, 툴팁, 확인 시각, 미확인 VM을 검증한다.
+- [ ] **B15 — 한국어 재연결 UI:** 같은 목록·상세 결과와 진단을 한국어로 검증한다.
+- [ ] **B16 — 재연결 상태 갱신:** 새 시작 후 목록·상세의 이전 API 결과가 제거된다.
+- [ ] **B17 — 좁은 재연결 패널:** 한국어 진단이 넘치지 않고 줄바꿈되며 상태 툴팁을 이용할 수 있다.
 
-가져오기 전용 모드에서는 B2, B6, B8, B10을 건너뛰며 B5는 제품 기능 미구현으로 계속 건너뛴다. 전체 게스트 실행에는 KVM, Firecracker, 작동하는 네트워크 helper 소켓, B10용 SSH 도구가 필요하다. 이전 로컬 레지스트리 행에는 아직 삭제 연산이 없어 테스트가 시작 전에 실패할 수 있다. 테스트 모음이 소유한 VM·네트워크·alias·fixture만 정리한다.
+가져오기·폼 전용 모드에서는 B2, B6, B8, B10, B13을 건너뛰며 B5도 계속 제외한다. 예상 결과는 **11개 통과, 6개 제외**다.
+전체 게스트 실행은 **16개 통과, 1개 기존 제외**를 예상하며 KVM, Firecracker, 작동하는 네트워크 helper 소켓, B10용 SSH 도구가 필요하다.
+테스트 소유 VM·네트워크·alias·패키지·로컬 카탈로그 등록을 정리하며, 등록이 남으면 준비 단계에서 실패한다.
+worker는 하나이고 재시도는 없다. 게스트 부팅 제외는 명시적인 설정으로만 수행한다.
 
 ```text
 대시보드 origin: http://localhost:8080
@@ -467,6 +507,8 @@ B10:             80:18888/tcp
 
 ```sh
 npm ci --prefix firecrab-e2e
+npm run test:runner --prefix firecrab-e2e # A19
+npm ci --prefix firecrab-frontend
 npm run install-browsers --prefix firecrab-e2e
 FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e
 ```
@@ -481,6 +523,21 @@ FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e
 npm test --prefix firecrab-e2e
 ```
 
+Windows에서는 PowerShell로 소스 배포와 브라우저 E2E를 실행한다:
+
+```powershell
+cargo build -p firecrab-cli --locked
+.\scripts\ci-qa-windows-e2e.ps1 -Phase browser -Cli .\target\debug\firecrab.exe -Source .
+.\scripts\ci-qa-windows-e2e.ps1 -Phase nginx -Cli .\target\debug\firecrab.exe -Source . -WaitFactor 3
+```
+
+브라우저·Vite·fixture는 관리 WSL 안에서 실행하고 실제 게스트 부팅과 API 재사용을 활성화한다.
+nginx는 네이티브 Windows의 포워딩된 포트에서도 HTTP 200을 요구한다.
+Windows `all`은 gate/setup 성공 후 API → nginx → guest → browser 결과를 실패 후에도 수집하고, 한 단계라도 실패하면 전체 실패로 종료한다.
+게스트 스크립트도 앞선 이미지 실패 후 나머지 참조를 검사한다.
+Windows 로그·요약·브라우저 archive는 `target/qa/windows/<run-id>` 또는 `-ResultsDir`에 보관한다.
+macOS 브라우저 명령과 관리 VM SSH 설정은 [E2E 안내](../firecrab-e2e/README.md)를 참고한다.
+
 ## 정리 및 CI 범위
 
 - [ ] **X1:** QA VM이 남지 않는다.
@@ -490,6 +547,8 @@ npm test --prefix firecrab-e2e
 - [ ] **X5:** 사용자 지정 OCI alias가 없고 카탈로그 fixture는 명시적으로 보존할 때만 남긴다.
 - [ ] **X6:** QA Docker Hub 비밀값이 남지 않고 기존 로그인이 복원된다.
 - [ ] **X7:** QA VM의 `firecrab-vm-*` unit이 남지 않는다.
+- [ ] **X8:** QA VM 정지·삭제 후 포워딩된 TCP 포트가 닫힌다.
+- [ ] **X9:** 수동 변경한 QA DNS·관리 SSH 설정을 복구하고 로그와 결과 요약을 보관한다.
 
 정리 후 네 종류의 리소스 목록을 확인한다:
 
@@ -509,14 +568,19 @@ scripts/ci-qa-nginx.sh: V8a–V8d를 포함한 NGX1–NGX9
 scripts/ci-qa-ssh.sh: 게스트·nginx 실행 중 V8a–V8d
 scripts/ci-qa-guest.sh: I5–I6 V1–V2 V6–V9 V11–V13 N6 C1–C2 C4 X5
 scripts/ci-qa-lifetime.sh: R1–R7 X7, API 호스트의 root 명령 (macOS: management VM SSH)
-scripts/ci-qa-macos-e2e.sh: 새로 설치한 네이티브 Mac의 수동 런타임 검사 (G6 포함)
-scripts/ci-qa-windows-e2e.ps1: 새로 설치한 네이티브 Windows의 수동 런타임 검사 (G6 포함)
+scripts/ci-qa-macos-e2e.sh: 네이티브 Mac의 수동 gate/browser/API/nginx/guest 단계 (G6 포함)
+scripts/ci-qa-windows-e2e.ps1: 수동 Windows gate, 선택적 소스 배포, WSL browser/API/nginx/guest 및 네이티브 HTTP
 ```
 
 확장 게스트 검사는 첫 OCI 참조에 적용한다.
+현재 CI 워크플로는 Linux API/nginx/공개 이미지 guest QA와 전체 Chromium E2E를 실행한다. ARM64 KVM 런타임 작업은 등록되지 않았다.
+Linux CI는 로그·JSON/JUnit 결과·실패 trace를 14일 보관한다.
+[Windows 소스 검증 결과](qa.md#windows-source-validation-2026-10-03)에 브라우저 9개 통과, 기존 B5 제외 및 별도 Ubuntu/Fedora SSH 실패를 기록했다.
+이 결과로 Windows `all`이나 고정된 설치 릴리스의 런타임이 통과했다고 판단하지 않는다.
 
 ## 관련 문서
 
 - [QA 원본 목록](qa.md)
+- [CI 및 런타임 E2E](ci.md)
 - [브라우저 E2E 실행 안내](../firecrab-e2e/README.md)
 - [기여 안내](../CONTRIBUTING.md)

@@ -48,8 +48,11 @@ Update scope:   POST /api/update → U1 only
 - [ ] **A15 — Installer diagnostics:** syntax, smoke, help, check, and doctor checks pass; check and doctor leave host state unchanged.
 - [ ] **A16 — Installer lifecycle:** verify installation, daemon/socket permissions, KVM group, CLI, doctor, safe reinstall, uninstall, and purge.
 - [ ] **A17 — Distribution dependencies:** check and install dependencies on Debian 12, Fedora, Arch, and openSUSE Tumbleweed.
+- [ ] **A18 — Development deployment contract:** run shared guest build/deploy/rollback regression checks; record live `service dev` validation separately.
+- [ ] **A19 — QA runner contracts:** verify guest failure/cleanup, native Windows phase aggregation, and browser mode/API guards without a VM.
 
-Run the common local gates from the repository root. The IDs show which checklist items each command covers:
+Run workspace gates on Linux from the repository root.
+The IDs show which checklist items each command covers:
 
 ```sh
 # A1–A4
@@ -58,6 +61,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 cargo test -p firecrab-cli --locked
 cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+
+# A18 (Linux or macOS; uses stub build/service commands)
+python3 scripts/test-micromanager-dev.py
+python3 scripts/test-ci-qa-guest.py # A19
 
 # A5
 npm ci --prefix firecrab-frontend
@@ -88,14 +95,25 @@ bash -n install.sh
 # A11 (macOS)
 swift test --package-path micromanager-macos --scratch-path target/swift-micromanager-tests
 
-# A12 (Windows PowerShell)
-pwsh -File scripts/test-install-cli.ps1
-firecrab service doctor --json
-
 # A17 (run inside each supported distribution container)
 ./install.sh --check
 ./install.sh --deps-only
 ```
+
+Native Windows CLI checks (A12), from PowerShell:
+
+```powershell
+cargo clippy -p firecrab-cli --all-targets -- -D warnings
+cargo test -p firecrab-cli --locked
+cargo build -p firecrab-cli --locked
+pwsh -File scripts/test-install-cli.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-ci-qa-windows.ps1
+.\target\debug\firecrab.exe service doctor --json
+```
+
+On macOS, run the same CLI Clippy/test commands and the Swift/helper checks in the [CI guide](ci.md).
+API/helper workspace checks run on Linux; their source deployment builds inside the management guest.
+Hosted doctor checks accept exit 0 or 1 for valid JSON; runtime G2/G3 still requires `ready: true`.
 
 ```text
 A13 release targets:
@@ -115,11 +133,21 @@ A17 required tools: ip nft dnsmasq mkfs.ext4 firecracker sha256sum
 - [ ] **G4 — All:** host API returns 200; dashboard returns HTML 200.
 - [ ] **G5 — All:** unknown route returns JSON 404 with a request ID.
 - [ ] **G6 — macOS/Windows:** `service shell` runs a command in the managed Debian guest as root with each argument unchanged and returns its exit code; without a command it opens a root login.
+- [ ] **G6a — Windows:** commands run as root with `/root` as the working directory.
+- [ ] **G6b — Windows:** the default shell reads stdin and returns exit 19.
+- [ ] **G6c — Windows:** the `service run` alias still opens that shell.
+- [ ] **G6d — Windows:** Unicode, quotes, empty strings, spaces, dollar signs, backslashes, and shell metacharacters remain literal arguments.
+- [ ] **G6e — Windows:** stdout/stderr remain separate and exit 23 reaches the host.
+- [ ] **G6f — Windows:** command stdin preserves Unicode and lines; EOF terminates the command.
+- [ ] **G6g — Windows:** a missing command fails visibly; a subsequent shell succeeds.
+- [ ] **G6h — Windows:** shell exit leaves API/helper active and the host API responsive.
 - [ ] **H1 — Update status:** read-only status check succeeds.
 - [ ] **H2 — Host network:** an uplink is present; loopback and internal helper interfaces are absent from the picker.
 - [ ] **U1 — Update apply (optional separate run):** apply update; host recovers and API returns 200.
 
-Hosted macOS and Windows runners do build, unit, and diagnostic checks. Runtime E2E needs a native M3-or-later Mac or a Windows host with WSL2, and doctor must report ready. The QA wait factor extends nginx/SSH guest waits on slow first boots.
+Hosted macOS and Windows runners do build, unit, and diagnostic checks.
+Runtime E2E needs a native M3-or-later Mac or a Windows host with WSL2, and doctor must report ready.
+The QA wait factor extends nginx/SSH guest waits on slow first boots; it does not extend package-install or Playwright deadlines.
 
 ```sh
 # G1: Linux
@@ -139,6 +167,8 @@ firecrab service shell -- printf '[%s]\n' "it's here" 'a b' '$HOME'   # [it's he
 firecrab service shell -- sh -c 'exit 7'; echo $?                    # 7
 firecrab service shell                                               # root login; `exit` leaves
 ```
+
+Windows G6a–G6h: `cargo test -p firecrab-cli --test windows_service_shell -- --ignored --test-threads=1` on an installed WSL2 microManager host. The default-shell checks use redirected stdin; terminal keyboard/resize/Ctrl-C require a separate interactive pass.
 
 ```text
 Runtime gate: doctor → ready: true
@@ -450,8 +480,18 @@ Use a local registry fixture; Docker Hub is not required. The suite starts the A
 - [ ] **B8 — IPv6 networks:** create IPv4-only and auto-ULA dual-stack networks; verify IPv4-only has no IPv6 settings and dual-stack has ULA /64, SLAAC, and NAT66.
 - [ ] **B9 — DHCP fixture import:** inspect/import the local DHCP-boot image.
 - [ ] **B10 — DHCP dual-stack guest:** boot with a forwarded HTTP port; verify network-ready log, both IP families, and key-only root SSH over forwarded IPv4 and direct IPv6.
+- [ ] **B11 — Console session end:** a simulated guest exit leaves the terminal at Session ended; New session attaches again.
+- [ ] **B12 — Console reconnect:** other simulated socket closures reconnect automatically.
+- [ ] **B13 — Real console reattachment:** exit ends both viewers; a new session executes a command while the VM stays running.
+- [ ] **B14 — English reconciliation UI:** list and detail show all six API results, tooltips, timestamps, and unchecked VMs.
+- [ ] **B15 — Korean reconciliation UI:** verify the same list/detail results and diagnostics in Korean.
+- [ ] **B16 — Reconciliation polling:** a new start clears the previous API result in the list and detail.
+- [ ] **B17 — Narrow reconciliation panel:** Korean diagnostics wrap without overflow and status tooltips remain accessible.
 
-The import-only mode skips B2, B6, B8, and B10; B5 remains product-blocked. The full guest path needs KVM, Firecracker, a working network helper socket, and SSH tools for B10. A prior local registry row can stop the test before it starts because that row has no delete operation yet. Clean up only suite-owned VM, network, alias, and fixture.
+The import/form-only mode skips B2, B6, B8, B10, and B13; B5 remains product-blocked: **11 passed, 6 skipped**.
+The full guest path expects **16 passed, 1 existing explicit skip** and needs KVM, Firecracker, a working network helper socket, and SSH tools for B10.
+Cleanup removes suite-owned VMs, networks, aliases, packages, and local catalog registrations; a remaining registration fails setup.
+Tests use one worker and zero retries; guest boot is skipped only by explicit configuration.
 
 ```text
 Dashboard origin: http://localhost:8080
@@ -467,6 +507,8 @@ Run the import/form cases first:
 
 ```sh
 npm ci --prefix firecrab-e2e
+npm run test:runner --prefix firecrab-e2e # A19
+npm ci --prefix firecrab-frontend
 npm run install-browsers --prefix firecrab-e2e
 FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e
 ```
@@ -481,6 +523,21 @@ For guest-boot cases, start the helper in one terminal, then run the suite in an
 npm test --prefix firecrab-e2e
 ```
 
+On Windows, run source deployment and browser E2E from PowerShell:
+
+```powershell
+cargo build -p firecrab-cli --locked
+.\scripts\ci-qa-windows-e2e.ps1 -Phase browser -Cli .\target\debug\firecrab.exe -Source .
+.\scripts\ci-qa-windows-e2e.ps1 -Phase nginx -Cli .\target\debug\firecrab.exe -Source . -WaitFactor 3
+```
+
+The browser, Vite, and fixture run inside managed WSL with real guest boot and API reuse enabled.
+nginx separately requires HTTP 200 from the native Windows forwarded port.
+Windows `all` requires gate/setup, then collects API → nginx → guest → browser results even after test failures, and fails overall if any phase fails.
+The guest script also checks later image references after a failed reference.
+The Windows transcript, summary, and browser archive are retained under `target/qa/windows/<run-id>` or `-ResultsDir`.
+For macOS browser commands and management SSH settings, see the [E2E guide](../firecrab-e2e/README.md).
+
 ## Cleanup and CI coverage
 
 - [ ] **X1:** no QA VM remains.
@@ -490,6 +547,8 @@ npm test --prefix firecrab-e2e
 - [ ] **X5:** custom OCI alias is gone; retain catalog fixtures only by explicit choice.
 - [ ] **X6:** no QA Docker Hub secret remains; restore any prior login.
 - [ ] **X7:** no `firecrab-vm-*` unit remains for a QA VM.
+- [ ] **X8:** forwarded TCP ports close after stopping/deleting QA VMs.
+- [ ] **X9:** restore manually changed QA DNS/management SSH settings and save logs and result summaries.
 
 Inspect the four resource lists after cleanup:
 
@@ -509,14 +568,19 @@ scripts/ci-qa-nginx.sh: NGX1–NGX9, including V8a–V8d
 scripts/ci-qa-ssh.sh: V8a–V8d from guest and nginx runs
 scripts/ci-qa-guest.sh: I5–I6 V1–V2 V6–V9 V11–V13 N6 C1–C2 C4 X5
 scripts/ci-qa-lifetime.sh: R1–R7 X7, root commands on the API host (macOS: management VM SSH)
-scripts/ci-qa-macos-e2e.sh: native-Mac manual runtime pass after fresh install, including G6
-scripts/ci-qa-windows-e2e.ps1: native-Windows manual runtime pass after fresh install, including G6
+scripts/ci-qa-macos-e2e.sh: native-Mac manual gate/shell/browser/API/nginx/guest/lifetime phases (G6 included)
+scripts/ci-qa-windows-e2e.ps1: manual Windows gate, optional source deployment, G6 shell, WSL browser/API/nginx/guest; native HTTP
 ```
 
 Expanded guest checks run on the first OCI reference.
+The current CI workflow runs Linux API/nginx/public-image guest QA and complete Chromium E2E; ARM64 KVM runtime has no registered job.
+Linux CI retains logs, JSON/JUnit results, and failure traces for 14 days.
+The [Windows source validation snapshot](qa.md#windows-source-validation-2026-10-03) records 9 browser passes, the existing B5 skip, and separate Ubuntu/Fedora SSH failures.
+That result does not establish a passing Windows `all` run or stock pinned-release runtime.
 
 ## Related
 
 - [QA source list](qa.md)
+- [CI and runtime E2E](ci.md)
 - [Browser E2E setup](../firecrab-e2e/README.md)
 - [Contributing](../CONTRIBUTING.md)

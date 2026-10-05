@@ -103,7 +103,9 @@ export async function startLocalOciRegistry(
 
   let announcement: RegistryAnnouncement;
   try {
-    const line = await firstStdoutLine(child, 10_000);
+    // The fixture assembles OpenSSH and its shared libraries before announcing.
+    // Nested Windows/WSL hosts can need more than ten seconds for that disk I/O.
+    const line = await firstStdoutLine(child, 60_000);
     announcement = JSON.parse(line) as RegistryAnnouncement;
   } catch (error) {
     await terminate(child);
