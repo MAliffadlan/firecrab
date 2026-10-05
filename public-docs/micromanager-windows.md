@@ -32,18 +32,65 @@ A host with WSL but no distribution reports `WARNING`; `install` imports its own
 
 ## Develop from a checkout
 
-On a Windows host, open PowerShell in the repository root and build the CLI. If microManager is already installed, start its scheduled task with the checkout CLI; this keeps the managed WSL distribution running while its Firecrab API and net-helper serve the localhost API:
+Open PowerShell in the repository root and build the Windows CLI:
 
 ```powershell
 cargo build -p firecrab-cli --locked
-.\target\debug\firecrab.exe service start
+.\target\debug\firecrab.exe service dev
 .\target\debug\firecrab.exe service debug --logs --tail 100
 Invoke-RestMethod http://127.0.0.1:5523/api/host
 ```
 
-`cargo run -p firecrab-cli -- service start` also builds and runs the CLI. On a new host, run `.\target\debug\firecrab.exe service install` instead; installation imports and provisions the managed distribution and starts the API. `service debug` only reports status and never starts a stopped distribution. `service run` opens a root console in that distribution, while `service start` is the resident API path. Stop the scheduled task and managed distribution with `.\target\debug\firecrab.exe service stop` when finished. Windows `service reinstall` reprovisions the guest but does not copy the checkout CLI into the user's installed binary path; continue invoking the checkout executable to test CLI changes.
+`service dev` installs microManager when missing and keeps its scheduled task running.
+It snapshots the checkout's Rust sources and compile-time resources with Windows
+`tar.exe`, then streams the archive and embedded build script into the managed
+distribution through `wsl.exe`. Local configuration, `.env` files, Git metadata,
+and build output stay on Windows. The API and net-helper build with the checkout's
+pinned Rust toolchain inside Debian for Linux x86_64 or ARM64, matching the guest.
+The first build installs compiler dependencies and Rust; later builds reuse
+`/var/lib/firecrab/dev` for sources and compiler caches. Windows CRLF script
+endings are normalized before the Linux build. An already installed pinned
+toolchain is reused without refreshing its remote channel metadata.
 
-Building `firecrab-cli` does not rebuild the Firecrab API inside Debian. `service start` runs the guest API binary installed by microManager, not edited `firecrab-api/` source from this checkout.
+Deployment switches only the two systemd `ExecStart` overrides after the build
+succeeds, then checks the guest services and Windows localhost API. A failed
+build preserves the running services; a failed deployment restores their previous
+executables. Run the command again after source edits; it does not watch files.
+
+```powershell
+.\target\debug\firecrab.exe service dev --source 'C:\work\firecrab'
+.\target\debug\firecrab.exe service dev --release
+.\target\debug\firecrab.exe service dev --yes
+.\target\debug\firecrab.exe service dev --restore # Installed release binaries
+npm run dev --prefix firecrab-frontend            # http://localhost:8080
+```
+
+Vite proxies `/api` and `/ws` to `127.0.0.1:5523` through WSL localhost forwarding.
+For running MicroVMs, the source-built net-helper binds each TCP forwarded port
+on Debian's loopback and relays it to the guest. WSL discovers those sockets
+and makes them reachable at the same Windows localhost port. The listener is
+removed when the VM stops; a port occupied by another process fails VM startup.
+UDP forwarding has no Windows localhost relay.
+`--restore` needs no checkout and can recover a failed development API.
+`service start` resumes the currently selected binaries without rebuilding;
+`service run` opens a root console. Stop the resident distribution with
+`service stop`. Continue invoking the checkout executable to test CLI changes;
+`service reinstall` does not copy it into the user's installed binary path.
+
+Run the shared QA against the source-built API and net-helper:
+
+```powershell
+.\scripts\ci-qa-windows-e2e.ps1 -Phase all -Cli .\target\debug\firecrab.exe -Source . -WaitFactor 3
+```
+
+The gate deploys the checkout before API, nginx, OCI guest, and Chromium tests.
+The browser and local OCI registry run inside the managed distribution, using
+its loopback and workload IPv6 routes. The browser phase installs its Linux
+Node.js/Chromium dependencies there; Windows `node_modules` are excluded.
+The tests clean up their resources and preserve the distribution and QA dependencies.
+After the gate and setup succeed, `all` collects every test phase and fails overall if any phase fails.
+Use `-Phase browser` to run only Chromium.
+See [CI and runtime E2E](ci.md#windows-runtime-e2e) for phase options and artifact retention.
 
 ## Install lifecycle
 
@@ -133,7 +180,18 @@ Do not create `/dev/kvm` by hand: a regular file there blocks the real device no
 
 The stock WSL2 kernel has no nftables `bridge` family, and it already listens on `10.255.255.254:53` on `lo`.
 The pinned Firecrab v0.2.2 net-helper needs the first for per-VM L2 rules and collides with the second in dnsmasq, so on WSL2 the API, images, and networks work but no MicroVM starts.
-A net-helper that keeps L2 rules in per-VM `netdev` tables and keeps dnsmasq off `lo` runs the shared QA list on WSL2; the pinned release moves once one ships.
+A source-built net-helper keeps L2 rules in per-VM `netdev` tables and dnsmasq off `lo`, enabling workload boot on WSL2.
+`service dev` deploys those fixes from the current checkout; `--restore`
+returns to the installed binaries and their release limitations.
+The [2026-10-03 source QA snapshot](qa.md#windows-source-validation-2026-10-03) records API/nginx/browser passes and remaining Ubuntu/Fedora SSH failures.
+
+### Source QA continuation, 2026-10-04
+
+On `feat/windows-source-dev` after `main` baseline `15934df`, the Windows 11 x64 QEMU lab (4 vCPU / 6 GiB) passed native CLI HTTP tests (17) and `service shell` E2E (8). Earlier Windows runner contracts, shared API/shell QA, nginx including Windows localhost HTTP, and VM lifetime results remain recorded in the initial source snapshot.
+The final full WSL Chromium run passed 12 cases with one existing explicit skip, zero failures, and exit 0. All three console cases passed, including two viewers ending together and command execution after reattachment. The DHCP guest authenticated SSH with the downloaded key through IPv4 forwarding and over IPv6 after its host key became ready. Tests used one worker and zero retries.
+Public-image guest QA passed Alpine 3.21, Ubuntu 24.04, and Fedora 42 with exit 0, including actual SSH authentication and resource cleanup (`-WaitFactor 15`). Alpine was already installed, so its import rows remain `WARNING`; Ubuntu and Fedora were freshly imported. Fedora's SPDX SBOM contained 127 RPM packages plus the image entry. The existing Ubuntu template was backed up and replaced with a fresh import because provisioning changes are embedded in each image.
+The Linux lab host repeatedly attempted suspend, removing its network routes and causing QEMU connections to return `ENETUNREACH`. A temporary sleep inhibitor kept the network available during QA. Source fixes also bound registry connection retries, allow 60/65 seconds for API/CLI inspection, give APT network stages 600 seconds without interrupting dpkg configuration, recover DNF metadata once, and parse exported RPM headers correctly. Console and SSH tests wait for actual readiness before sending input.
+Final logs, JSON summaries, and JUnit/browser archives are retained in the local lab's `failure-fix-20261004` directory. Earlier failures remain in `qa-e2e-20261004` and separate failed-run artifacts. This validates the source lab's guest and full browser runs; Windows `-Phase all` was not rerun, and physical Windows, stock release, and native Windows Chromium remain unverified.
 
 ## Validation and troubleshooting
 
@@ -170,16 +228,21 @@ Publish measurements from real Windows hosts before quoting Windows performance.
 ## End-to-end check
 
 `scripts/ci-qa-windows-e2e.ps1` is the Windows counterpart of the macOS E2E script.
-Its gate runs `doctor`, a fresh `install`, and `status`, then checks the API from Windows.
+Its gate runs `doctor`, installs or reuses microManager, optionally deploys `-Source`, and runs `status`, then checks the API from Windows.
 The `shell` phase checks `service shell` (G6) from Windows.
 The `api`, `nginx`, and `guest` phases run the shared QA scripts inside `firecrab-debian`, the Firecrab host.
+The `lifetime` phase runs the shared VM-unit/API-restart/crash/cleanup QA inside that distribution as root.
+The nginx phase also requires HTTP 200 from the Windows host's forwarded port.
+The `browser` phase runs Chromium inside the distribution with real guest boot enabled.
+It requires the managed API to remain running and clears inherited import-only or management-SSH settings.
 
 ```powershell
-scripts\ci-qa-windows-e2e.ps1 -Phase all -Cli target\debug\firecrab.exe
-firecrab service uninstall --purge
+.\scripts\ci-qa-windows-e2e.ps1 -Phase all -Cli .\target\debug\firecrab.exe -Source .
 ```
 
-`-WaitFactor` stretches the guest waits on hosts whose guests install first-boot packages slowly.
+`-WaitFactor` stretches nginx/SSH waits; it does not change package-install or Playwright deadlines.
+`-ResultsDir` chooses a Windows output directory; the default is `target/qa/windows/<run-id>`.
+Results include `run.log`, `summary.json`, and any browser traces/JSON/JUnit in `browser-results.tar.gz`.
 
 ## Related
 
@@ -187,3 +250,4 @@ firecrab service uninstall --purge
 - [Installation](installation.md)
 - [firecrab CLI](firecrab-cli.md)
 - [QA work list](qa.md)
+- [CI and runtime E2E](ci.md)

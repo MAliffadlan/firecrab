@@ -267,10 +267,30 @@ print(row.get("minDiskGb") or 2 if row else 2)
 }
 
 first_reference=1
+failed_references=0
+reference_results=()
 for REFERENCE in "${REFERENCES[@]}"; do
-    boot_oci "$REFERENCE" "$first_reference"
+    # A failed public-image boot must not hide later image results. Keep each
+    # import and its cleanup in a subshell, with errexit enabled there. Calling
+    # boot_oci from an `if` would disable errexit inside the function as well.
+    set +e
+    (
+        set -e
+        trap cleanup_imported_image EXIT
+        boot_oci "$REFERENCE" "$first_reference"
+    )
+    reference_exit=$?
+    set -e
+    if [ "$reference_exit" -eq 0 ]; then
+        reference_results+=("PASS ${REFERENCE} exit=0")
+    else
+        reference_results+=("FAILED ${REFERENCE} exit=${reference_exit}")
+        failed_references=$((failed_references + 1))
+    fi
     first_reference=0
 done
+printf 'Guest QA summary:\n'
+printf '%s\n' "${reference_results[@]}"
 
 http GET /api/vms
 [ "$CODE" = 200 ] || fail X1 "GET /api/vms HTTP ${CODE}"
@@ -283,3 +303,4 @@ if bad:
     sys.exit(1)
 ' || fail X1 "leftover guest-boot VMs"
 pass X1
+[ "$failed_references" -eq 0 ] || exit 1
