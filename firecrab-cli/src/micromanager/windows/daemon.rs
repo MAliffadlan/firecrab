@@ -118,13 +118,19 @@ pub fn uninstall(layout: &Layout) -> Result<(), Error> {
 }
 
 pub fn start() -> Result<Status, Error> {
+    resume()?;
+    wait_ready(READY_TIMEOUT)
+}
+
+/// Start the resident holder even when the current guest API needs repair.
+pub fn resume() -> Result<(), Error> {
     if task_state() == TaskState::Missing {
         return Err(Error::NotInstalled);
     }
     publish_host_platform();
     schtasks(&["/Change", "/TN", TASK_NAME, "/ENABLE"])?;
     schtasks(&["/Run", "/TN", TASK_NAME])?;
-    wait_ready(READY_TIMEOUT)
+    Ok(())
 }
 
 /// Leaves the Windows and WSL versions where the guest's API reports them.
@@ -209,7 +215,7 @@ pub fn status() -> Status {
     }
 }
 
-fn wait_ready(timeout: Duration) -> Result<Status, Error> {
+pub(super) fn wait_ready(timeout: Duration) -> Result<Status, Error> {
     let started = Instant::now();
     while started.elapsed() < timeout {
         let status = status();
