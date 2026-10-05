@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fed to the managed Debian VM over its key-only SSH connection by service dev.
+# Shared by macOS (SSH) and Windows (WSL stdin) service dev.
 set -Eeuo pipefail
 profile=${1:?build profile is required}
 channel=${2:?Rust toolchain is required}
@@ -67,7 +67,11 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [ "$profile" != restore ]; then
-  [ "$(uname -m)" = aarch64 ] || { echo 'Linux ARM64 guest required' >&2; exit 1; }
+  case "$(uname -m)" in
+    aarch64) target=aarch64-unknown-linux-gnu ;;
+    x86_64) target=x86_64-unknown-linux-gnu ;;
+    *) echo 'Linux ARM64 or x86_64 guest required' >&2; exit 1 ;;
+  esac
   echo '[BUILD] preparing Debian compiler and pinned Rust toolchain'
   if ! command -v cc >/dev/null || ! command -v pkg-config >/dev/null || ! command -v cmake >/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
@@ -83,25 +87,38 @@ if [ "$profile" != restore ]; then
     sh "$installer" -y --profile minimal --default-toolchain none --no-modify-path
     rm -f "$installer"
   fi
-  rustup toolchain install "$channel" --profile minimal --no-self-update
+  # A pinned toolchain already in the cache needs no channel refresh. WSL DNS
+  # can still be coming up after a cold start; do not let it break a cached build.
+  if ! rustup run "$channel" rustc --version >/dev/null 2>&1; then
+    rustup toolchain install "$channel" --profile minimal --no-self-update
+  fi
 
   # Keep the compiler cache on the data disk, but replace the snapshot so deleted
-  # local files cannot linger in the next build. Never copy Mac target artifacts.
+  # local files cannot linger in the next build. Never copy host target artifacts.
   rm -rf "$root/source"
   install -d -m 0700 "$root/source"
   tar -xf "$root/$archive_name" -C "$root/source"
+  # Windows Git checkouts may use CRLF; include_str! also embeds guest fragments.
+  # Avoid GNU-only sed -i and \r syntax so the deployment contract runs with
+  # macOS BSD tools too. Writing back preserves each staged file's permissions.
+  find "$root/source/scripts" "$root/source/firecrab-api" -type f \
+    \( -path "$root/source/scripts/*" -o -name '*.sh' \) -print0 > "$backup/script-paths"
+  while IFS= read -r -d '' script; do
+    sed $'s/\r$//' "$script" > "$backup/normalized-script"
+    cat "$backup/normalized-script" > "$script"
+  done < "$backup/script-paths"
   cd "$root/source"
   export CARGO_TARGET_DIR="$root/target"
   export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
   export CARGO_PROFILE_DEV_DEBUG=${CARGO_PROFILE_DEV_DEBUG:-1}
-  flags=(--locked --target aarch64-unknown-linux-gnu -p firecrab-api -p firecrab-net-helper)
+  flags=(--locked --target "$target" -p firecrab-api -p firecrab-net-helper)
   if [ "$profile" = release ]; then flags+=(--release); fi
   rustup run "$channel" cargo build "${flags[@]}"
 
   binaries=$(mktemp -d "$bin_root/build.XXXXXX")
   chmod 0755 "$binaries"
   for unit in firecrab-api firecrab-net-helper; do
-    install -m 0755 "$CARGO_TARGET_DIR/aarch64-unknown-linux-gnu/$profile/$unit" "$binaries/$unit"
+    install -m 0755 "$CARGO_TARGET_DIR/$target/$profile/$unit" "$binaries/$unit"
   done
   # The API resolves these runtime tools next to its executable. The source
   # snapshot is root-only, so its compile-time fallback path is not accessible.

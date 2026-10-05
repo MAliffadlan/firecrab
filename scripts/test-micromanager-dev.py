@@ -14,19 +14,30 @@ STUB = r'''#!/bin/bash
 set -eu
 name=${0##*/}
 case "$name" in
-  uname) echo aarch64 ;;
+  uname) echo "${GUEST_ARCH:-aarch64}" ;;
   cc|pkg-config|cmake|journalctl|sleep) exit 0 ;;
   flock) [ "${LOCK_FAIL:-0}" = 0 ] ;;
   curl) [ "${HEALTH_FAIL:-0}" = 0 ] ;;
   rustup)
+    echo "$*" >>"$TEST_ROOT/rustup-events"
+    if [ "$1" = toolchain ]; then [ "${TOOLCHAIN_INSTALL_FAIL:-0}" = 0 ]; exit; fi
     [ "$1" = run ] || exit 0
+    if [ "$3" = rustc ]; then [ "${TOOLCHAIN_MISSING:-0}" = 0 ]; exit; fi
     [ "${BUILD_FAIL:-0}" = 0 ] || exit 42
     test "$(cat "$TEST_ROOT/cache/source/firecrab-api/src/main.rs")" = 'edited local source'
+    fragment="$TEST_ROOT/cache/source/firecrab-api/src/oci/guest/install-packages.sh"
+    if [ -f "$fragment" ]; then cp "$fragment" "$TEST_ROOT/compiled-fragment"; fi
     profile=debug
     for arg in "$@"; do [ "$arg" != --release ] || profile=release; done
-    mkdir -p "$CARGO_TARGET_DIR/aarch64-unknown-linux-gnu/$profile"
+    target=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --target ]; then target=$2; break; fi
+      shift
+    done
+    [ "$target" = "${GUEST_ARCH:-aarch64}-unknown-linux-gnu" ]
+    mkdir -p "$CARGO_TARGET_DIR/$target/$profile"
     for unit in firecrab-api firecrab-net-helper; do
-      printf '#!/bin/bash\necho built-from-source\n' >"$CARGO_TARGET_DIR/aarch64-unknown-linux-gnu/$profile/$unit"
+      printf '#!/bin/bash\necho built-from-source\n' >"$CARGO_TARGET_DIR/$target/$profile/$unit"
     done
     ;;
   systemctl)
@@ -96,6 +107,25 @@ class GuestDevelopmentTest(unittest.TestCase):
     def override(self, unit="firecrab-api"):
         return self.units / (unit + ".service.d/90-firecrab-dev.conf")
 
+    def test_cached_toolchain_does_not_require_network_refresh(self):
+        result = self.run_guest(TOOLCHAIN_INSTALL_FAIL=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / "rustup-events").read_text()
+        self.assertIn("run 1.97.1 rustc --version", calls)
+        self.assertNotIn("toolchain install", calls)
+
+    def test_missing_toolchain_is_installed_before_build(self):
+        result = self.run_guest(TOOLCHAIN_MISSING=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / "rustup-events").read_text()
+        self.assertLess(calls.index("toolchain install"), calls.index("cargo build"))
+
+    def test_toolchain_download_failure_preserves_running_services(self):
+        result = self.run_guest(TOOLCHAIN_MISSING=1, TOOLCHAIN_INSTALL_FAIL=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "events").exists())
+        self.assertFalse(self.override().exists())
+
     def test_debug_and_release_deploy_edited_source(self):
         for profile in ["debug", "release"]:
             with self.subTest(profile=profile):
@@ -124,6 +154,38 @@ class GuestDevelopmentTest(unittest.TestCase):
         self.assertFalse((self.root / "events").exists())
         self.assertFalse(self.override().exists())
         self.assertFalse((self.binaries / "bin").exists())
+
+    def test_windows_x86_64_checkout_deploys_debug_and_release_with_crlf_tools(self):
+        for profile in ["debug", "release"]:
+            with self.subTest(profile=profile):
+                tools = self.root / "local/scripts/firecracker-menual"
+                named_tool = tools / "runtime tool 한글.sh"
+                named_tool.write_text("runtime tool")
+                named_tool.chmod(0o751)
+                for tool in tools.iterdir():
+                    tool.write_bytes(b"#!/bin/sh\r\necho runtime-tool\r\n")
+                fragment = self.root / "local/firecrab-api/src/oci/guest/install-packages.sh"
+                fragment.parent.mkdir(parents=True, exist_ok=True)
+                fragment.write_bytes(b"echo embedded-guest-script\r\nprintf 'keep\rinside'\r\n")
+                with tarfile.open(self.archive, "w") as archive:
+                    archive.add(self.root / "local/firecrab-api/src/main.rs", arcname="firecrab-api/src/main.rs")
+                    archive.add(fragment, arcname="firecrab-api/src/oci/guest/install-packages.sh")
+                    archive.add(tools, arcname="scripts/firecracker-menual")
+                result = self.run_guest(profile, GUEST_ARCH="x86_64")
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertIn("built-from-source", (self.binaries / "bin/firecrab-api").read_text())
+                self.assertNotIn(b"\r", (self.binaries / "bin/extract-vmlinux").read_bytes())
+                self.assertEqual((self.root / "compiled-fragment").read_bytes(),
+                                 b"echo embedded-guest-script\nprintf 'keep\rinside'\n")
+                staged_tool = self.cache / "source/scripts/firecracker-menual" / named_tool.name
+                self.assertEqual(staged_tool.read_bytes(), b"#!/bin/sh\necho runtime-tool\n")
+                self.assertEqual(staged_tool.stat().st_mode & 0o777, 0o751)
+
+    def test_unsupported_architecture_fails_before_mutating_services(self):
+        result = self.run_guest(GUEST_ARCH="riscv64")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Linux ARM64 or x86_64 guest required", result.stderr)
+        self.assertFalse((self.root / "events").exists())
 
     def test_failed_first_deployment_restores_release_services(self):
         result = self.run_guest(START_FAIL=1)

@@ -4,6 +4,7 @@
 //! same `[PASS]`/`[FAILED]` reading works on both hosts.
 
 mod daemon;
+mod dev;
 mod doctor;
 mod lifecycle;
 mod provision;
@@ -25,6 +26,8 @@ pub enum Error {
     Provision(#[from] provision::Error),
     #[error(transparent)]
     Daemon(#[from] daemon::Error),
+    #[error(transparent)]
+    Dev(#[from] super::dev::Error),
     #[error(transparent)]
     Wsl(#[from] wsl::Error),
     #[error("the management VM did not become healthy: {0}")]
@@ -55,8 +58,12 @@ pub fn run(command: Command) -> Result<i32, Error> {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Command::Shell { command } => run_shell(&command),
         Command::ForwardPorts { .. } => Err(Error::MacosOnly("forward-ports")),
-        #[cfg(target_os = "macos")]
-        Command::Dev { .. } => Err(Error::MacosOnly("dev")),
+        Command::Dev {
+            source,
+            release,
+            restore,
+            yes,
+        } => run_dev(source.as_deref(), release, restore, yes),
     }
 }
 
@@ -122,6 +129,48 @@ fn run_start() -> Result<i32, Error> {
     let status = daemon::start()?;
     print_daemon_status(&status);
     Ok(i32::from(!status.success()))
+}
+
+fn run_dev(
+    source: Option<&std::path::Path>,
+    release: bool,
+    restore: bool,
+    yes: bool,
+) -> Result<i32, Error> {
+    // Invalid source must fail before installing or starting the distribution.
+    let checkout = if restore {
+        None
+    } else {
+        Some(super::dev::Checkout::prepare(
+            source.unwrap_or_else(|| std::path::Path::new(".")),
+        )?)
+    };
+    let layout = lifecycle::Layout::from_process_env()?;
+    if !layout.runtime().join("microManager-task.xml").is_file()
+        || daemon::task_state() == daemon::TaskState::Missing
+        || !wsl::contains(&wsl::distributions(), DISTRO_NAME)
+    {
+        if restore {
+            return Err(Error::NotInstalled);
+        }
+        super::report!("[INSTALL] management VM for source development");
+        run_install(false, yes)?;
+    }
+    if provision::guest_result(&layout)?.is_none() {
+        return Err(Error::NotInstalled);
+    }
+    // Keep WSL resident without requiring the previous API to be healthy:
+    // deployment and restore must also recover a broken development service.
+    daemon::resume()?;
+    dev::deploy(checkout.as_ref(), release)?;
+    let status = daemon::wait_ready(std::time::Duration::from_secs(30))?;
+    if !status.success() {
+        print_daemon_status(&status);
+        return Err(super::dev::Error::LocalApiUnavailable.into());
+    }
+    super::report!("[PASS] API: http://127.0.0.1:5523/");
+    super::report!("  logs: firecrab service debug --logs --tail 100");
+    Ok(0)
 }
 
 fn run_stop() -> Result<i32, Error> {
@@ -447,6 +496,17 @@ mod tests {
             run(Command::Reinstall { yes: false }),
             Err(Error::NotReady)
         ));
+    }
+
+    #[test]
+    fn invalid_development_source_fails_before_any_host_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let wsl = fake::answer(|line| panic!("invalid checkout touched the host: {line}"));
+        assert!(matches!(
+            run_dev(Some(directory.path()), false, false, false),
+            Err(Error::Dev(super::super::dev::Error::Checkout { .. }))
+        ));
+        assert!(wsl.calls().is_empty());
     }
 
     #[test]

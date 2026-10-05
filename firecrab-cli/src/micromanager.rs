@@ -4,6 +4,7 @@
 
 mod artifact;
 mod debug;
+mod dev;
 mod host_platform;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -113,8 +114,7 @@ pub enum Command {
         #[arg(long, requires = "logs", value_parser = clap::value_parser!(u16).range(1..=1000))]
         tail: Option<u16>,
     },
-    /// Build local API/net-helper sources inside the macOS management VM and restart them.
-    #[cfg(target_os = "macos")]
+    /// Build local API/net-helper sources inside the management VM and restart them.
     Dev {
         /// Checkout root (defaults to the current directory).
         #[arg(long, conflicts_with = "restore")]
@@ -275,7 +275,6 @@ mod tests {
         assert!(matches!(cli.command, Command::Shell { ref command } if command.is_empty()));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn dev_restore_is_independent_of_source_and_build_options() {
         let cli = TestCli::try_parse_from(["test", "dev", "--restore"]).unwrap();
