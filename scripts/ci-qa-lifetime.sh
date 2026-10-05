@@ -255,7 +255,9 @@ check_recovered() {
     traffic || fail "$id" "guest ping/SSH/forwarded HTTP failed"
 }
 stop_api() { API_STOPPED=1; host "systemctl stop firecrab-api"; }
-start_api() { host "systemctl start firecrab-api"; api_ready || fail R4 "API did not come back"; API_STOPPED=0; }
+# Failure injections deliberately restart several times inside systemd's
+# default start-limit window; reset that QA-only counter before each start.
+start_api() { host "systemctl reset-failed firecrab-api; systemctl start firecrab-api"; api_ready || fail R4 "API did not come back"; API_STOPPED=0; }
 
 # R4: an API restart re-adopts the running VM.
 host "systemctl restart firecrab-api"
