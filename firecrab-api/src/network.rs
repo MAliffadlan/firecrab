@@ -39,7 +39,7 @@ pub enum NetworkError {
     Helper(#[source] HelperFailure),
 }
 
-/// Client for the privileged firecrab-net-helper; one connection per call.
+/// Client for the privileged firecrab-helper; one connection per call.
 #[derive(Debug, Clone)]
 pub struct NetworkClient {
     socket_path: PathBuf,

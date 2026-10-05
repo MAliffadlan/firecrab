@@ -131,7 +131,7 @@ The task starts at logon and fires again every minute; `IgnoreNew` makes that a 
 Together they bring the distribution back after `wsl --shutdown` or a crash, like launchd's `KeepAlive` on macOS.
 In the lab the API answered again 100 seconds after `wsl --shutdown`: up to a minute for the trigger, then the boot.
 
-`stop` disables the task before ending it, stops `firecrab-api` and `firecrab-net-helper`, and terminates the distribution.
+`stop` disables the task before ending it, stops `firecrab-api` and `firecrab-helper`, and terminates the distribution.
 The task stays disabled, across logons too, until `start` enables it again.
 `start` also writes the Windows and WSL versions to the guest's `/etc/firecrab/host-platform.json` for the dashboard's Host view.
 A failed write prints a `[WARNING]` and does not stop the start.
@@ -139,7 +139,7 @@ A failed write prints a `[WARNING]` and does not stop the start.
 
 ```text
 [PASS] task_scheduler: enabled
-[PASS] management_vm: firecrab-api=active, firecrab-net-helper=active, ip=172.x.x.x
+[PASS] management_vm: firecrab-api=active, firecrab-helper=active, ip=172.x.x.x
 [PASS] api: http://127.0.0.1:5523/
 ```
 

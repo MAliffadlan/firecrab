@@ -40,6 +40,12 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Changed
 
+- Rename the privileged daemon and unit to `firecrab-helper`. Installer
+  reruns migrate the legacy service into an alias; old executable paths,
+  release installers, update bundles, socket settings, and status JSON remain
+  compatible. CLI status/doctor and macOS/Windows guest control accept either
+  installed service name; lifetime QA checks migration with a running VM ([#123]).
+
 - Each MicroVM now runs under a per-VM `firecrab-vm` shim (`firecrab-api vm-shim`)
   that owns Firecracker, writes `console.log`, and records the exit status in
   `exit.json`. The API controls the VM through the shim's socket.

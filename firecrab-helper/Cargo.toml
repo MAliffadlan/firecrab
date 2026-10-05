@@ -1,5 +1,5 @@
 [package]
-name = "firecrab-net-helper"
+name = "firecrab-helper"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

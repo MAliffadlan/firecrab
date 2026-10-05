@@ -1,5 +1,5 @@
 //! Wire protocol shared between `firecrab-api` and the privileged
-//! `firecrab-net-helper`/other helper daemons: framed request/response
+//! `firecrab-helper`/other helper daemons: framed request/response
 //! envelopes carried over a Unix socket, versioned so mismatched builds
 //! fail fast instead of misparsing each other's messages.
 

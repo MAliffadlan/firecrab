@@ -22,7 +22,8 @@ use super::wsl::{self, DISTRO_NAME};
 
 pub const TASK_NAME: &str = r"Firecrab\microManager";
 pub const API_URL: &str = "http://127.0.0.1:5523/api/host";
-const UNITS: [&str; 2] = ["firecrab-api", "firecrab-net-helper"];
+const HELPER_SETUP: &str = "helper=firecrab-helper; if [ \"$(systemctl show --property=LoadState --value firecrab-helper.service)\" = not-found ]; then helper=firecrab-net-helper; fi";
+const UNITS: [&str; 2] = ["firecrab-api", "firecrab-helper"];
 /// A cold start waits for `kvm_intel`, systemd, and the API in turn.
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -194,7 +195,9 @@ pub fn stop() -> Result<(), Error> {
     }
     if wsl::is_running(DISTRO_NAME) {
         // Let the services stop their microVMs before the distribution goes away.
-        let _ = wsl::root_shell(&format!("systemctl stop {}", UNITS.join(" ")));
+        let _ = wsl::root_shell(&format!(
+            "{HELPER_SETUP}; systemctl stop firecrab-api \"$helper\""
+        ));
         wsl::run(&["--terminate", DISTRO_NAME])?;
     }
     Ok(())
@@ -250,7 +253,7 @@ fn settings_enabled(xml: &str) -> bool {
 /// Reports each unit as `name=state` so an inactive unit is not a failed command.
 fn guest_units() -> (bool, Option<String>) {
     let script = format!(
-        "for unit in {}; do printf '%s=%s\\n' \"$unit\" \"$(systemctl is-active \"$unit\")\"; done; \
+        "{HELPER_SETUP}; for unit in {}; do lookup=$unit; if [ \"$unit\" = firecrab-helper ]; then lookup=$helper; fi; printf '%s=%s\\n' \"$unit\" \"$(systemctl is-active \"$lookup\")\"; done; \
          printf 'ip=%s\\n' \"$(hostname -I | cut -d' ' -f1)\"",
         UNITS.join(" ")
     );
@@ -563,9 +566,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} missing from {calls:?}"))
         };
         assert!(position("/DISABLE") < position("/End"));
-        assert!(
-            position("systemctl stop firecrab-api firecrab-net-helper") < position("--terminate")
-        );
+        assert!(position("systemctl stop firecrab-api") < position("--terminate"));
     }
 
     #[test]
@@ -603,7 +604,7 @@ mod tests {
             l if l.starts_with("schtasks.exe /Query") => Ok(ENABLED.into()),
             "wsl.exe --list --running --quiet" => Ok("firecrab-debian\n".into()),
             l if l.contains("systemctl is-active") => {
-                Ok("firecrab-api=active\nfirecrab-net-helper=active\nip=172.20.1.5\n".into())
+                Ok("firecrab-api=active\nfirecrab-helper=active\nip=172.20.1.5\n".into())
             }
             other => panic!("unexpected {other}"),
         });
@@ -671,13 +672,13 @@ mod tests {
     #[test]
     fn the_guest_is_ready_only_when_every_unit_is_active() {
         let (ready, detail) =
-            parse_units("firecrab-api=active\nfirecrab-net-helper=active\nip=172.20.1.5\n");
+            parse_units("firecrab-api=active\nfirecrab-helper=active\nip=172.20.1.5\n");
         assert!(ready);
         assert_eq!(
             detail.as_deref(),
-            Some("firecrab-api=active, firecrab-net-helper=active, ip=172.20.1.5")
+            Some("firecrab-api=active, firecrab-helper=active, ip=172.20.1.5")
         );
-        let (ready, _) = parse_units("firecrab-api=activating\nfirecrab-net-helper=active\n");
+        let (ready, _) = parse_units("firecrab-api=activating\nfirecrab-helper=active\n");
         assert!(!ready);
     }
 

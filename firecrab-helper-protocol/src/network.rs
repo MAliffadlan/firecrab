@@ -18,7 +18,7 @@ use crate::PROTOCOL_VERSION;
 pub const TAP_PREFIX: &str = "fct";
 
 /// The deterministic TAP interface name for a VM. Both `firecrab-api` (to
-/// reference it in the Firecracker config) and `firecrab-net-helper` (to
+/// reference it in the Firecracker config) and `firecrab-helper` (to
 /// create/attach/delete the real device, and to name nftables objects)
 /// derive the same name from the same `vm_id` — the API never gets to pass
 /// the helper an arbitrary interface name.
@@ -508,7 +508,7 @@ pub struct DhcpLeaseEntry {
 /// The (unprivileged) CLI resolves these exactly the way `firecrab info` does
 /// and sends them here, but the helper does **not** write where they point: it
 /// re-derives the same three paths from its own `PREFIX`/`FIRECRAB_LIBDIR`
-/// (exported by `packaging/systemd/firecrab-net-helper.service`) and rejects
+/// (exported by `packaging/systemd/firecrab-helper.service`) and rejects
 /// the request unless the two agree byte-for-byte. So this field is a
 /// "do we both mean the same host?" cross-check, not a destination — a caller
 /// that made it past the socket's uid allowlist still cannot point a
@@ -517,7 +517,7 @@ pub struct DhcpLeaseEntry {
 pub struct InstallLayout {
     /// Receives the `firecrab` CLI (`$PREFIX/bin`).
     pub bindir: PathBuf,
-    /// Receives `firecrab-api` and `firecrab-net-helper` (`$LIBDIR`).
+    /// Receives `firecrab-api` and `firecrab-helper` (`$LIBDIR`).
     pub libdir: PathBuf,
     /// Receives the dashboard assets under `dashboard/` (`$SHAREDIR`).
     pub sharedir: PathBuf,

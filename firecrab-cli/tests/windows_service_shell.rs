@@ -196,7 +196,7 @@ fn exiting_a_shell_keeps_the_management_services_and_api_alive() {
             "systemctl",
             "is-active",
             "firecrab-api",
-            "firecrab-net-helper",
+            "firecrab-helper",
         ],
         "",
     );

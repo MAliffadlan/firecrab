@@ -494,13 +494,13 @@ mod tests {
     #[test]
     fn the_shim_program_is_the_api_installed_beside_this_helper() {
         assert_eq!(
-            shim_program_beside(Path::new("/usr/local/lib/firecrab/firecrab-net-helper")),
+            shim_program_beside(Path::new("/usr/local/lib/firecrab/firecrab-helper")),
             PathBuf::from("/usr/local/lib/firecrab/firecrab-api")
         );
         // A dev build runs both binaries from the same build directory.
         assert_eq!(
             shim_program_beside(Path::new(
-                "/usr/local/lib/firecrab-dev/build.7a8hfC/firecrab-net-helper"
+                "/usr/local/lib/firecrab-dev/build.7a8hfC/firecrab-helper"
             )),
             PathBuf::from("/usr/local/lib/firecrab-dev/build.7a8hfC/firecrab-api")
         );
@@ -510,7 +510,7 @@ mod tests {
     fn a_helper_replaced_by_an_update_still_finds_the_api_beside_it() {
         assert_eq!(
             shim_program_beside(Path::new(
-                "/usr/local/lib/firecrab/firecrab-net-helper (deleted)"
+                "/usr/local/lib/firecrab/firecrab-helper (deleted)"
             )),
             PathBuf::from("/usr/local/lib/firecrab/firecrab-api")
         );

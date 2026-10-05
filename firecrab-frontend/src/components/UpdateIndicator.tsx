@@ -132,7 +132,7 @@ export default function UpdateIndicator() {
           {t("Update not confirmed", "업데이트 확인 안 됨")}
         </span>
         <code className="update-indicator-hint">
-          journalctl -u firecrab-api -u firecrab-net-helper
+          journalctl -u firecrab-api -u firecrab-helper
         </code>
         <button type="button" className="update-indicator-action" onClick={dismissStall}>
           {t("Dismiss", "닫기")}

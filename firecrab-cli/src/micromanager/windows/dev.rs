@@ -12,7 +12,7 @@ use crate::micromanager::{
 pub fn deploy(checkout: Option<&Checkout>, release: bool) -> Result<(), Error> {
     // Probe systemd and the installed units, not whether the previous API works.
     wsl::root_shell(
-        "test -d /run/systemd/system && systemctl cat firecrab-api firecrab-net-helper >/dev/null",
+        "test -d /run/systemd/system && systemctl cat firecrab-api >/dev/null && (systemctl cat firecrab-helper >/dev/null 2>&1 || systemctl cat firecrab-net-helper >/dev/null)",
     )?;
     let archive_name = format!("incoming-{}.tar", uuid::Uuid::new_v4());
     let (profile, channel) = match checkout {
@@ -45,7 +45,7 @@ pub fn deploy(checkout: Option<&Checkout>, release: bool) -> Result<(), Error> {
         }
         None => ("restore", "unused"),
     };
-    report!("[GUEST] {profile}: API + net-helper");
+    report!("[GUEST] {profile}: API + helper");
     wsl::run_with_input(
         &[
             "-d",

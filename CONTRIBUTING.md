@@ -51,7 +51,7 @@ Run these commands from the repository root.
 VMs run in systemd units the helper starts, so the host needs systemd; rerun the helper script after rebuilding either binary.
 
 ```sh
-cargo build -p firecrab-api -p firecrab-net-helper
+cargo build -p firecrab-api -p firecrab-helper
 
 # Terminal 1: network helper (copies both binaries to a root-owned directory)
 ./scripts/dev-net-helper.sh

@@ -35,7 +35,7 @@ jobs:
         run: rustup show
 
       - name: Install dnsmasq, fakeroot
-        # firecrab-net-helper's dhcp.rs tests shell out to the real
+        # firecrab-helper's dhcp.rs tests shell out to the real
         # `dnsmasq --test` to validate generated configs, and oci::ext4's
         # tests pack a root-owned image via real `fakeroot` (issue #250) —
         # neither preinstalled on the runner image.
@@ -336,7 +336,7 @@ jobs:
 
       - name: shellcheck
         run: |
-          shellcheck install.sh scripts/firecrab-release.sh scripts/package-host-release.sh \
+          shellcheck install.sh scripts/ci-qa-helper-upgrade.sh scripts/firecrab-release.sh scripts/package-host-release.sh \
             scripts/build-micromanager-macos.sh \
             scripts/bake-install-sh.sh scripts/ci-prepare-install-payload.sh \
             scripts/ci-qa-api.sh \
@@ -412,7 +412,7 @@ jobs:
 
       - name: Both daemons are up
         run: |
-          systemctl is-active --quiet firecrab-net-helper
+          systemctl is-active --quiet firecrab-helper
           systemctl is-active --quiet firecrab-api
           # The socket's group is what lets the unprivileged API reach the
           # helper at all; getting it wrong is a silent, confusing failure.
@@ -512,6 +512,8 @@ jobs:
       - name: QA VM lifetime
         timeout-minutes: 30
         # R1–R7 and X7 from public-docs/qa.md; restarts the installed API.
+        env:
+          FIRECRAB_QA_HELPER_UPGRADE: "1"
         run: scripts/ci-qa-lifetime.sh alpine:3.21
 
       - name: Dashboard, MicroNetwork, and create-VM API smoke
@@ -565,7 +567,7 @@ jobs:
           ip -br addr | grep -Eq 'mnb.*172\.31\.0\.1/24'
           sudo pgrep -af dnsmasq | grep -q firecrab
           sudo ss -lun | grep -q ':67'
-          ! sudo journalctl -u firecrab-net-helper --no-pager | grep -i 'operation not permitted'
+          ! sudo journalctl -u firecrab-helper --no-pager | grep -i 'operation not permitted'
 
       - name: Re-running is safe
         run: |
@@ -592,9 +594,9 @@ jobs:
       - name: Daemon logs (on failure)
         if: failure()
         run: |
-          sudo journalctl -u firecrab-net-helper --no-pager -n 60 || true
+          sudo journalctl -u firecrab-helper --no-pager -n 60 || true
           sudo journalctl -u firecrab-api --no-pager -n 60 || true
-          systemctl status firecrab-net-helper firecrab-api --no-pager || true
+          systemctl status firecrab-helper firecrab-api --no-pager || true
           sudo firecrab doctor 2>&1 || true
 
       - name: Retain QA logs and Playwright results

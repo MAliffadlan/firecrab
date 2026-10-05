@@ -557,7 +557,7 @@ apt-get update
 phase apt-install
 apt-get install -y ca-certificates curl sudo tar findutils xz-utils gzip zstd lz4 lzop \
   nftables dnsmasq dnsmasq-utils iproute2 jq e2fsprogs fakeroot busybox-static socat openssh-server
-# firecrab-net-helper runs its own dnsmasq per bridge; the packaged unit only
+# firecrab-helper runs its own dnsmasq per bridge; the packaged unit only
 # fails at boot fighting systemd-resolved for port 53 and leaves the guest degraded.
 systemctl mask --now dnsmasq.service
 
@@ -611,7 +611,7 @@ rm -rf "$tmp"
 
 phase firecrab
 bash "$share/downloads/install-firecrab-{firecrab}.sh" --no-deps
-systemctl is-active --quiet firecrab-net-helper
+(systemctl is-active --quiet firecrab-helper || systemctl is-active --quiet firecrab-net-helper)
 systemctl is-active --quiet firecrab-api
 
 phase nested-firecracker
@@ -630,7 +630,7 @@ done
 ip=${{1:-}}
 test -n "$ip"
 systemctl is-active --quiet firecrab-api
-systemctl is-active --quiet firecrab-net-helper
+(systemctl is-active --quiet firecrab-helper || systemctl is-active --quiet firecrab-net-helper)
 systemctl is-active --quiet ssh
 {{
   echo 'schema={schema}'
@@ -641,11 +641,15 @@ systemctl is-active --quiet ssh
 }} >/mnt/firecrab/runtime/manager-ready
 READY_SCRIPT
 chmod 0755 /usr/local/sbin/firecrab-manager-ready
-cat >/etc/systemd/system/firecrab-manager-ready.service <<'READY_UNIT'
+helper_unit=firecrab-helper.service
+if [ "$(systemctl show --property=LoadState --value "$helper_unit")" = not-found ]; then
+  helper_unit=firecrab-net-helper.service
+fi
+cat >/etc/systemd/system/firecrab-manager-ready.service <<READY_UNIT
 [Unit]
 Description=Publish Firecrab management VM readiness to macOS
-After=network-online.target firecrab-api.service firecrab-net-helper.service ssh.service
-Wants=network-online.target firecrab-api.service firecrab-net-helper.service ssh.service
+After=network-online.target firecrab-api.service $helper_unit ssh.service
+Wants=network-online.target firecrab-api.service $helper_unit ssh.service
 
 [Service]
 Type=oneshot
@@ -887,7 +891,7 @@ mod tests {
             .expect("getty.target mask");
         let kernel = provision.find("\nphase kernel\n").expect("kernel phase");
         assert!(console < mask && mask < kernel);
-        // firecrab-net-helper owns DHCP/DNS; the packaged unit only fails on port 53.
+        // firecrab-helper owns DHCP/DNS; the packaged unit only fails on port 53.
         let installed = provision.find("\nphase apt-install\n").expect("apt phase");
         let dnsmasq = provision
             .find("\nsystemctl mask --now dnsmasq.service\n")

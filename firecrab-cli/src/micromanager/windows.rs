@@ -260,7 +260,7 @@ fn collect_debug(layout: &lifecycle::Layout, options: debug::Options) -> debug::
     if options.logs {
         let journal = if distro_disk && wsl::is_running(DISTRO_NAME) {
             wsl::root_shell(&format!(
-                "journalctl --no-pager --output=short-iso -n {} -u firecrab-api -u firecrab-net-helper",
+                "journalctl --no-pager --output=short-iso -n {} -u firecrab-api -u firecrab-helper -u firecrab-net-helper",
                 options.tail
             ))
             .map_err(|error| error.to_string())
@@ -268,7 +268,7 @@ fn collect_debug(layout: &lifecycle::Layout, options: debug::Options) -> debug::
             Err("managed distribution is missing or stopped; it was not started".to_string())
         };
         report.logs.push(debug::LogSource::guest(
-            "guest journal: firecrab-api + firecrab-net-helper",
+            "guest journal: firecrab-api + firecrab-helper",
             journal,
             options.tail,
         ));
@@ -564,7 +564,7 @@ mod tests {
                 std::env::consts::ARCH
             )),
             l if l.contains("systemctl is-active") => {
-                Ok("firecrab-api=active\nfirecrab-net-helper=active\nip=172.20.0.2\n".into())
+                Ok("firecrab-api=active\nfirecrab-helper=active\nip=172.20.0.2\n".into())
             }
             l if l.contains("journalctl") => Ok("old\nAuthorization: Bearer secret\nlast\n".into()),
             other => panic!("unexpected command: {other}"),

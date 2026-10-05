@@ -64,7 +64,7 @@ cd firecrab
 ./install.sh --bin-dir target/release
 ```
 
-The preparation script builds `firecrab-api`, `firecrab-net-helper`, and the `firecrab` CLI,
+The preparation script builds `firecrab-api`, `firecrab-helper`, and the `firecrab` CLI,
 then creates `firecrab-frontend/dist`.
 The installer detects that dashboard directory automatically.
 This local build path requires the repository Rust toolchain, Node.js, and npm.
@@ -78,7 +78,7 @@ git clone https://github.com/SteelCrab/firecrab.git
 cd firecrab
 cargo build --release --locked \
   -p firecrab-api \
-  -p firecrab-net-helper \
+  -p firecrab-helper \
   -p firecrab-cli
 npm ci --prefix firecrab-frontend
 npm run build --prefix firecrab-frontend
@@ -87,7 +87,7 @@ npm run build --prefix firecrab-frontend
   --dashboard-dir firecrab-frontend/dist
 ```
 
-The manual path must produce `firecrab-api`, `firecrab-net-helper`, `firecrab`, and
+The manual path must produce `firecrab-api`, `firecrab-helper`, `firecrab`, and
 `firecrab-frontend/dist/index.html` before installation.
 
 Open the dashboard after the services start.
@@ -263,7 +263,7 @@ DATADIR=/srv/firecrab PREFIX=/opt ./install.sh
 ## Check the result
 
 ```sh
-systemctl status firecrab-net-helper firecrab-api
+systemctl status firecrab-helper firecrab-api
 firecrab doctor
 curl -s http://127.0.0.1:5523/api/vms
 curl -s http://127.0.0.1:5523/api/micro-networks
@@ -277,6 +277,19 @@ Create one before creating a VM.
 Run the installer again.
 It replaces binaries from the latest release, or from `--bin-dir` when you pass one.
 The installer keeps the database, VM disks, and `api.env`.
+
+### Helper service migration
+
+The daemon and canonical unit are `firecrab-helper` and `firecrab-helper.service`. Rerunning the installer stops a real `firecrab-net-helper.service` and replaces it with an alias;
+both names then control one process. Legacy-name drop-ins remain in place and systemd loads them through the alias. The database, VM disks, and `api.env` are preserved.
+
+The old `$PREFIX/lib/firecrab/firecrab-net-helper` executable path remains usable. Host bundles
+contain both names as regular files for old installers and update helpers; new installers also accept old bundles and local payloads. `firecrab update` replaces executables without rewriting
+units, so an old service keeps working until an installer rerun migrates it.
+
+The socket `/run/firecrab/net-helper.sock`, `FIRECRAB_NET_HELPER_*` variables, protocol, and
+`netHelperService` status JSON field stay compatible. CLI status/doctor and service control, and macOS/Windows guest readiness/source deployment, accept either installed service name.
+Status JSON adds `helperUnit` to report the unit actually queried.
 
 ## Related
 

@@ -656,7 +656,7 @@ fn base_config_path(hosts_path: &Path) -> PathBuf {
 /// process supervises it directly (matching how Firecracker's own child
 /// processes are supervised, rather than a separately-managed systemd
 /// unit — every privileged host process this project runs is owned by
-/// `firecrab-net-helper` alone).
+/// `firecrab-helper` alone).
 async fn spawn_dnsmasq(
     hosts_path: &Path,
     micro_networks: &[MicroNetworkSpec],

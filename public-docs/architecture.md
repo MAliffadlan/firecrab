@@ -16,7 +16,7 @@ For the simpler overview, see the [README](../README.md#architecture).
 
 ## microManager system architecture
 
-All three hosts use the same Linux `firecrab-api`, `firecrab-net-helper`, and Firecracker stack.
+All three hosts use the same Linux `firecrab-api`, `firecrab-helper`, and Firecracker stack.
 The virtualization layer and the route to the host's localhost API differ.
 Diagram colors distinguish clients, control, privileged/security operations, runtime, storage, networking, and microManager; dashed boxes mark group boundaries.
 
@@ -27,7 +27,7 @@ Runs directly on the host, without microManager.
 ![Linux: native systemd services, direct localhost API, and host KVM](../assets/architecture/micromanager-linux.en.svg)
 
 1. `install.sh` installs the binaries and two systemd units, and creates the data directory (default `/var/lib/firecrab`).
-2. systemd starts the privileged `firecrab-net-helper`, which opens `/run/firecrab/net-helper.sock`.
+2. systemd starts the privileged `firecrab-helper`, which opens `/run/firecrab/net-helper.sock`.
 3. The unprivileged `firecrab-api` starts and serves the dashboard and API at `127.0.0.1:5523`.
 4. The browser connects directly to that address.
 5. Each running MicroVM gets one `firecrab-vm` shim process, which runs one Firecracker process using host KVM.
@@ -43,8 +43,8 @@ The complete path is validated on Apple M5/macOS 26.6.2; other M3-or-later hosts
 1. `firecrab service start` enables the user's launchd agent.
 2. `io.firecrab.micromanager` launches the entitlement-signed Swift helper and restarts it after a process crash.
 3. The helper boots Debian with nested virtualization and VZ NAT, attaching a replaceable 3 GiB OS disk and a persistent 16 GiB sparse data disk. Each start writes the macOS version to the guest's `/etc/firecrab/host-platform.json`.
-4. Guest systemd starts net-helper, then the API on guest loopback. The guest announces its IP through a virtiofs marker file.
-5. Once the API, net-helper, and SSH are healthy, the daemon opens a key-only SSH tunnel. VM TCP forwards use `ssh -L` at `127.0.0.1:<hostPort>`; UDP forwards use the management VM address.
+4. Guest systemd starts helper, then the API on guest loopback. The guest announces its IP through a virtiofs marker file.
+5. Once the API, helper, and SSH are healthy, the daemon opens a key-only SSH tunnel. VM TCP forwards use `ssh -L` at `127.0.0.1:<hostPort>`; UDP forwards use the management VM address.
 6. The browser opens `http://127.0.0.1:5523`. A dropped tunnel reconnects while the VM keeps running; after five failed reconnect attempts, the daemon restarts the management VM.
 
 Managed files live under `~/Library/Application Support/Firecrab/micromanager`.
@@ -61,15 +61,15 @@ The host requires Store WSL2 and usable nested `/dev/kvm`; native ARM64 installa
 1. `firecrab service start` enables the per-user scheduled task `\Firecrab\microManager`.
 2. The task runs `wslg.exe -- sleep infinity` to keep the distribution alive. It starts at logon and retries every minute, with `IgnoreNew` preventing duplicate holders.
 3. WSL2 boots the managed distribution with systemd. OS and data share `distro\ext4.vhdx`; each start writes Windows and WSL versions to the guest's `/etc/firecrab/host-platform.json`.
-4. systemd starts net-helper, then `firecrab-api`.
+4. systemd starts helper, then `firecrab-api`.
 5. WSL localhost forwarding exposes the guest's loopback API on Windows at `127.0.0.1:5523`, without an SSH tunnel.
-6. The browser opens `http://127.0.0.1:5523`. With the source-built net-helper,
+6. The browser opens `http://127.0.0.1:5523`. With the source-built helper,
    running MicroVMs' TCP forwards also bind loopback sockets for WSL to expose
    at the same Windows localhost ports; stopping a VM removes its sockets.
 
 **Windows Preview:** the pinned Firecrab v0.2.2 guest cannot start MicroVMs on WSL2 yet.
 The dashboard, API, images, and networks work. `service dev` builds the current
-checkout's net-helper with WSL2 fixes; release installation still needs a newer bundle pin.
+checkout's helper with WSL2 fixes; release installation still needs a newer bundle pin.
 Managed files live under `%LOCALAPPDATA%\Firecrab\micromanager`.
 See [microManager on Windows](micromanager-windows.md) for lifecycle and shared WSL2 state.
 
@@ -85,7 +85,7 @@ connects the Windows frontend to the guest API.
 
 1. **Upload:** ensure the management VM and API tunnel are ready, then upload one checkout snapshot over key-only SSH. Run `service dev` again after Rust edits.
 2. **Build:** Debian uses the pinned Rust toolchain and `cargo build --locked` for Linux ARM64. Source and compiler caches live under `/var/lib/firecrab/dev` on the persistent data disk.
-3. **Deploy:** stage the two executables under `/usr/local/lib/firecrab-dev`, switch systemd `ExecStart` overrides, then start net-helper followed by the API and check readiness. Build failure keeps the current services; deployment failure restores their previous executables. `service dev --restore` selects the release binaries.
+3. **Deploy:** stage the two executables under `/usr/local/lib/firecrab-dev`, switch systemd `ExecStart` overrides, then start helper followed by the API and check readiness. Build failure keeps the current services; deployment failure restores their previous executables. `service dev --restore` selects the release binaries.
 4. **Frontend:** `npm run dev --prefix firecrab-frontend` serves `http://localhost:8080` and proxies `/api` and `/ws` through the Mac's `127.0.0.1:5523` SSH tunnel to the guest API. The installed dashboard remains available at port 5523.
 
 See [microManager on macOS](micromanager-macos.md#run-the-api-and-network-helper-from-local-source) for commands.
@@ -105,7 +105,7 @@ The installed API also serves the built dashboard. Development uses Vite, proxyi
 | `firecrab-frontend` | VM, image, network, storage, console, and host UI | Browser |
 | `firecrab-cli` | REST/WebSocket client; platform-local service commands | Client/host |
 | `firecrab-api` | VM lifecycle, artifact checks, jobs, SQLite, and console broker | Unprivileged service account |
-| `firecrab-net-helper` | Bridge, TAP, DHCP/DNS, firewall, NAT/DNAT, VM units (`StartVmUnit`/`StopVmUnit`), and Linux update application | Privileged, bounded capabilities |
+| `firecrab-helper` | Bridge, TAP, DHCP/DNS, firewall, NAT/DNAT, VM units (`StartVmUnit`/`StopVmUnit`), and Linux update application | Privileged, bounded capabilities |
 | `firecrab-api-types` | Shared REST request/response models | Shared crate |
 | `firecrab-helper-protocol` | Typed envelopes, framing, and protocol version 2 | Shared crate |
 | `firecrab-vm` shim | Owns one Firecracker process; serves its console, stop/kill requests, and exit status on `shim.sock`; writes `console.log` and `exit.json` | One process per running VM, same account as the API (`firecrab-api vm-shim`), in its own `firecrab-vm-<id>.service` unit |
@@ -130,7 +130,7 @@ The numbers match the diagram.
 1. The client sends `POST /api/vms/{id}/start`.
 2. The API records `starting` and responds immediately; startup continues in a background task.
 3. It prepares the VM's writable rootfs `d/<generation-id>.ext4` from the M2Image.
-4. It asks net-helper over the Unix socket to reconcile the MicroNetwork bridge, create the VM TAP, and apply firewall and DHCP state.
+4. It asks helper over the Unix socket to reconcile the MicroNetwork bridge, create the VM TAP, and apply firewall and DHCP state.
 5. It writes runtime configuration `fc.json` and starts the VM's shim, which starts Firecracker; the API attaches to the shim's socket.
 6. Firecracker boots the guest kernel/rootfs with KVM; the TAP connects the bridge to the guest's virtio network interface.
 7. The guest confirms DHCP and DNS, then sends `FIRECRAB_NETWORK_READY` over serial. The shim forwards the console to the API's console broker, which reads it, and the API records `running`.

@@ -117,8 +117,8 @@ HELPER_BLOCK=
 SENTINEL=
 IP_FORWARD_SAVED=
 cleanup() {
-    if [ -n "$HELPER_BLOCK" ]; then host "rm -f '$HELPER_BLOCK'; rmdir /run/systemd/system/firecrab-net-helper.service.d 2>/dev/null || true; systemctl daemon-reload" || true; fi
-    if [ "$HELPER_STOPPED" = 1 ]; then host "systemctl start firecrab-net-helper" || true; fi
+    if [ -n "$HELPER_BLOCK" ]; then host "rm -f '$HELPER_BLOCK'; rmdir /run/systemd/system/firecrab-helper.service.d 2>/dev/null || true; systemctl daemon-reload" || true; fi
+    if [ "$HELPER_STOPPED" = 1 ]; then host "systemctl start firecrab-helper" || true; fi
     if [ "$API_STOPPED" = 1 ]; then host "systemctl start firecrab-api" || true; api_ready || true; fi
     # Host-wide: put back what R4c found, whichever way the run ended.
     case "$IP_FORWARD_SAVED" in
@@ -280,6 +280,14 @@ fi
 curl -fsS "$API/api/vms" | python3 -c 'import json,sys; own=sys.argv[1]; assert not any(vm["id"] != own and vm["state"] in ("starting","running","stopping") for vm in json.load(sys.stdin))' "$VM" \
     || fail R4b "network drift QA requires a host with no other active VMs"
 
+# R4f is opt-in: installer migration runs only on a disposable local CI host.
+if [ "${FIRECRAB_QA_HELPER_UPGRADE:-0}" = 1 ]; then
+    sudo -E scripts/ci-qa-helper-upgrade.sh
+    api_ready || fail R4f "API did not return after helper migration"
+    check_recovered R4f
+    pass "R4f legacy helper migration kept VM PIDs and guest traffic"
+fi
+
 # R4b: nft drift while the helper remains alive. Only this QA VM's
 # policy is damaged; a foreign table must survive the owned-table replay.
 SENTINEL=firecrab_qa_$SIMPLE
@@ -320,14 +328,14 @@ HELPER_STOPPED=1
 # firecrab-api Wants the helper, so starting it would otherwise undo our
 # outage. A private runtime drop-in holds off dependency activation only
 # for this test and is removed before recovery (including on failure).
-HELPER_BLOCK=/run/systemd/system/firecrab-net-helper.service.d/qa-lifetime-$SIMPLE.conf
-host "mkdir -p /run/systemd/system/firecrab-net-helper.service.d; printf '[Unit]\nConditionPathExists=/run/firecrab-qa-helper-$SIMPLE.enabled\n' > '$HELPER_BLOCK'; systemctl daemon-reload; systemctl stop firecrab-net-helper"
+HELPER_BLOCK=/run/systemd/system/firecrab-helper.service.d/qa-lifetime-$SIMPLE.conf
+host "mkdir -p /run/systemd/system/firecrab-helper.service.d; printf '[Unit]\nConditionPathExists=/run/firecrab-qa-helper-$SIMPLE.enabled\n' > '$HELPER_BLOCK'; systemctl daemon-reload; systemctl stop firecrab-helper"
 start_api
-[ "$(host "systemctl is-active firecrab-net-helper" || true)" != active ] || fail R4e "helper outage was not held"
+[ "$(host "systemctl is-active firecrab-helper" || true)" != active ] || fail R4e "helper outage was not held"
 curl -fsS "$API/api/vms/$VM" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["state"] == "running" and d["reconciliation"]["outcome"] == "networkFailed" and d["reconciliation"]["detail"]' || fail R4e "helper failure was not visible"
 [ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -X POST "$API/api/network/reconcile")" = 503 ] || fail R4e "retry during helper outage should fail with 503"
 API_RETRY_PID=$(host "systemctl show -p MainPID --value firecrab-api")
-host "rm -f '$HELPER_BLOCK'; rmdir /run/systemd/system/firecrab-net-helper.service.d 2>/dev/null || true; systemctl daemon-reload; systemctl start firecrab-net-helper"
+host "rm -f '$HELPER_BLOCK'; rmdir /run/systemd/system/firecrab-helper.service.d 2>/dev/null || true; systemctl daemon-reload; systemctl start firecrab-helper"
 HELPER_BLOCK=
 HELPER_STOPPED=0
 curl -fsS -o /dev/null --max-time 60 -X POST "$API/api/network/reconcile" || fail R4e "operator network retry failed"

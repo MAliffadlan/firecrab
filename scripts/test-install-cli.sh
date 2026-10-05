@@ -263,15 +263,15 @@ PY
 
 fake=$(mktemp -d)
 write_elf64 "$fake/firecrab-api" 62
-write_elf64 "$fake/firecrab-net-helper" 62
+write_elf64 "$fake/firecrab-helper" 62
 write_elf64 "$fake/firecrab" 62
 mkdir -p "$fake/dist"
 printf '<html></html>\n' >"$fake/dist/index.html"
 "$ROOT/scripts/package-host-release.sh" x86_64 "$fake" "$fake/dist" "$fake/firecrab-host-x86_64.tar.gz" >/dev/null
 members=$(tar -tzf "$fake/firecrab-host-x86_64.tar.gz")
-for need in firecrab-api firecrab-net-helper extract-vmlinux extract-arm64-image \
+for need in firecrab-api firecrab-helper extract-vmlinux extract-arm64-image \
             firecrab dashboard/index.html systemd/firecrab-api.service \
-            systemd/firecrab-net-helper.service; do
+            systemd/firecrab-helper.service; do
     if printf '%s\n' "$members" | grep -qx -- "$need"; then
         pass "host tarball contains $need"
     else
@@ -280,7 +280,7 @@ for need in firecrab-api firecrab-net-helper extract-vmlinux extract-arm64-image
 done
 wrong=$(mktemp -d)
 write_elf64 "$wrong/firecrab-api" 183
-write_elf64 "$wrong/firecrab-net-helper" 183
+write_elf64 "$wrong/firecrab-helper" 183
 write_elf64 "$wrong/firecrab" 183
 mkdir -p "$wrong/dist"
 printf '<html></html>\n' >"$wrong/dist/index.html"

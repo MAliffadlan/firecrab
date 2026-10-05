@@ -33,7 +33,7 @@ case "$_src" in
         ;;
 esac
 unset _src
-UNITS=(firecrab-net-helper.service firecrab-api.service)
+UNITS=(firecrab-helper.service firecrab-api.service)
 
 # Placeholder @FIRECRAB_RELEASE_TAG@ is replaced by the tag on a published
 # install.sh (v0.1.0). The repo copy keeps the placeholder and means "latest".
@@ -439,7 +439,7 @@ download_host_bundle() {
     if ! curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$PAYLOAD_TMP/$tarball"; then
         die "failed to download $url
 Tag a GitHub Release, or install local binaries:
-  cargo build --release -p firecrab-api -p firecrab-net-helper -p firecrab-cli
+  cargo build --release -p firecrab-api -p firecrab-helper -p firecrab-cli
   ./install.sh --bin-dir target/release --dashboard-dir firecrab-frontend/dist"
     fi
     if ! curl --proto '=https' --tlsv1.2 -fsSL "$sums_url" -o "$PAYLOAD_TMP/SHA256SUMS"; then
@@ -451,9 +451,11 @@ Tag a GitHub Release, or install local binaries:
     tar -xzf "$PAYLOAD_TMP/$tarball" -C "$PAYLOAD_TMP/root"
     PAYLOAD_ROOT=$PAYLOAD_TMP/root
     local name
-    for name in firecrab-api firecrab-net-helper firecrab; do
-        [ -x "$PAYLOAD_ROOT/$name" ] || die "release bundle is missing $name"
-        firecrab_assert_binary_arch "$PAYLOAD_ROOT/$name" "$arch" \
+    for name in firecrab-api firecrab-helper firecrab; do
+        local member
+        member=$(firecrab_resolve_binary "$name" "$PAYLOAD_ROOT" "") \
+            || die "release bundle is missing $name"
+        firecrab_assert_binary_arch "$member" "$arch" \
             || die "$tarball: $name is not a $arch binary"
     done
     for name in LICENSE THIRD_PARTY_NOTICES.txt release-license-inventory.json \
@@ -511,7 +513,7 @@ report_payload() {
             return 1
         fi
         local name gaps=0
-        for name in firecrab-api firecrab-net-helper firecrab; do
+        for name in firecrab-api firecrab-helper firecrab; do
             if [ -x "$BIN_DIR/$name" ]; then
                 log "  $name"
             else
@@ -608,7 +610,7 @@ install_compliance() {
 # Puts the payload binaries, and the dashboard, where the units expect them.
 install_binaries() {
     local name src
-    for name in firecrab-api firecrab-net-helper; do
+    for name in firecrab-api firecrab-helper; do
         src=$(firecrab_resolve_binary "$name" "$PAYLOAD_BIN" "$LIBDIR") \
             || die "no $name in ${PAYLOAD_BIN:-<release>} or $LIBDIR — pass it via --bin-dir or install a release"
         if [ "$src" -ef "$LIBDIR/$name" ]; then
@@ -617,6 +619,8 @@ install_binaries() {
             $SUDO install -o root -g root -m 0755 "$src" "$LIBDIR/$name"
         fi
     done
+    # Keep the historical executable path usable by old units and clients.
+    $SUDO ln -sfn firecrab-helper "$LIBDIR/firecrab-net-helper"
     # extract-vmlinux and extract-arm64-image are shell scripts used at
     # runtime by the API to turn a distro vmlinuz into the kernel format
     # Firecracker boots on each architecture. Installing them next to the
@@ -717,10 +721,30 @@ ENVFILE
 
 # Renders the unit templates with this host's paths and account.
 install_units() {
-    local uid
+    local uid source legacy="$UNITDIR/firecrab-net-helper.service"
     uid=$(id -u "$FIRECRAB_USER")
+    local unit
     for unit in "${UNITS[@]}"; do
-        sed -e "s|@LIBDIR@|$LIBDIR|g" \
+        source="$PAYLOAD_UNITS/$unit"
+        if [ "$unit" = firecrab-helper.service ] && [ ! -f "$source" ]; then
+            source="$PAYLOAD_UNITS/firecrab-net-helper.service"
+        fi
+        [ -r "$source" ] || die "missing unit template $source"
+    done
+    # Only a real old unit needs migration. An alias from a previous install
+    # already denotes the new service and must not be disabled separately.
+    if [ -f "$legacy" ] && [ ! -L "$legacy" ]; then
+        $SUDO systemctl disable --now firecrab-net-helper.service
+        $SUDO rm -f "$legacy"
+    fi
+    for unit in "${UNITS[@]}"; do
+        source="$PAYLOAD_UNITS/$unit"
+        if [ "$unit" = firecrab-helper.service ] && [ ! -f "$source" ]; then
+            source="$PAYLOAD_UNITS/firecrab-net-helper.service"
+        fi
+        sed -e 's/firecrab-net-helper/firecrab-helper/g' \
+            -e '/^Alias=/d' \
+            -e "s|@LIBDIR@|$LIBDIR|g" \
             -e "s|@SHAREDIR@|$SHAREDIR|g" \
             -e "s|@DATADIR@|$DATADIR|g" \
             -e "s|@CONFDIR@|$CONFDIR|g" \
@@ -728,9 +752,13 @@ install_units() {
             -e "s|@FIRECRAB_USER@|$FIRECRAB_USER|g" \
             -e "s|@FIRECRAB_GROUP@|$FIRECRAB_GROUP|g" \
             -e "s|@FIRECRAB_UID@|$uid|g" \
-            "$PAYLOAD_UNITS/$unit" | $SUDO tee "$UNITDIR/$unit" > /dev/null
+            "$source" | $SUDO tee "$UNITDIR/$unit" > /dev/null
+        if [ "$unit" = firecrab-helper.service ]; then
+            printf 'Alias=firecrab-net-helper.service\n' | $SUDO tee -a "$UNITDIR/$unit" >/dev/null
+        fi
         $SUDO chmod 0644 "$UNITDIR/$unit"
     done
+    $SUDO ln -sfn firecrab-helper.service "$legacy"
     $SUDO systemctl daemon-reload
     log "units installed to $UNITDIR"
 }
@@ -896,7 +924,7 @@ do_install() {
 # Removes what this script installed; data only with --purge.
 do_uninstall() {
     require_sudo_ticket
-    for unit in "${UNITS[@]}"; do
+    for unit in firecrab-api.service firecrab-helper.service firecrab-net-helper.service; do
         $SUDO systemctl disable --now "$unit" 2>/dev/null || true
         $SUDO rm -f "$UNITDIR/$unit"
     done
@@ -906,12 +934,13 @@ do_uninstall() {
     # SIGTERM (above) only stops the helper's socket loop — it never deletes
     # the bridges, TAP devices or nftables tables it created, only a reboot
     # would. Run its own teardown while the binary is still on disk.
-    if [ -x "$LIBDIR/firecrab-net-helper" ]; then
-        $SUDO "$LIBDIR/firecrab-net-helper" --teardown \
+    local teardown_helper
+    if teardown_helper=$(firecrab_resolve_binary firecrab-helper "" "$LIBDIR"); then
+        $SUDO "$teardown_helper" --teardown \
             || warn "network teardown failed — bridges/nftables tables may remain until reboot"
     fi
 
-    $SUDO rm -f "$LIBDIR/firecrab-api" "$LIBDIR/firecrab-net-helper"
+    $SUDO rm -f "$LIBDIR/firecrab-api" "$LIBDIR/firecrab-helper" "$LIBDIR/firecrab-net-helper"
     $SUDO rm -f "$PREFIX/bin/firecrab"
     $SUDO rm -rf "$SHAREDIR/dashboard"
     $SUDO rm -f "$SHAREDIR/LICENSE" "$SHAREDIR/THIRD_PARTY_NOTICES.txt" \

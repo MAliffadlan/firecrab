@@ -152,9 +152,9 @@ firecrab service install
 Penginstal memulai kedua layanan systemd. Untuk memulai, memeriksa, atau menghentikannya kemudian:
 
 ```sh
-sudo systemctl start firecrab-net-helper firecrab-api
-systemctl status firecrab-net-helper firecrab-api
-sudo systemctl stop firecrab-api firecrab-net-helper
+sudo systemctl start firecrab-helper firecrab-api
+systemctl status firecrab-helper firecrab-api
+sudo systemctl stop firecrab-api firecrab-helper
 ```
 
 ### macOS
@@ -198,9 +198,9 @@ Gunakan tiga terminal. Helper berjalan dengan hak istimewa; API berjalan sebagai
 
 ```sh
 # 1
-cargo build -p firecrab-net-helper --locked
+cargo build -p firecrab-helper --locked
 sudo -u root -g "$(id -gn)" FIRECRAB_NET_HELPER_ALLOWED_UID="$(id -u)" \
-  ./target/debug/firecrab-net-helper
+  ./target/debug/firecrab-helper
 
 # 2
 cargo run -p firecrab-api --locked

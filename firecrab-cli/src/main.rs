@@ -274,7 +274,7 @@ fn run_update(check: bool, apply: bool, json: bool) -> i32 {
                 update::print_check_json(&outcome.report);
             } else {
                 println!("firecrab {version} installed");
-                println!("  firecrab-api and firecrab-net-helper are restarting now");
+                println!("  firecrab-api and firecrab-helper are restarting now");
             }
             0
         }
