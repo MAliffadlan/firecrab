@@ -88,6 +88,14 @@ async function authenticateWithDownloadedKey(vmId: string, ipv6: string): Promis
   const keyPath = path.join(scratch, `firecrab-${DHCP_VM_NAME}.pem`);
   try {
     await writeFile(keyPath, privateKey, { encoding: "utf8", mode: 0o600 });
+    // DHCP readiness precedes sshd startup (including additional host-key
+    // generation). Prove that the guest presents its injected host key before
+    // starting the separate port-forward and IPv6 authentication assertions.
+    await expect.poll(async () => {
+      const response = await fetch(`${apiUrl()}/api/vms/${vmId}/ssh-host-key/check`);
+      if (!response.ok) return `HTTP ${response.status}`;
+      return ((await response.json()) as { status: string }).status;
+    }, { timeout: 180_000, intervals: [1_000] }).toBe("match");
     const authenticate = async (label: string, targetArgs: string[]): Promise<void> => {
       let lastError = "ssh did not run";
       let authenticatedOutput: string | null = null;

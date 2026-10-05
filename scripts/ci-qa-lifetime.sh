@@ -8,8 +8,8 @@
 # The reference's image is imported when its alias is not installed yet, and
 # deleted again afterwards (X5); an alias that was already installed is kept.
 #
-# Root commands on the API host run through sudo on Linux, or as root on the
-# management VM over SSH when FIRECRAB_QA_MANAGER_HOST and
+# Root commands run through sudo on Linux, directly in a root WSL shell on
+# Windows, or over management VM SSH when FIRECRAB_QA_MANAGER_HOST and
 # FIRECRAB_QA_MANAGER_KEY are set (macOS; ci-qa-macos-e2e.sh sets them).
 set -euo pipefail
 
@@ -37,6 +37,8 @@ host() {
             -o StrictHostKeyChecking=accept-new \
             -o "UserKnownHostsFile=$(dirname -- "$key")/known_hosts" \
             "root@${FIRECRAB_QA_MANAGER_HOST}" "set -e; $1" </dev/null
+    elif [ "$(id -u)" -eq 0 ]; then
+        sh -ec "$1" </dev/null
     else
         sudo sh -ec "$1" </dev/null
     fi

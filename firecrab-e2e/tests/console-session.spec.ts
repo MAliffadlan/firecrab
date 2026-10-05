@@ -163,24 +163,40 @@ test.describe("terminal session end in a booted guest", () => {
     await registry?.stop();
   });
 
-  test("exit in the guest shell ends the session and the VM keeps running", async ({ page }) => {
+  test("exit ends both viewers, keeps the VM running, and a new session executes commands", async ({ page }) => {
     const { reference, alias } = registry!.announcement;
     const vmId = await bootFixtureGuest(reference, alias);
 
     await openEnglish(page, `/#/console/${vmId}`);
     await expect(consoleStatus(page)).toHaveText(/Connected/);
-    await typeInTerminal(page, "");
+    const secondViewer = await page.context().newPage();
+    await openEnglish(secondViewer, `/#/console/${vmId}`);
+    await expect(consoleStatus(secondViewer)).toHaveText(/Connected/);
+    // `running` and a connected socket can precede the fixture's interactive
+    // shell. Wait for its prompt before sending input into the serial console.
+    await expect(page.locator(".console-page .xterm-rows")).toContainText(/~ #/, {
+      timeout: 30_000,
+    });
     await typeInTerminal(page, "exit");
 
     await expect(consoleStatus(page)).toHaveText(/Session ended/, { timeout: 30_000 });
+    await expect(consoleStatus(secondViewer)).toHaveText(/Session ended/, { timeout: 30_000 });
     expect((await api.getVm(vmId))?.state).toBe("running");
 
     await page.getByRole("button", { name: "New session" }).click();
     await expect(consoleStatus(page)).toHaveText(/Connected/);
     await expect(page.locator(".console-page .xterm-rows")).toContainText(
-      "session ended — starting a new one",
+      /session ended — starting a new one[\s\S]*~ #/,
+      { timeout: 30_000 },
+    );
+    await typeInTerminal(page, "printf 'FIRECRAB_REATTACH_%s\\n' READY");
+    await expect(page.locator(".console-page .xterm-rows")).toContainText(
+      "FIRECRAB_REATTACH_READY",
       { timeout: 15_000 },
     );
+    await expect(consoleStatus(secondViewer)).toHaveText(/Session ended/);
+    expect((await api.getVm(vmId))?.state).toBe("running");
+    await secondViewer.close();
   });
 });
 
