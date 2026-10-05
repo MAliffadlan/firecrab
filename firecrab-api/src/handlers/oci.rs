@@ -436,7 +436,9 @@ mod tests {
         .expect("job accepted");
 
         let mut snapshot = state.oci_imports.snapshot(&started.alias);
-        for _ in 0..80 {
+        // Connection retries include 3s + 6s backoff. The accepted job must
+        // still reach Failed and remove its scratch within a bounded wait.
+        for _ in 0..300 {
             if snapshot.status == ImageInstallStatus::Failed {
                 break;
             }

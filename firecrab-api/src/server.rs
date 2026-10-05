@@ -181,7 +181,7 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
     // stay open far longer than `enforce_limits`' request timeout allows,
     // and a request body limit means nothing for an upgraded connection.
     // Everything else keeps the full REST stack (CORS, body limit,
-    // timeout/concurrency), except network recovery below; every sub-router
+    // timeout/concurrency), except recovery and inspection below; every sub-router
     // still gets origin enforcement and request-id tagging, applied after
     // the merge below.
     //
@@ -247,7 +247,6 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
                 .put(handlers::microregistry::put_docker_hub_credential)
                 .delete(handlers::microregistry::delete_docker_hub_credential),
         )
-        .route("/api/oci/inspect", get(handlers::oci::inspect_oci_image))
         .route("/api/oci/import", post(handlers::oci::start_oci_import))
         .route(
             "/api/oci/import/{alias}",
@@ -370,10 +369,25 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
             "/api/network/reconcile",
             post(handlers::network::reconcile_network),
         )
-        .layer(cors)
+        .layer(cors.clone())
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .layer(middleware::from_fn_with_state(
             limits.without_deadline(),
+            enforce_limits,
+        ));
+
+    // Inspection performs registry authentication and multiple manifest GETs.
+    // Allow their bounded connection retries to finish while retaining the
+    // same concurrency pool, body limit, CORS and origin checks as other REST.
+    let inspection = Router::new()
+        .route("/api/oci/inspect", get(handlers::oci::inspect_oci_image))
+        .layer(cors)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
+        .layer(middleware::from_fn_with_state(
+            RequestLimits {
+                permits: limits.permits,
+                timeout: Some(Duration::from_secs(60)),
+            },
             enforce_limits,
         ));
 
@@ -381,6 +395,7 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
 
     let app = rest
         .merge(recovery)
+        .merge(inspection)
         .merge(console)
         // Unknown paths under the API/WebSocket prefixes answer with the JSON
         // error envelope even when the dashboard is served below, so a typo in
@@ -585,6 +600,72 @@ mod tests {
             .await
             .unwrap();
         (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn slow_registry_inspection_keeps_the_shared_concurrency_limit() {
+        use axum::http::StatusCode;
+        let received = Arc::new(tokio::sync::Notify::new());
+        let notify = received.clone();
+        let registry = Router::new().route(
+            "/v2/team/app/manifests/v1",
+            axum::routing::get(move || {
+                let notify = notify.clone();
+                async move {
+                    notify.notify_one();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let registry_task = tokio::spawn(async move {
+            axum::serve(listener, registry).await.unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = HttpConfig::from_values("127.0.0.1:3000", "", false, false).unwrap();
+        config.request_timeout = Duration::from_millis(10);
+        config.max_concurrent_requests = 1;
+        let app = build_router(test_state(directory.path()).await, &config);
+        let inspecting = app.clone();
+        let inspection = tokio::spawn(async move {
+            get(
+                &inspecting,
+                &format!("/api/oci/inspect?reference={address}/team/app:v1"),
+            )
+            .await
+        });
+        received.notified().await;
+        assert_eq!(get(&app, "/api/vms").await.0, StatusCode::TOO_MANY_REQUESTS);
+        let (status, body) = inspection.await.unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("500"), "{body}");
+        assert_eq!(get(&app, "/api/vms").await.0, StatusCode::OK);
+        registry_task.abort();
+    }
+
+    #[tokio::test]
+    async fn regular_rest_requests_still_time_out() {
+        let app = Router::new()
+            .route(
+                "/slow",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    "done"
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                RequestLimits {
+                    permits: Arc::new(Semaphore::new(1)),
+                    timeout: Some(Duration::from_millis(10)),
+                },
+                enforce_limits,
+            ));
+        assert_eq!(
+            get(&app, "/slow").await.0,
+            axum::http::StatusCode::GATEWAY_TIMEOUT
+        );
     }
 
     #[tokio::test]
