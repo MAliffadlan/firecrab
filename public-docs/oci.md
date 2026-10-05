@@ -88,7 +88,8 @@ firecrab image inspect nginx:1.27
 
 ## Import
 
-- Import is a background job, because REST requests time out at 10 seconds.
+- Import is a background job; ordinary REST requests time out at 10 seconds.
+- Metadata-only inspection allows 60 seconds for registry authentication and bounded connection retries; the CLI waits 65 seconds. HTTP errors and partial blob downloads are not retried.
 - Poll `GET /api/oci/import/{alias}` for the `ImageInstallResponse` package install uses.
 - Success adds the alias to `GET /api/images`.
 
@@ -185,6 +186,9 @@ within the image; configuration directories alone do not identify an init system
 - The metrics agent reporting guest CPU and memory is managed by the selected native service, or launched by the BusyBox boot script.
 - Missing PATH tools (`ping`, `wget`, `vi`, `nc`) become busybox symlinks.
 - After DHCP, the first boot installs a small set through apt/dnf/apk/zypper/pacman and stamps `/etc/firecrab/base-packages.ok`.
+- APT uses IPv4 with bounded retries and 600-second deadlines for index and package downloads. Dpkg configuration has no deadline; a failed stage leaves the completion stamp absent and records `FIRECRAB_APT_FAILED` on the console.
+- If DNF installation fails, bootstrap clears repository metadata and retries once with zchunk disabled. Signature and checksum checks remain enabled, and repeated failure leaves the completion stamp absent.
+- Activation scripts are embedded at import time. Updating the host binary leaves existing templates on their earlier scripts; back up an unused template before deleting and importing it again to apply provisioning fixes.
 - In the BusyBox fallback, with util-linux `agetty` and bash, the serial console is `ttyS0 → agetty → login → bash`; otherwise the wrapper prints MOTD and drops into ash.
 - Native init runs the same console from `firecrab-console` (systemd unit or OpenRC service), respawned after `exit`. systemd's `serial-getty@ttyS0` and `console-getty` are masked; an OpenRC image that already runs something on `ttyS0` keeps it.
 - With a glibc loader, a digest-pinned official fastfetch (polyfilled, GLIBC_2.17) is copied to `/usr/bin/fastfetch`, cached at `<FIRECRAB_IMAGE_ROOT>/.oci/fastfetch/`.

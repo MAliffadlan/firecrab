@@ -78,14 +78,17 @@ For service commands and development options, see the
 
 ```powershell
 cargo build -p firecrab-cli --locked
-.\target\debug\firecrab.exe service install
+.\target\debug\firecrab.exe service dev
 ```
 
-On a host where the service is already installed, use service start instead of service install.
+`service dev` installs microManager when missing, builds the local API and network
+helper inside WSL2, and restarts them. See the
+[Windows guide](public-docs/micromanager-windows.md#develop-from-a-checkout)
+for build, restore, and frontend options.
 
 ## Tests
 
-Run the common checks:
+Run workspace checks on Linux; use the [native CLI checks](public-docs/ci.md#local-checks) on Windows and macOS:
 
 ```sh
 cargo fmt --all -- --check
@@ -115,6 +118,9 @@ FIRECRAB_MICROMANAGER_HOME="$HOME/Library/Application Support/Firecrab/micromana
 ```
 
 For platform scenarios, manual steps, expected results, and cleanup, see the [English TEST guide](public-docs/TEST.md) or [Korean TEST guide](public-docs/TEST.ko.md).
+Windows source runtime checks use `.\scripts\ci-qa-windows-e2e.ps1 -Phase all -Cli .\target\debug\firecrab.exe -Source .` from PowerShell.
+`all` collects every test phase after the runtime gate and fails overall if any phase fails; use `-Phase browser` for only browser/guest boot.
+The [E2E guide](firecrab-e2e/README.md) describes where browsers and fixtures run on each platform.
 
 ## Commits
 
@@ -205,6 +211,7 @@ Prefer one problem per issue. Report sensitive security problems privately to th
 ## CI
 
 The [CI workflow](https://github.com/SteelCrab/firecrab/blob/main/.github/workflows/ci.yml) runs Rust, frontend, documentation, installer, and available automated scenario checks.
+See [CI and runtime E2E](public-docs/ci.md) for exact job coverage, local checks, source/release options, and evidence requirements.
 
 GitHub-hosted macOS and Windows CI cannot provide nested virtualization, so direct microVM runtime validation requires manual steps.
 Depending on the contribution, contributors may post their manual test results in a PR comment.

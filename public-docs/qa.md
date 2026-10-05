@@ -2,10 +2,8 @@
 
 For a checkable test plan with command blocks, see the [English TEST checklist](TEST.md) or [Korean TEST checklist](TEST.ko.md).
 
-Use this list on **Linux**, **macOS**, and **Windows**.
-The product surface after the API is up is the same: `http://127.0.0.1:5523`.
-Mark every row `PASS`, `FAILED`, or `WARNING`.
-`WARNING` is skip or leftover, not a silent pass.
+Use this list on **Linux**, **macOS**, and **Windows**; the API is at `http://127.0.0.1:5523`.
+Mark every row `PASS`, `FAILED`, or `WARNING`; `WARNING` is skip or leftover, not a silent pass.
 
 Flow for every resource: **add → use or mutate → delete → leftover empty**.
 Prefix names with `qa-` and use a dedicated subnet per run.
@@ -29,13 +27,12 @@ Env, shells, kernels, storage assignment, port forwards, and Docker Hub are API 
 - [CLI](#cli)
 - [Cleanup](#cleanup)
 - [CI map](#ci-map)
+- [Windows source validation, 2026-10-03](#windows-source-validation-2026-10-03)
 - [Related](#related)
 
 ## Platform gate
 
-Reach `GET /api/host` → 200 before the shared list.
-The install command differs by OS.
-The API contract does not.
+Reach `GET /api/host` → 200 before the shared list; the install command differs by OS, the API contract does not.
 
 | ID | OS | Work |
 | --- | --- | --- |
@@ -55,6 +52,7 @@ either, so Windows runtime E2E is manual on a Windows host whose `doctor`
 reports `ready: true`.
 `FIRECRAB_QA_WAIT_FACTOR` multiplies the guest waits in the nginx and SSH
 checks for hosts whose guests install first-boot packages slowly.
+It does not extend package-install deadlines or Playwright timeouts.
 
 Linux `firecrab service` drives host systemd.
 macOS `firecrab service` drives the management VM, not a workload MicroVM.
@@ -208,6 +206,10 @@ runs NGX5 inside that VM and again on the Mac's `127.0.0.1` through the
 microManager relay, and proxies NGX6–NGX8 SSH through it; these rows are
 required rather than warnings.
 
+On Windows, nginx QA runs inside WSL and also requires HTTP 200 from native
+Windows `127.0.0.1:18080` through the source net-helper's TCP relay.
+Browser IPv4/IPv6 SSH runs inside WSL; it does not prove native Windows IPv6 access.
+
 ## CLI
 
 Shared on every OS once the API is up.
@@ -235,6 +237,8 @@ Linux-only (skip on macOS/Windows CLI, or run inside the management guest):
 | X5 | custom OCI alias gone; catalog fixtures only if you chose to keep them |
 | X6 | Docker Hub not left with a QA secret |
 | X7 | no `firecrab-vm-*` unit remains for `qa-*` VMs |
+| X8 | QA forwarded TCP ports are closed after VM stop/delete |
+| X9 | Restore any manual QA DNS or management SSH changes; retain logs and result summaries |
 
 ## CI map
 
@@ -243,25 +247,54 @@ Linux-only (skip on macOS/Windows CLI, or run inside the management guest):
 | `scripts/ci-qa-api.sh` | G4 G5 H1 H2 N1–N5 S1–S3 L1–L3 I1 I8 I9 V14 C3 C5 X1–X4 X6 |
 | `scripts/ci-qa-nginx.sh` | NGX1–NGX9 including V8a–V8d SSH |
 | `scripts/ci-qa-ssh.sh` | V8a–V8d (called from guest boot and nginx) |
-| `scripts/ci-qa-lifetime.sh` | R1–R7 (including R4b–R4e) X7 for one OCI reference (default `alpine:3.21`); root commands run through `sudo` on Linux or the management VM SSH on macOS |
-| `scripts/ci-qa-guest.sh` | I5 I6 V1 V2 V6 V7 V8 V9 V11 V12 V13 V15 N6 C1 C2 C2b C4 X5; expanded rows run for the first OCI reference, API guest flow for the remaining `alpine:3.21` `ubuntu:24.04` `fedora:42` references |
+| `scripts/ci-qa-lifetime.sh` | R1–R7 (including R4b–R4e) X7; root commands use `sudo` on Linux, direct execution in root WSL, or management VM SSH on macOS |
+| `scripts/ci-qa-guest.sh` | I5 I6 V1 V2 V6 V7 V8 V9 V11 V12 V13 V15 N6 C1 C2 C2b C4 X5; expanded rows on the first reference, later references still checked after failure; aggregate exit 1 for any failure |
 | `firecrab-e2e` `test:dashboard` | dashboard rows that fake the API and console (`@dashboard`), including V15 in the web terminal |
+| Linux installer Chromium | B1–B17 with real boot, IPv4 forwarded SSH, and IPv6 SSH; B5 is the existing explicit skip |
 | GitHub-hosted macOS | Swift/Rust checks, signed helper, and diagnostic JSON; no runtime E2E |
-| GitHub-hosted Windows | Rust clippy/tests and diagnostic JSON; no runtime E2E |
-| Windows host manual run | `ci-qa-windows-e2e.ps1`; fresh install and G6 `service shell`, then the API/nginx/guest scripts inside the managed distribution |
-| Native M3+ manual run | `ci-qa-macos-e2e.sh`; fresh install, G6 `service shell`, and API/nginx/guest/lifetime E2E; capability failure is fatal |
+| GitHub-hosted Windows | CLI, PowerShell QA, and Node runner contracts plus diagnostic JSON; no runtime E2E |
+| Windows host manual run | `ci-qa-windows-e2e.ps1`; optional source deployment, G6 `service shell`, then API/nginx/guest/Chromium inside WSL; nginx also checks Windows HTTP |
+| Native M3+ manual run | `ci-qa-macos-e2e.sh`; install, G6 `service shell`, and browser/API/nginx/guest/lifetime E2E; capability failure is fatal |
 | microManager PR report | `micromanager-pr-report.py`; comments both hosted jobs' results, log tails, and the manual E2E commands on PRs that touch them |
 
-Not in GitHub Ubuntu CI: I2 I3 I4 I7 I10 U1.
+Not in GitHub Ubuntu CI: I2 I3 I4 I7 I10 U1. Linux installer CI runs Playwright; native macOS/Windows runtime is manual and ARM64 KVM CI is unregistered.
+Windows `all` collects every test phase after successful prerequisites, retains logs/summary/browser archive, and exits nonzero if any phase fails.
+See [CI and runtime E2E](ci.md) for job coverage, Windows phases, and source/release options.
+
+## Windows source validation, 2026-10-03
+
+Measured on `feat/windows-source-dev`, including uncommitted changes after baseline `085c23f`.
+Environment: QEMU/KVM → Windows 11 Enterprise 26200.9457 x86_64 → WSL 2.7.14.0 / Debian 13 → Firecracker 1.17.0. The native Windows CLI and Linux services used debug builds; these are lab results with an extra virtualization layer.
+
+| Check | Result | Evidence filename |
+| --- | --- | --- |
+| Unicode checkout + CRLF source deployment | PASS; services and Windows API healthy | `source-crlf-final.log` |
+| Shared API QA | PASS, exit 0 | `api-crlf-final.log` |
+| nginx, Windows localhost HTTP, SSH/env/shell/lifecycle | PASS, HTTP 200 | `nginx-crlf-final.log` |
+| Complete Chromium suite, real boot and IPv4/IPv6 SSH | PASS: 9 passed; WARNING: 1 existing failed-register skip; exit 0 | `browser-crlf-final.log` |
+| Alpine public-image guest QA | PASS, console/SSH/lifecycle | `guest-initial-summary.log` |
+| Fedora console fallback | PASS, commands execute without agetty respawn | `fedora-console-real.log` |
+| Ubuntu 24.04 public-image SSH QA | FAILED; APT exit 124, sshd absent; archive.ubuntu.com connection failed | `ubuntu-guest-final.log`, `ubuntu-apt-final-console.log` |
+| Fedora 42 public-image SSH QA | FAILED; repository DNS/metadata delays, SSH not ready within budget; package completion unverified | `fedora-guest-final.log` |
+| Final cleanup and cold restart | PASS; no VMs/networks, TCP 18080/18888/18022 closed, source services/API healthy, DNS restored | `final-clean-runtime.log`, `lab-dns-restored.log` |
+| Updated Windows QA runner contracts | PASS: 8 checks, including failed/unrun/running phase reporting | `windows-qa-runner-contract.log` |
+| Updated runner's API QA | PASS, finalized summary and exit 0 | `api-runner-update.log`, `api-runner-update-summary.json` |
+| Updated runner's complete Chromium suite | PASS: 9 passed, 1 existing skip, 11.7 minutes; JSON/JUnit archive retained | `browser-runner-update.log`, `browser-runner-results.tar.gz` |
+| `main` `15934df` Windows CLI `service shell` | PASS: G6, default stdin shell, `run` alias, literal arguments, stdio, exit codes; 203 native units and 11 runner checks | `../service-shell-qa-20261003/native-windows-tests-and-shell-qa.log`, `../service-shell-qa-20261003/default-shell-stdio-and-arguments.log` |
+
+Evidence is retained in the local Windows lab's `microvm-qa-20261002` directory (shell logs in sibling `service-shell-qa-20261003`); these are not CI uploads. Shell checks reused the existing API/helper; latest-main service deployment and terminal keyboard/resize/Ctrl-C were not exercised.
+The full public-image guest phase and `-Phase all` are **not PASS**.
+Windows ARM64, native macOS runtime, native Windows release builds, and stock pinned v0.2.2 MicroVM operation were not validated by this run.
+The lab's installed binary paths contained earlier experimental fixes; restore-path validation does not establish stock-release runtime success.
+Temporary lab DNS settings were restored and QA management SSH services stopped after testing.
+
+For SSH failures, retain the guest console and distinguish boot/network readiness from sshd readiness. `ci-qa-ssh.sh` fails early when both `FIRECRAB_PACKAGES_FAILED` and `FIRECRAB_SSHD skipped: no /usr/sbin/sshd` appear. A still-running package worker does not trigger that terminal-failure shortcut.
+`ci-m2-guest-boot.sh` prints the last 8,000 console characters before failure cleanup.
 
 ## Related
 
-- [API](api.md)
-- [Installation](installation.md)
-- [firecrab CLI](firecrab-cli.md)
-- [Networking](networking.md)
-- [Storage](storage.md)
-- [Images](images.md)
-- [OCI images](oci.md)
-- [Operations](operations.md)
-- [Dashboard](dashboard.md)
+- [CI and runtime E2E](ci.md)
+- [API](api.md), [Dashboard](dashboard.md), and [firecrab CLI](firecrab-cli.md)
+- [Installation](installation.md) and [Operations](operations.md)
+- [Networking](networking.md) and [Storage](storage.md)
+- [Images](images.md) and [OCI images](oci.md)

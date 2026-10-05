@@ -249,7 +249,7 @@ On macOS and Windows, these commands run the checkout CLI/helper with the instal
 <details>
 <summary>Checks, coverage, and browser E2E</summary>
 
-Common checks from the repository root:
+Workspace checks from the repository root on Linux:
 
 ```sh
 cargo fmt --all -- --check
@@ -277,6 +277,16 @@ FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e
 ```
 
 In PowerShell, set `$env:FIRECRAB_E2E_SKIP_GUEST_BOOT="1"` before `npm test --prefix firecrab-e2e`. This skips guest boot, so it does not validate KVM or nginx HTTP. Guest execution and all installer checks are covered in [TEST.md](public-docs/TEST.md), [한국어 체크리스트](public-docs/TEST.ko.md), and the [E2E guide](firecrab-e2e/README.md).
+
+Windows source runtime E2E (requires WSL2 nested KVM):
+
+```powershell
+cargo build -p firecrab-cli --locked
+.\scripts\ci-qa-windows-e2e.ps1 -Phase browser -Cli .\target\debug\firecrab.exe -Source .
+```
+
+This runs Chromium inside managed WSL with real guest boot enabled.
+See the [CI guide](public-docs/ci.md) for all phases and the [Windows source QA continuation](public-docs/micromanager-windows.md#source-qa-continuation-2026-10-04) for guest/browser passes and validation limits.
 
 </details>
 
