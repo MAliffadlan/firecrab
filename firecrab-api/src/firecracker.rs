@@ -1385,7 +1385,7 @@ mod tests {
         fs::write(&runtime.config, "{}").unwrap();
 
         let started = std::time::Instant::now();
-        let result = spawn_vm(
+        let error = spawn_vm(
             &test_config(&binary, Duration::from_secs(5)),
             &runtime,
             id,
@@ -1393,15 +1393,22 @@ mod tests {
             typical_limits(),
             test_metrics(),
         )
-        .await;
+        .await
+        .unwrap_err();
 
-        assert_matches!(
-            result,
-            Err(FirecrackerError::ShimExited { .. } | FirecrackerError::ExitedBeforeReady)
-        );
+        // The shim can exit before attachment, during the handshake (resetting
+        // the socket), or after its greeting. Check the actual VMM exit rather
+        // than which branch wins that race, so unrelated startup errors cannot
+        // satisfy this test.
+        let exit: ExitReport =
+            serde_json::from_slice(&fs::read(&runtime.exit_status).unwrap()).unwrap();
+        assert_eq!(exit.status.code, Some(7));
+        assert_eq!(exit.status.signal, None);
+        assert!(!exit.stop_requested);
+        assert!(!process_alive(fake_pid(&runtime)));
         assert!(
             started.elapsed() < Duration::from_secs(3),
-            "an exited VMM must fail the start without waiting out the ready timeout, took {:?}",
+            "an exited VMM must fail the start without waiting out the ready timeout, got {error:?} after {:?}",
             started.elapsed()
         );
     }
