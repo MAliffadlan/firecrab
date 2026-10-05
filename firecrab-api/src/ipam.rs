@@ -63,7 +63,7 @@ const MAX_MAC_ATTEMPTS: u32 = 8;
 
 /// The subnet a lease is allocated from — always a real MicroNetwork.
 /// Addresses are derived from `network`/`prefix` rather than stored, the
-/// same way `firecrab-net-helper`'s bridge derives them.
+/// same way `firecrab-helper`'s bridge derives them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubnetSpec {
     /// The MicroNetwork this subnet belongs to.

@@ -1,8 +1,9 @@
 //! install.sh `do_uninstall`: 이 설치가 만든 것만 지운다. 데이터는 `--purge`에서만.
 
 use super::Error;
-use super::env::{ServiceEnv, UNITS};
+use super::env::{LEGACY_HELPER_UNIT, ServiceEnv, UNITS};
 use super::output;
+use super::payload::resolve_binary;
 use super::privileged::Privileged;
 use super::selinux;
 
@@ -13,7 +14,7 @@ const STEP: &str = "uninstall";
 /// 계정은 남긴다 — 데이터 디렉터리가 그 계정 소유이고, 지우면 남은 파일이
 /// 고아가 된다.
 pub fn uninstall(privileged: &Privileged<'_>, env: &ServiceEnv, purge: bool) -> Result<(), Error> {
-    for unit in UNITS {
+    for unit in UNITS.into_iter().rev().chain([LEGACY_HELPER_UNIT]) {
         // 이미 없거나 비활성이면 실패가 정상이므로 결과를 보지 않는다.
         let _ = privileged.run("systemctl", &["disable", "--now", unit]);
         let path = env.unit_path(unit).to_string_lossy().into_owned();
@@ -25,9 +26,9 @@ pub fn uninstall(privileged: &Privileged<'_>, env: &ServiceEnv, purge: bool) -> 
     // SIGTERM은 helper의 소켓 루프만 멈춘다 — helper가 만든 브리지, TAP,
     // nftables 테이블은 재부팅 전까지 남는다. 바이너리가 아직 디스크에 있는
     // 동안 자체 teardown을 돌린다.
-    let helper = env.libdir.join("firecrab-net-helper");
-    if helper.is_file() {
-        let helper_s = helper.to_string_lossy().into_owned();
+    let helper = env.libdir.join("firecrab-helper");
+    if let Some(teardown) = resolve_binary("firecrab-helper", None, &env.libdir) {
+        let helper_s = teardown.to_string_lossy().into_owned();
         let ok = privileged
             .run(&helper_s, &["--teardown"])
             .map(|o| o.status.success())
@@ -46,7 +47,12 @@ pub fn uninstall(privileged: &Privileged<'_>, env: &ServiceEnv, purge: bool) -> 
         .into_owned();
     let helper_s = helper.to_string_lossy().into_owned();
     let cli = env.bindir.join("firecrab").to_string_lossy().into_owned();
-    privileged.run_ok(STEP, "rm", &["-f", &api, &helper_s, &cli])?;
+    let legacy = env
+        .libdir
+        .join("firecrab-net-helper")
+        .to_string_lossy()
+        .into_owned();
+    privileged.run_ok(STEP, "rm", &["-f", &api, &helper_s, &legacy, &cli])?;
 
     let dashboard = env
         .sharedir
@@ -120,7 +126,7 @@ mod tests {
         let env = env_for(root);
         std::fs::create_dir_all(&env.libdir).unwrap();
         std::fs::create_dir_all(&env.unitdir).unwrap();
-        std::fs::write(env.libdir.join("firecrab-net-helper"), b"x").unwrap();
+        std::fs::write(env.libdir.join("firecrab-helper"), b"x").unwrap();
         for unit in UNITS {
             std::fs::write(env.unit_path(unit), b"[Unit]\n").unwrap();
         }
@@ -163,17 +169,17 @@ mod tests {
             .position(|c| {
                 c == &format!(
                     "sudo {} --teardown",
-                    env.libdir.join("firecrab-net-helper").display()
+                    env.libdir.join("firecrab-helper").display()
                 )
             })
             .expect("teardown call");
         // `rposition`, not `position`: the unit-file removal loop earlier in
         // the run also matches "starts with sudo rm -f and contains
-        // firecrab-net-helper" (it deletes firecrab-net-helper.service). The
+        // firecrab-helper" (it deletes firecrab-helper.service). The
         // binary removal this test cares about is the later, combined call.
         let removal = calls
             .iter()
-            .rposition(|c| c.starts_with("sudo rm -f ") && c.contains("firecrab-net-helper"))
+            .rposition(|c| c.starts_with("sudo rm -f ") && c.contains("firecrab-helper"))
             .unwrap();
         assert!(teardown < removal, "{calls:?}");
     }
@@ -183,7 +189,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = seeded_env(dir.path());
         let mut fake = FakeCommandRunner::permissive();
-        let helper = env.libdir.join("firecrab-net-helper").display().to_string();
+        let helper = env.libdir.join("firecrab-helper").display().to_string();
         fake.set("sudo", &[&helper, "--teardown"], 1, "", "rtnetlink error\n");
         uninstall(&Privileged::with_sudo(&fake, true), &env, false).unwrap();
     }

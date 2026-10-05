@@ -368,7 +368,7 @@ rm -rf "$tmp"
 
 phase firecrab
 bash "$share/downloads/install-firecrab-{firecrab}.sh" --no-deps
-systemctl is-active --quiet firecrab-net-helper
+(systemctl is-active --quiet firecrab-helper || systemctl is-active --quiet firecrab-net-helper)
 systemctl is-active --quiet firecrab-api
 
 phase nested-firecracker

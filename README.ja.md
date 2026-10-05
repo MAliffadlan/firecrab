@@ -152,9 +152,9 @@ firecrab service install
 インストーラーは二つの systemd サービスを起動します。以降の起動・状態確認・停止には次を使います。
 
 ```sh
-sudo systemctl start firecrab-net-helper firecrab-api
-systemctl status firecrab-net-helper firecrab-api
-sudo systemctl stop firecrab-api firecrab-net-helper
+sudo systemctl start firecrab-helper firecrab-api
+systemctl status firecrab-helper firecrab-api
+sudo systemctl stop firecrab-api firecrab-helper
 ```
 
 ### macOS
@@ -198,9 +198,9 @@ firecrab service stop
 
 ```sh
 # 1
-cargo build -p firecrab-net-helper --locked
+cargo build -p firecrab-helper --locked
 sudo -u root -g "$(id -gn)" FIRECRAB_NET_HELPER_ALLOWED_UID="$(id -u)" \
-  ./target/debug/firecrab-net-helper
+  ./target/debug/firecrab-helper
 
 # 2
 cargo run -p firecrab-api --locked

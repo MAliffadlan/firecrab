@@ -113,7 +113,7 @@ pub struct AppState {
     pub(crate) storage: Arc<StorageRegistry>,
     /// Bounds how many `start_vm` calls copy/grow a rootfs disk at once.
     pub(crate) disk_prep_permits: Arc<Semaphore>,
-    /// Client for the privileged `firecrab-net-helper` (bridge/TAP/firewall).
+    /// Client for the privileged `firecrab-helper` (bridge/TAP/firewall).
     pub(crate) network: NetworkClient,
     /// Serializes desired-state firewall snapshots with per-VM policy/TAP
     /// mutations. Without this, an older snapshot from one concurrent start

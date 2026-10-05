@@ -54,7 +54,7 @@ pub fn deploy(
     // Send the embedded script independently of the snapshot so an installed CLI
     // can run from any checkout directory and restore without source files.
     let script = guest_script()?;
-    report!("[GUEST] {profile}: API + net-helper");
+    report!("[GUEST] {profile}: API + helper");
     run_ssh(
         layout,
         ip,

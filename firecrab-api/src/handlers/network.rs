@@ -73,7 +73,7 @@ pub async fn reconcile_network(
 }
 
 /// Default route's outbound interface, read from `/proc/net/route` (no
-/// privilege needed). This is the same value `firecrab-net-helper`'s own
+/// privilege needed). This is the same value `firecrab-helper`'s own
 /// `nat::detect_uplink` resolves via rtnetlink, just read a different way —
 /// a read-only value isn't worth a new IPC round trip across the privilege
 /// boundary for.

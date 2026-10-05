@@ -17,7 +17,7 @@ const SOURCE_INPUTS: &[&str] = &[
     "firecrab-api-types",
     "firecrab-cli",
     "firecrab-helper-protocol",
-    "firecrab-net-helper",
+    "firecrab-helper",
     "scripts/firecracker-menual",
     "scripts/micromanager/dev-macos-guest.sh",
     "assets/firecrab-motd",
@@ -207,7 +207,7 @@ pub(super) mod tests {
         }
         fs::write(directory.path().join("Cargo.toml"), r#"
 [workspace]
-members = ["firecrab-api", "firecrab-api-types", "firecrab-cli", "firecrab-helper-protocol", "firecrab-net-helper"]
+members = ["firecrab-api", "firecrab-api-types", "firecrab-cli", "firecrab-helper-protocol", "firecrab-helper"]
 "#).unwrap();
         fs::write(
             directory.path().join("rust-toolchain.toml"),

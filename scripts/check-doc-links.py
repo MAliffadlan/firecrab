@@ -28,7 +28,7 @@ SOURCE_GLOBS = [
     "firecrab-api/src/**/*.rs",
     "firecrab-api-types/src/**/*.rs",
     "firecrab-helper-protocol/src/**/*.rs",
-    "firecrab-net-helper/src/**/*.rs",
+    "firecrab-helper/src/**/*.rs",
     "firecrab-frontend/src/**/*.ts",
     "firecrab-frontend/src/**/*.tsx",
     "scripts/**/*.sh",

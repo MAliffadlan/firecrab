@@ -10,9 +10,9 @@ Use `firecrab doctor` on an installed host.
 ## Basic status
 
 ```sh
-systemctl status firecrab-net-helper firecrab-api
+systemctl status firecrab-helper firecrab-api
 journalctl -u firecrab-api -n 100 --no-pager
-journalctl -u firecrab-net-helper -n 100 --no-pager
+journalctl -u firecrab-helper -n 100 --no-pager
 ls -l /dev/kvm /run/firecrab/net-helper.sock
 df -h
 ```
@@ -66,7 +66,7 @@ The API and helper must use the same socket, by default `/run/firecrab/net-helpe
 Start the development helper with `./scripts/dev-net-helper.sh`, or check the installed one.
 
 ```sh
-systemctl status firecrab-net-helper
+systemctl status firecrab-helper
 ls -l /run/firecrab/net-helper.sock
 ```
 
@@ -94,7 +94,7 @@ sudo ss -lunp | grep ':67'
 
 Read the helper log for dnsmasq errors and the guest log for `FIRECRAB_NETWORK_FAILED`.
 The host firewall can block DHCP on `mnb*` bridges. Restart
-`firecrab-net-helper` after an upgrade. An imported image has no `ping`;
+`firecrab-helper` after an upgrade. An imported image has no `ping`;
 use `/etc/firecrab/busybox ping 1.1.1.1` or restart for PATH tools.
 
 ## Guest PID 1
@@ -138,7 +138,7 @@ for `bin_t`. Installing with `install.sh` relabels it; on an older install:
 ```sh
 sudo semanage fcontext -a -t bin_t '/usr/local/lib/firecrab(/.*)?'
 sudo restorecon -R /usr/local/lib/firecrab
-sudo systemctl restart firecrab-net-helper firecrab-api
+sudo systemctl restart firecrab-helper firecrab-api
 ```
 
 `sudo setenforce 0` confirms the diagnosis in one command; put it back to `1`.

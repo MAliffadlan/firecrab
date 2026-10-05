@@ -64,7 +64,7 @@ scripts/build-micromanager-macos.sh target/debug/firecrab-micromanager-macos
 
 `service dev` installs the management VM when missing, starts the resident VM and
 API tunnel, uploads the current checkout, and builds `firecrab-api` and
-`firecrab-net-helper` inside Linux ARM64 Debian. It uses `rust-toolchain.toml`
+`firecrab-helper` inside Linux ARM64 Debian. It uses `rust-toolchain.toml`
 and `Cargo.lock`, installs compiler prerequisites on its first run, and caches
 Rust and Cargo artifacts on the persistent data disk. The Mac's `target/`, local
 root configuration, nested checkouts, and `.env` files are not uploaded.

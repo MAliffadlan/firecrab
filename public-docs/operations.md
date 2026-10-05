@@ -8,16 +8,16 @@ The API manages VMs and the helper manages host networking.
 | Service | Job |
 | --- | --- |
 | `firecrab-api` | HTTP, WebSocket, SQLite, and Firecracker |
-| `firecrab-net-helper` | Bridge, TAP, DHCP, NAT, and firewall |
+| `firecrab-helper` | Bridge, TAP, DHCP, NAT, and firewall |
 
 The helper should start before the API.
 
 ## Status and logs
 
 ```sh
-systemctl status firecrab-net-helper firecrab-api
+systemctl status firecrab-helper firecrab-api
 journalctl -u firecrab-api -f
-journalctl -u firecrab-net-helper -f
+journalctl -u firecrab-helper -f
 ```
 
 Run the host doctor after a failure.
@@ -137,3 +137,8 @@ It makes up to three attempts and refreshes running VMs' diagnostics/check times
 Stopped or exited VMs' historical results are retained. Verification covers owned
 nft state, TAP attachment, bridge state/MTU/gateway, forwarding, DHCP files and
 serving-process liveness. Traffic acceptance is tested separately by lifetime QA.
+
+Helper service names and upgrade compatibility are described in
+[Helper service migration](installation.md#helper-service-migration).
+`firecrab status --json` retains `netHelperService` and adds `helperUnit` to
+identify the unit actually queried.

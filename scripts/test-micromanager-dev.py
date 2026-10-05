@@ -36,11 +36,15 @@ case "$name" in
     done
     [ "$target" = "${GUEST_ARCH:-aarch64}-unknown-linux-gnu" ]
     mkdir -p "$CARGO_TARGET_DIR/$target/$profile"
-    for unit in firecrab-api firecrab-net-helper; do
+    for unit in firecrab-api firecrab-helper; do
       printf '#!/bin/bash\necho built-from-source\n' >"$CARGO_TARGET_DIR/$target/$profile/$unit"
     done
     ;;
   systemctl)
+    if [ "$*" = 'show --property=LoadState --value firecrab-helper.service' ]; then
+      if [ "${LEGACY_HELPER:-0}" = 1 ]; then echo not-found; else echo loaded; fi
+      exit 0
+    fi
     echo "$*" >>"$TEST_ROOT/events"
     if [ "$*" = 'start firecrab-api' ] && [ "${START_FAIL:-0}" = 1 ] \
       && [ -f "$TEST_ROOT/units/firecrab-api.service.d/90-firecrab-dev.conf" ]; then exit 43; fi
@@ -107,6 +111,29 @@ class GuestDevelopmentTest(unittest.TestCase):
     def override(self, unit="firecrab-api"):
         return self.units / (unit + ".service.d/90-firecrab-dev.conf")
 
+    def test_legacy_service_uses_the_new_helper_executable_and_restore_removes_its_override(self):
+        result = self.run_guest(LEGACY_HELPER=1)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        legacy = self.override("firecrab-net-helper")
+        self.assertIn("/bin/firecrab-helper", legacy.read_text())
+        self.assertFalse(self.override("firecrab-helper").exists())
+        restored = self.run_guest(profile="restore", LEGACY_HELPER=1)
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertFalse(legacy.exists())
+
+    def test_alias_name_development_override_is_removed_when_deploying_or_restoring(self):
+        legacy = self.override("firecrab-net-helper")
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("old alias override")
+        result = self.run_guest()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(legacy.exists())
+        legacy.write_text("old alias override")
+        restored = self.run_guest(profile="restore")
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertFalse(legacy.exists())
+        self.assertFalse(self.override("firecrab-helper").exists())
+
     def test_cached_toolchain_does_not_require_network_refresh(self):
         result = self.run_guest(TOOLCHAIN_INSTALL_FAIL=1)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -138,7 +165,7 @@ class GuestDevelopmentTest(unittest.TestCase):
                 result = self.run_guest(profile)
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                 self.assertIn("ExecStart=" + str(self.binaries) + "/bin/firecrab-api", self.override().read_text())
-                self.assertIn("built-from-source", (self.binaries / "bin/firecrab-net-helper").read_text())
+                self.assertIn("built-from-source", (self.binaries / "bin/firecrab-helper").read_text())
                 self.assertIn("runtime-tool", (self.binaries / "bin/extract-arm64-image").read_text())
                 self.assertFalse(self.archive.exists())
 

@@ -35,7 +35,18 @@ use uuid::Uuid;
 /// Binaries a release bundle must contain; a bundle missing any of them is
 /// rejected before a single target is touched (the same three names
 /// `install.sh`'s `download_host_bundle` insists on).
-const REQUIRED_BINARIES: [&str; 3] = ["firecrab-api", "firecrab-net-helper", "firecrab"];
+const REQUIRED_BINARIES: [&str; 2] = ["firecrab-api", "firecrab"];
+
+/// New bundles also carry the legacy member for pre-rename helpers. Always
+/// select one source for both installed paths so they cannot diverge.
+fn helper_source(staging: &Path) -> PathBuf {
+    let canonical = staging.join("firecrab-helper");
+    if canonical.is_file() {
+        canonical
+    } else {
+        staging.join("firecrab-net-helper")
+    }
+}
 
 /// Suffix the pre-update copy of every replaced target is parked under, so a
 /// failure halfway through the swap can be rolled back in reverse order.
@@ -80,7 +91,7 @@ pub enum SelfUpdateError {
 /// the unprivileged binary it is about to overwrite.
 ///
 /// `PREFIX` reaches this process from `Environment=PREFIX=@PREFIX@` in
-/// `packaging/systemd/firecrab-net-helper.service`, which `install.sh` renders.
+/// `packaging/systemd/firecrab-helper.service`, which `install.sh` renders.
 /// A unit file predating that line resolves `/usr/local`, which is
 /// `install.sh`'s own default — so only a non-default `PREFIX` needs the units
 /// re-rendered (a plain `install.sh` re-run) before a self-update is accepted.
@@ -116,13 +127,12 @@ fn hash_reader<R: Read>(reader: &mut R) -> std::io::Result<String> {
 /// which walks it backwards.
 fn swap_plan(layout: &InstallLayout, staging: &Path) -> Vec<(PathBuf, PathBuf)> {
     let mut plan = Vec::new();
-    for name in [
-        "firecrab-api",
-        "firecrab-net-helper",
-        "extract-vmlinux",
-        "extract-arm64-image",
-    ] {
+    for name in ["firecrab-api", "extract-vmlinux", "extract-arm64-image"] {
         plan.push((staging.join(name), layout.libdir.join(name)));
+    }
+    let helper = helper_source(staging);
+    for name in ["firecrab-helper", "firecrab-net-helper"] {
+        plan.push((helper.clone(), layout.libdir.join(name)));
     }
     plan.push((staging.join("firecrab"), layout.bindir.join("firecrab")));
     plan.push((staging.join("dashboard"), layout.sharedir.join("dashboard")));
@@ -341,6 +351,12 @@ fn extract_and_check(file: &mut File, staging: &Path) -> std::io::Result<()> {
             ));
         }
     }
+    if !helper_source(staging).is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "release bundle is missing firecrab-helper (or legacy firecrab-net-helper)",
+        ));
+    }
     Ok(())
 }
 
@@ -421,7 +437,7 @@ fn swap_all(
 /// Copies one staged entry into a uniquely named sibling of `target` and
 /// returns that path, ready for an atomic same-directory `rename(2)`.
 ///
-/// **This detour is a bug fix, not a style choice.** `firecrab-net-helper.service`
+/// **This detour is a bug fix, not a style choice.** `firecrab-helper.service`
 /// punches holes through `ProtectSystem=full` with
 /// `ReadWritePaths=/run/firecrab @LIBDIR@ @SHAREDIR@ @PREFIX@/bin @DATADIR@`,
 /// and systemd implements each of those as its own bind mount. `rename(2)` (and
@@ -540,6 +556,11 @@ fn rollback(done: &[(PathBuf, PathBuf)]) -> bool {
     let mut all = true;
     for (target, backup) in done.iter().rev() {
         if !exists(backup) {
+            // A legacy install may have had no canonical helper path. Undo
+            // that newly created target too if a later replacement fails.
+            if remove_any(target).is_err() {
+                all = false;
+            }
             continue;
         }
         if remove_any(target).is_err() {
@@ -586,6 +607,23 @@ fn cleanup_download_dir(tarball_path: &Path) {
 /// job to PID 1 and returns immediately, so the restart completes even though
 /// the caller is about to be killed.
 pub async fn restart_units() {
+    // An old helper's first upgrade leaves its old unit installed. Updates
+    // replace binaries, while an installer rerun migrates the unit files.
+    let helper_unit = match Command::new("systemctl")
+        .args([
+            "show",
+            "--property=LoadState",
+            "--value",
+            "firecrab-helper.service",
+        ])
+        .output()
+        .await
+    {
+        Ok(output) if String::from_utf8_lossy(&output.stdout).trim() == "not-found" => {
+            "firecrab-net-helper.service"
+        }
+        _ => "firecrab-helper.service",
+    };
     match Command::new("systemctl")
         .args(["restart", "firecrab-api.service"])
         .status()
@@ -596,11 +634,11 @@ pub async fn restart_units() {
         Err(error) => eprintln!("[ERROR] systemctl restart firecrab-api.service: {error}"),
     }
     if let Err(error) = Command::new("systemctl")
-        .args(["--no-block", "restart", "firecrab-net-helper.service"])
+        .args(["--no-block", "restart", helper_unit])
         .status()
         .await
     {
-        eprintln!("[ERROR] systemctl --no-block restart firecrab-net-helper.service: {error}");
+        eprintln!("[ERROR] systemctl --no-block restart {helper_unit}: {error}");
     }
 }
 
@@ -712,7 +750,7 @@ mod tests {
         for dir in [&layout.bindir, &layout.libdir, &layout.sharedir] {
             fs::create_dir_all(dir).expect("create layout dir");
         }
-        for name in REQUIRED_BINARIES {
+        for name in ["firecrab-api", "firecrab-helper", "firecrab-net-helper"] {
             fs::write(layout.libdir.join(name), b"old").expect("seed lib binary");
         }
         for name in ["extract-vmlinux", "extract-arm64-image"] {
@@ -768,7 +806,7 @@ mod tests {
     fn release_members() -> Vec<Member> {
         vec![
             Member::File("firecrab-api", b"new-api"),
-            Member::File("firecrab-net-helper", b"new-helper"),
+            Member::File("firecrab-helper", b"new-helper"),
             Member::File("firecrab", b"new-cli"),
             Member::File("extract-vmlinux", b"new-extract"),
             Member::File("extract-arm64-image", b"new-extract-arm"),
@@ -987,7 +1025,7 @@ mod tests {
             b"new-api"
         );
         assert_eq!(
-            fs::read(layout.libdir.join("firecrab-net-helper")).unwrap(),
+            fs::read(layout.libdir.join("firecrab-helper")).unwrap(),
             b"new-helper"
         );
         assert_eq!(
@@ -1044,7 +1082,7 @@ mod tests {
         fs::create_dir_all(staging.join("dashboard")).expect("create staging");
         for name in [
             "firecrab-api",
-            "firecrab-net-helper",
+            "firecrab-helper",
             "extract-vmlinux",
             "extract-arm64-image",
             "firecrab",
@@ -1166,7 +1204,7 @@ mod tests {
             b"old"
         );
         assert_eq!(
-            fs::read(layout.libdir.join("firecrab-net-helper")).unwrap(),
+            fs::read(layout.libdir.join("firecrab-helper")).unwrap(),
             b"old"
         );
         assert_eq!(fs::read(layout.bindir.join("firecrab")).unwrap(), b"old");
@@ -1178,5 +1216,52 @@ mod tests {
             .filter(|name| name.contains(".new-"))
             .collect();
         assert!(leftovers.is_empty(), "scratch left behind: {leftovers:?}");
+    }
+    #[tokio::test]
+    async fn updates_from_either_bundle_name_keep_both_installed_helpers_identical() {
+        for legacy_bundle in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let layout = seed_layout(dir.path());
+            fs::remove_file(layout.libdir.join("firecrab-helper")).unwrap();
+            let mut members = release_members();
+            if legacy_bundle {
+                members.retain(|member| !matches!(member, Member::File("firecrab-helper", _)));
+                members.push(Member::File("firecrab-net-helper", b"new-helper"));
+            } else {
+                // A duplicate legacy member must never override the canonical one.
+                members.push(Member::File("firecrab-net-helper", b"stale-helper"));
+            }
+            let (path, sha) = write_bundle(dir.path(), &members);
+            apply_bundle_against(&layout, &layout, &path, &sha)
+                .await
+                .unwrap();
+            for name in ["firecrab-helper", "firecrab-net-helper"] {
+                assert_eq!(fs::read(layout.libdir.join(name)).unwrap(), b"new-helper");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_legacy_upgrade_removes_the_new_path_and_restores_the_old_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = seed_layout(dir.path());
+        fs::remove_file(layout.libdir.join("firecrab-helper")).unwrap();
+        let blocked = layout.bindir.join("firecrab.firecrab-bak");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("keep"), b"x").unwrap();
+        let (path, sha) = write_bundle(dir.path(), &release_members());
+        assert!(matches!(
+            apply_bundle_against(&layout, &layout, &path, &sha).await,
+            Err(SelfUpdateError::Apply { restored: true, .. })
+        ));
+        assert!(!layout.libdir.join("firecrab-helper").exists());
+        assert_eq!(
+            fs::read(layout.libdir.join("firecrab-net-helper")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            fs::read(layout.libdir.join("firecrab-api")).unwrap(),
+            b"old"
+        );
     }
 }

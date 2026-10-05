@@ -222,7 +222,7 @@ cat >"${staging}/etc/fstab" <<'EOF_FSTAB'
 /dev/vda / ext4 defaults 0 1
 EOF_FSTAB
 
-# firecrab-net-helper's dnsmasq answers DNS on the bridge gateway itself
+# firecrab-helper's dnsmasq answers DNS on the bridge gateway itself
 # (172.30.0.1) for every guest on the VPC subnet — dhcpcd overwrites this
 # from the DHCP-provided options once it runs, so this is really just the
 # pre-DHCP fallback value.

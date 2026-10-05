@@ -21,11 +21,16 @@ if ! flock -n 9; then
   exit 1
 fi
 
+helper_unit=firecrab-helper
+if [ "$(systemctl show --property=LoadState --value firecrab-helper.service)" = not-found ]; then
+  helper_unit=firecrab-net-helper
+fi
+
 backup=$(mktemp -d "$root/rollback.XXXXXX")
 deploying=0
 binaries=
 previous_bin=$(readlink "$bin_root/bin" || true)
-for unit in firecrab-api firecrab-net-helper; do
+for unit in firecrab-api firecrab-helper firecrab-net-helper; do
   override="$unit_root/$unit.service.d/90-firecrab-dev.conf"
   if [ -f "$override" ]; then cp "$override" "$backup/$unit.conf"; fi
 done
@@ -38,14 +43,14 @@ finish() {
   set +e
   if [ "$rc" -ne 0 ] && [ "$deploying" -eq 1 ]; then
     echo '[ROLLBACK] restoring previous guest executables' >&2
-    systemctl stop firecrab-api firecrab-net-helper
+    systemctl stop firecrab-api "$helper_unit"
     if [ -n "$previous_bin" ]; then
       ln -s "$previous_bin" "$bin_root/bin.rollback"
       mv -Tf "$bin_root/bin.rollback" "$bin_root/bin"
     else
       rm -f "$bin_root/bin"
     fi
-    for unit in firecrab-api firecrab-net-helper; do
+    for unit in firecrab-api firecrab-helper firecrab-net-helper; do
       override="$unit_root/$unit.service.d/90-firecrab-dev.conf"
       if [ -f "$backup/$unit.conf" ]; then
         cp "$backup/$unit.conf" "$override"
@@ -54,7 +59,7 @@ finish() {
       fi
     done
     systemctl daemon-reload
-    systemctl start firecrab-net-helper
+    systemctl start "$helper_unit"
     systemctl start firecrab-api
   fi
   rm -f "$root/$archive_name" "$bin_root/bin.next"
@@ -111,14 +116,14 @@ if [ "$profile" != restore ]; then
   export CARGO_TARGET_DIR="$root/target"
   export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
   export CARGO_PROFILE_DEV_DEBUG=${CARGO_PROFILE_DEV_DEBUG:-1}
-  flags=(--locked --target "$target" -p firecrab-api -p firecrab-net-helper)
+  flags=(--locked --target "$target" -p firecrab-api -p firecrab-helper)
   if [ "$profile" = release ]; then flags+=(--release); fi
   rustup run "$channel" cargo build "${flags[@]}"
 
   binaries=$(mktemp -d "$bin_root/build.XXXXXX")
   chmod 0755 "$binaries"
-  for unit in firecrab-api firecrab-net-helper; do
-    install -m 0755 "$CARGO_TARGET_DIR/$target/$profile/$unit" "$binaries/$unit"
+  for binary in firecrab-api firecrab-helper; do
+    install -m 0755 "$CARGO_TARGET_DIR/$target/$profile/$binary" "$binaries/$binary"
   done
   # The API resolves these runtime tools next to its executable. The source
   # snapshot is root-only, so its compile-time fallback path is not accessible.
@@ -130,22 +135,27 @@ fi
 # The packaged binaries, service accounts, permissions and working directories
 # remain installed. Only ExecStart changes, with a rollback if readiness fails.
 deploying=1
-systemctl stop firecrab-api firecrab-net-helper
+systemctl stop firecrab-api "$helper_unit"
 if [ "$profile" = restore ]; then
-  for unit in firecrab-api firecrab-net-helper; do
+  for unit in firecrab-api firecrab-helper firecrab-net-helper; do
     rm -f "$unit_root/$unit.service.d/90-firecrab-dev.conf"
   done
 else
+  for unit in firecrab-helper firecrab-net-helper; do
+    rm -f "$unit_root/$unit.service.d/90-firecrab-dev.conf"
+  done
   ln -s "$binaries" "$bin_root/bin.next"
   mv -Tf "$bin_root/bin.next" "$bin_root/bin"
-  for unit in firecrab-api firecrab-net-helper; do
+  for unit in firecrab-api "$helper_unit"; do
     install -d -m 0755 "$unit_root/$unit.service.d"
-    printf '[Service]\nExecStart=\nExecStart=%s/bin/%s\n' "$bin_root" "$unit" \
+    binary=firecrab-api
+    if [ "$unit" = "$helper_unit" ]; then binary=firecrab-helper; fi
+    printf '[Service]\nExecStart=\nExecStart=%s/bin/%s\n' "$bin_root" "$binary" \
       >"$unit_root/$unit.service.d/90-firecrab-dev.conf"
   done
 fi
 systemctl daemon-reload
-systemctl start firecrab-net-helper
+systemctl start "$helper_unit"
 for _ in $(seq 1 30); do
   [ -S /run/firecrab/net-helper.sock ] && break
   sleep 1
@@ -153,18 +163,18 @@ done
 test -S /run/firecrab/net-helper.sock
 systemctl start firecrab-api
 for _ in $(seq 1 60); do
-  if systemctl is-active --quiet firecrab-net-helper && systemctl is-active --quiet firecrab-api \
+  if systemctl is-active --quiet "$helper_unit" && systemctl is-active --quiet firecrab-api \
     && curl -fs --max-time 2 http://127.0.0.1:5523/api/host >/dev/null; then
     deploying=0
     if [ "$profile" = restore ]; then rm -f "$bin_root/bin"; fi
     case "$previous_bin" in
       "$bin_root"/build.*) rm -rf "$previous_bin" ;;
     esac
-    echo "[PASS] guest: $profile API + net-helper are ready"
+    echo "[PASS] guest: $profile API + helper are ready"
     exit 0
   fi
   sleep 1
 done
-journalctl --no-pager -n 30 -u firecrab-api -u firecrab-net-helper >&2
+journalctl --no-pager -n 30 -u firecrab-api -u "$helper_unit" >&2
 echo 'guest services did not become ready; restoring previous executables' >&2
 exit 1

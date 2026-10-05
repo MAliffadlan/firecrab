@@ -23,7 +23,7 @@ See [Installation](installation.md#cli-only-installation) for user-level install
 
 Remote commands run on Linux, macOS, and Windows and call the selected `firecrab-api`.
 The top-level Linux commands administer a native host, while macOS `service` provisions and controls the local managed Debian VM.
-The resource commands never talk to Firecracker, nftables, or `firecrab-net-helper` directly — the CLI
+The resource commands never talk to Firecracker, nftables, or `firecrab-helper` directly — the CLI
 is a client, not a second control plane.
 
 ```mermaid
@@ -42,7 +42,7 @@ flowchart TD
     Units["systemd units"]
     API[("firecrab-api\n:5523")]
     GH[("api.github.com\nreleases/latest")]
-    Helper[("firecrab-net-helper\nsocket")]
+    Helper[("firecrab-helper\nsocket")]
     CLI --> Config
     Config --> Select
     CLI --> Select
@@ -115,7 +115,7 @@ firecrab status --json
 firecrab status --api http://127.0.0.1:5523
 ```
 
-- `firecrab-api.service` / `firecrab-net-helper.service`: `systemctl is-active`, or `unknown` if `systemctl` itself cannot run.
+- `firecrab-api.service` / `firecrab-helper.service`: `systemctl is-active`, or `unknown` if `systemctl` itself cannot run.
 - `host`: `GET /api/host` — load average, memory, disk, and uptime — or `null` with `hostError` set if the API is unreachable or answers an error.
 - Base URL resolution uses the same endpoint selection order as [Host profiles](#host-profiles).
 
@@ -251,7 +251,7 @@ With no flag, `update` behaves as `--check`.
 | Flag | Effect |
 | --- | --- |
 | `--check` | Report only; no download. Exit 0 whether or not an update exists, 1 if the check itself failed |
-| `--apply` | Download the host bundle, verify SHA-256, and hand the swap to `firecrab-net-helper` |
+| `--apply` | Download the host bundle, verify SHA-256, and hand the swap to `firecrab-helper` |
 | `--json` | Emit `UpdateCheckResponse`, the same body `GET /api/update` returns |
 
 `--json` prints a report even when the check fails, with `latest` absent and `error` filled in.
@@ -290,7 +290,7 @@ On Windows, run `target\debug\firecrab.exe`; the `host`, `image`, `network`, and
 - `cargo run -p firecrab-cli -- doctor` works too; `cargo build` first is only for repeat runs without a rebuild each time.
 - Unit tests (`FakeCommandRunner`, no real host state touched): `cargo test -p firecrab-cli`.
 - `doctor`'s checks always read the real host it runs on — there is no way to point them at another machine or a fixture host.
-- More on running `firecrab-api`/`firecrab-net-helper`/the dashboard together: [CONTRIBUTING.md](../CONTRIBUTING.md).
+- More on running `firecrab-api`/`firecrab-helper`/the dashboard together: [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Related
 

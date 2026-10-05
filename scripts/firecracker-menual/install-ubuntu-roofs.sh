@@ -443,7 +443,7 @@ EOF
   install -d -m 1777 "${mount_dir}/tmp"
 }
 
-# firecrab-net-helper's dnsmasq answers DNS on the bridge gateway itself
+# firecrab-helper's dnsmasq answers DNS on the bridge gateway itself
 # (172.30.0.1) for every guest on the VPC subnet, so the guest points at
 # that instead of a public resolver — matches how a NAT router's own
 # address is typically handed out as the DNS server.

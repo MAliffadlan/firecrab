@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// The egress policies the API may request for a VM. New policies are added
-/// here and mirrored in `firecrab-net-helper`'s own (deliberately separate)
+/// here and mirrored in `firecrab-helper`'s own (deliberately separate)
 /// `EgressPolicy`; the helper is the trust boundary and re-validates every
 /// ID it receives rather than trusting this type directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

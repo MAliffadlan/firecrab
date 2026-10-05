@@ -244,7 +244,7 @@ async fn run() -> Result<(), StartupError> {
     println!("[INFO] bridge MTU: {}", config.bridge_mtu);
     let listener = bind_socket(&config.socket_path)?;
     println!(
-        "[INFO] net-helper listening on {}",
+        "[INFO] helper listening on {}",
         config.socket_path.display()
     );
 
@@ -861,15 +861,12 @@ mod tests {
     #[test]
     fn wants_teardown_matches_only_the_flag_in_argv1() {
         let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert!(wants_teardown(&args(&[
-            "firecrab-net-helper",
-            "--teardown"
-        ])));
-        assert!(!wants_teardown(&args(&["firecrab-net-helper"])));
-        assert!(!wants_teardown(&args(&["firecrab-net-helper", "--other"])));
+        assert!(wants_teardown(&args(&["firecrab-helper", "--teardown"])));
+        assert!(!wants_teardown(&args(&["firecrab-helper"])));
+        assert!(!wants_teardown(&args(&["firecrab-helper", "--other"])));
         // Only argv[1]; a later --teardown doesn't count.
         assert!(!wants_teardown(&args(&[
-            "firecrab-net-helper",
+            "firecrab-helper",
             "-x",
             "--teardown"
         ])));
@@ -914,11 +911,7 @@ mod tests {
         // firewall::tests::remove_firewall_clears_cached_networks), so an
         // unprivileged test process usually takes the error branch, but
         // either outcome exercises the real dispatch.
-        let _ = run_cli(vec![
-            "firecrab-net-helper".to_owned(),
-            "--teardown".to_owned(),
-        ])
-        .await;
+        let _ = run_cli(vec!["firecrab-helper".to_owned(), "--teardown".to_owned()]).await;
     }
 
     #[tokio::test]
@@ -1305,7 +1298,7 @@ mod tests {
             let mut builder = tar::Builder::new(encoder);
             for (name, bytes) in [
                 ("firecrab-api", b"api" as &[u8]),
-                ("firecrab-net-helper", b"helper"),
+                ("firecrab-helper", b"helper"),
                 ("firecrab", b"cli"),
             ] {
                 let mut header = tar::Header::new_gnu();

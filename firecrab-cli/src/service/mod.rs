@@ -46,9 +46,9 @@ pub enum Command {
         #[command(flatten)]
         opts: InstallOpts,
     },
-    /// Start firecrab-net-helper then firecrab-api.
+    /// Start firecrab-helper then firecrab-api.
     Start,
-    /// Stop firecrab-api then firecrab-net-helper.
+    /// Stop firecrab-api then firecrab-helper.
     Stop,
     /// Stop then start both units.
     Restart,

@@ -1,6 +1,6 @@
 //! `firecrab update`: check GitHub Releases for a newer host build, download
 //! and verify the matching host bundle, and hand the privileged swap to
-//! `firecrab-net-helper`.
+//! `firecrab-helper`.
 //!
 //! The split is a privilege boundary, not a stylistic one: everything in this
 //! module runs unprivileged and never writes to `$LIBDIR`, `$PREFIX/bin` or
@@ -12,7 +12,7 @@ pub mod bundle;
 /// GitHub Releases lookup and version comparison.
 pub mod check;
 
-/// Unix-socket client that sends `ApplySelfUpdate` to `firecrab-net-helper`.
+/// Unix-socket client that sends `ApplySelfUpdate` to `firecrab-helper`.
 pub mod helper;
 
 /// Serializes the tests across this module tree that read or write the real
@@ -111,7 +111,7 @@ pub enum ApplyOutcome {
 /// does, with `FIRECRAB_LIBDIR` overriding only `libdir` — the same override
 /// `firecrab doctor` already honours.
 ///
-/// **Must stay in sync with `firecrab-net-helper`'s
+/// **Must stay in sync with `firecrab-helper`'s
 /// `self_update::host_layout`.** The helper does not write where this points:
 /// it resolves the same three paths from its *own* environment and rejects the
 /// request unless the two agree byte-for-byte, so any change to the rules here
@@ -207,7 +207,7 @@ pub fn print_check_json(report: &UpdateCheckResponse) {
 }
 
 /// Downloads the matching host bundle, verifies it against the release's
-/// `SHA256SUMS`, and hands the swap to `firecrab-net-helper`.
+/// `SHA256SUMS`, and hands the swap to `firecrab-helper`.
 ///
 /// This function never writes to `$LIBDIR`, `$PREFIX/bin` or `$SHAREDIR`, and
 /// never calls `systemctl` — that is the whole point of the privilege split.

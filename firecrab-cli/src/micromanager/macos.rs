@@ -276,14 +276,14 @@ fn run_debug(options: debug::Options) -> Result<i32, Error> {
                 };
                 if options.logs {
                     report.logs.push(debug::LogSource::guest(
-                        "guest journal: firecrab-api + firecrab-net-helper",
+                        "guest journal: firecrab-api + firecrab-helper",
                         ip.map_or_else(
                             || Err("management IP unavailable".to_string()),
                             |ip| guest_command(
                                 &layout,
                                 ip,
                                 &format!(
-                                    "journalctl --no-pager --output=short-iso -n {} -u firecrab-api -u firecrab-net-helper",
+                                    "journalctl --no-pager --output=short-iso -n {} -u firecrab-api -u firecrab-helper -u firecrab-net-helper",
                                     options.tail
                                 ),
                             ),
@@ -295,7 +295,7 @@ fn run_debug(options: debug::Options) -> Result<i32, Error> {
                 report.guest = debug::Probe::unavailable("management VM is not ready");
                 if options.logs {
                     report.logs.push(debug::LogSource::guest(
-                        "guest journal: firecrab-api + firecrab-net-helper",
+                        "guest journal: firecrab-api + firecrab-helper",
                         Err("management VM is not running and was not started".to_string()),
                         options.tail,
                     ));
@@ -431,13 +431,13 @@ fn guest_units(layout: &lifecycle::Layout, ip: std::net::IpAddr) -> debug::Probe
     match guest_command(
         layout,
         ip,
-        "for unit in firecrab-api firecrab-net-helper; do systemctl is-active \"$unit\" || true; done",
+        "helper=firecrab-helper; if [ \"$(systemctl show --property=LoadState --value firecrab-helper.service)\" = not-found ]; then helper=firecrab-net-helper; fi; for unit in firecrab-api \"$helper\"; do systemctl is-active \"$unit\" || true; done",
     ) {
         Ok(states) => {
             let mut states = states.lines();
             let api = states.next().unwrap_or("unknown");
             let helper = states.next().unwrap_or("unknown");
-            let detail = format!("firecrab-api={api}, firecrab-net-helper={helper}");
+            let detail = format!("firecrab-api={api}, firecrab-helper={helper}");
             if api == "active" && helper == "active" {
                 debug::Probe::pass(detail)
             } else {
