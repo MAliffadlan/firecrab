@@ -326,7 +326,7 @@ Every VM runs in its own `firecrab-vm-<simple id>.service` unit.
 - [ ] **R4c — TAP/bridge drift:** detach/down TAP, down bridge, wrong MTU, gateway prefix and forwarding. Startup repairs all with unchanged VM PIDs and working guest traffic.
 - [ ] **R4d — DHCP drift:** corrupt hosts/base configuration and kill dnsmasq. The same lease revision restores service; the guest obtains its reserved IP again and traffic works.
 - [ ] **R4e — recovery retry:** helper outage reports `networkFailed`; retry returns 503. Start helper and `POST /api/network/reconcile` returns 204, refreshes results to `reconnected`, retains VM PIDs and restores traffic.
-- [ ] **R5 — Crash while the API is down:** after `kill -9` of Firecracker, the started API records `error` and removes the TAP and nft rules.
+- [ ] **R5 — Crash while the API is down:** after `kill -9` of Firecracker, the started API records `error`, removes the TAP and nft rules, and the VM keeps its IPv4 address.
 - [ ] **R6 — Interrupted start:** restarting the API after the shim appears but before `running` records `error` and leaves no unit.
 - [ ] **R7 — Normal stop:** V11 records `stopped`, `exit.json` has `"stop_requested":true`, and no `firecrab-vm-*` unit is failed.
 

@@ -785,6 +785,57 @@ mod tests {
         assert!(calls.contains(&"stop_vm_unit"), "{calls:?}");
     }
 
+    /// The address stays the VM's until the VM is deleted
+    /// (`Store::active_lease`): however a VM ended while the API was down,
+    /// teardown takes its TAP and policy but not its lease, so a later start
+    /// gets the same address and MAC back and nobody else is handed them
+    /// meanwhile.
+    #[tokio::test]
+    async fn a_vm_that_ended_while_the_api_was_down_keeps_its_address_lease() {
+        let endings = [
+            (
+                "clean-exit",
+                Some(r#"{"code":0,"signal":null,"stop_requested":false}"#),
+                VmState::Stopped,
+            ),
+            (
+                "requested-stop",
+                Some(r#"{"code":null,"signal":15,"stop_requested":true}"#),
+                VmState::Stopped,
+            ),
+            (
+                "crash",
+                Some(r#"{"code":null,"signal":9,"stop_requested":false}"#),
+                VmState::Error,
+            ),
+            ("vanished", None, VmState::Stopped),
+        ];
+        for (name, exit, ended_as) in endings {
+            let host = host().await;
+            let (id, runtime) = seed_active(&host, name, VmState::Running);
+            if let Some(exit) = exit {
+                write_exit(&runtime, exit);
+            }
+            let leased = host
+                .state
+                .store
+                .active_lease(id)
+                .unwrap()
+                .expect("seeded VMs are leased");
+
+            reconcile(&host.state).await;
+
+            assert_eq!(db_state(&host, id), Some(ended_as), "{name}");
+            let calls = host.helper_log.lock().unwrap().clone();
+            assert!(calls.contains(&"delete_tap"), "{name}: {calls:?}");
+            assert_eq!(
+                host.state.store.active_lease(id).unwrap(),
+                Some(leased),
+                "{name}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_shim_from_another_protocol_version_is_stopped_through_the_helper() {
         let host = host().await;

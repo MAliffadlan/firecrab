@@ -335,13 +335,15 @@ pass "R4e helper outage reported; operator retry restored networking with unchan
 host "nft delete table inet $SENTINEL"
 SENTINEL=
 
-# R5: a crash while the API is down is recorded from exit.json.
+# R5: a crash while the API is down is recorded from exit.json. The VM's
+# address stays reserved for it until it is deleted.
 host "systemctl stop firecrab-api; kill -9 $VMM; sleep 2; systemctl start firecrab-api"
 api_ready || fail R5 "API did not come back"
 [ "$(settled_state)" = error ] || fail R5 "VM is $(vm_state) after a crash, expected error"
 host "! ip link show $TAP >/dev/null 2>&1" || fail R5 "$TAP is still present"
 host "! nft list ruleset 2>/dev/null | grep -q '${VM%%-*}'" || fail R5 "nft rules for $VM are still present"
-pass "R5 crash while the API was down recorded error and removed $TAP"
+[ "$(curl -fsS --max-time 15 "$API/api/vms/$VM" | json_field ipv4)" = "$IPV4" ] || fail R5 "$VM lost its address $IPV4 after the crash"
+pass "R5 crash while the API was down recorded error, removed $TAP and kept $IPV4"
 
 # R6: a start the restart cuts short is killed and recorded as an error.
 start_vm

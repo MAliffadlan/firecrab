@@ -180,7 +180,7 @@ Every VM runs in its own `firecrab-vm-<simple id>.service` unit.
 | R4c | TAP/bridge drift | detach/down TAP, bridge down/wrong MTU/gateway prefix/forwarding; restart repairs all, guest traffic works, unchanged VM PIDs |
 | R4d | DHCP drift/failure | corrupt hosts/base config and kill dnsmasq at unchanged revision; restart restores serving reservations; guest renews DHCP and traffic works |
 | R4e | helper outage and operator retry | startup and retry failures report `networkFailed`/503; helper restoration + `POST /api/network/reconcile` gives 204 and `reconnected`, unchanged VM PIDs, guest traffic works |
-| R5 | crash while the API is down | stop the API, `kill -9` Firecracker, start the API → `error`; its `fct*` TAP and nft rules are gone |
+| R5 | crash while the API is down | stop the API, `kill -9` Firecracker, start the API → `error`; its `fct*` TAP and nft rules are gone; the VM keeps its IPv4 |
 | R6 | interrupted start | restart the API after the shim appears but before `running` → `error`; no unit remains |
 | R7 | normal stop | V11 → `stopped`; `exit.json` has `"stop_requested":true`; `systemctl --failed` lists no `firecrab-vm-*` unit |
 

@@ -4057,6 +4057,41 @@ while True:
         );
     }
 
+    /// The other half of the lease lifecycle: a lease outlives every stop,
+    /// crash and disappearance, and a delete is what frees it.
+    #[tokio::test]
+    async fn deleting_a_vm_frees_its_address_for_the_next_one() {
+        let directory = tempdir().unwrap();
+        let state = test_state(directory.path()).await;
+        let vm = record("leaving", Uuid::new_v4());
+        seed_vm(&state, &vm);
+        let leased = state
+            .store
+            .active_lease(vm.id)
+            .unwrap()
+            .expect("seeded VMs are leased");
+
+        let status = delete_vm(
+            State(state.clone()),
+            Extension(RequestId(Uuid::new_v4())),
+            axum::extract::Path(vm.id.to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(state.store.active_lease(vm.id).unwrap(), None);
+        // Addresses go out lowest-free first, so the freed one is next.
+        let next = state
+            .store
+            .allocate_lease(
+                Uuid::new_v4(),
+                SubnetSpec::legacy_default_subnet(Uuid::from_u128(1)),
+            )
+            .unwrap();
+        assert_eq!(next.ipv4, leased.ipv4);
+    }
+
     /// A delete that can't clear the artifact tree must not half-remove the
     /// VM: the record goes back into memory and the DB row survives.
     #[tokio::test]

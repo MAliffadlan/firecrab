@@ -326,7 +326,7 @@ CPU, RAM, 디스크, egress는 created, stopped, error에서만 수정한다. �
 - [ ] **R4c — TAP/브리지 변경:** TAP 분리·down, 브리지 down·잘못된 MTU·gateway prefix·forwarding을 API 시작 시 복구한다. VM PID가 유지되고 게스트 통신이 동작한다.
 - [ ] **R4d — DHCP 변경:** 예약·기본 설정 파일 손상과 dnsmasq 종료 후 같은 lease revision으로 서비스를 복구한다. 게스트가 예약 IP를 다시 받고 통신한다.
 - [ ] **R4e — 복구 재시도:** helper 중단 시 `networkFailed`와 재시도 503을 확인한다. helper 복구 후 `POST /api/network/reconcile`은 204를 반환하고 결과를 `reconnected`로 갱신한다. VM PID와 게스트 통신이 유지된다.
-- [ ] **R5 — API가 꺼진 동안 crash:** Firecracker를 `kill -9`한 뒤 시작한 API가 `error`를 기록하고 TAP과 nft 규칙을 제거한다.
+- [ ] **R5 — API가 꺼진 동안 crash:** Firecracker를 `kill -9`한 뒤 시작한 API가 `error`를 기록하고 TAP과 nft 규칙을 제거하며, VM은 IPv4 주소를 그대로 유지한다.
 - [ ] **R6 — 중단된 시작:** shim이 뜬 뒤 `running` 전에 API를 재시작하면 `error`가 기록되고 unit이 남지 않는다.
 - [ ] **R7 — 정상 중지:** V11이 `stopped`를 기록하고 `exit.json`에 `"stop_requested":true`가 있으며 failed 상태의 `firecrab-vm-*` unit이 없다.
 
