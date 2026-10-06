@@ -245,23 +245,24 @@ fn print_failure(error: &dyn std::error::Error) -> ExitCode {
 /// name: `tracing` derives its target from `module_path!()`, and Rust's crate
 /// identifier for a hyphenated bin target spells it with an underscore.
 fn init_tracing() {
-    init_tracing_with(std::io::stderr);
+    // `RUST_LOG` wins whenever it parses; the literal is only the fallback, so a
+    // malformed value degrades to the default instead of silencing the daemon.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "firecrab_helper=info".into());
+    init_tracing_with(std::io::stderr, filter);
 }
 
-/// Writer-parameterized so a test can capture output instead of writing to the
-/// journal. Splitting this out also keeps `run_cli` free of a global subscriber
-/// install, which would otherwise panic when `cargo test` runs several tests in
-/// one process.
-fn init_tracing_with<W>(writer: W)
+/// Writer- and filter-parameterized so a test can capture output and assert on it
+/// regardless of whatever `RUST_LOG` the developer has exported. Splitting this
+/// out also keeps `run_cli` free of a global subscriber install, which would
+/// otherwise panic when `cargo test` runs several tests in one process.
+fn init_tracing_with<W>(writer: W, filter: tracing_subscriber::EnvFilter)
 where
     W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
 {
     tracing_subscriber::fmt()
         .with_writer(writer)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "firecrab_helper=info".into()),
-        )
+        .with_env_filter(filter)
         .init();
 }
 
@@ -933,7 +934,12 @@ mod tests {
     #[tokio::test]
     async fn handle_connection_logs_and_closes_for_an_unauthorized_peer() {
         let capture = CaptureWriter::default();
-        init_tracing_with(capture.clone());
+        // Explicit filter: the assertions below must hold whatever `RUST_LOG`
+        // the developer happens to have exported.
+        init_tracing_with(
+            capture.clone(),
+            tracing_subscriber::EnvFilter::new("firecrab_helper=warn"),
+        );
         // Excludes this process's own uid, so the connecting peer is rejected.
         let config = Arc::new(HelperConfig::from_values_excluding_self(
             "/unused.sock",
@@ -943,11 +949,15 @@ mod tests {
 
         let handler = tokio::spawn(handle_connection(server, config));
 
-        let mut buf = Vec::new();
+        // Read into a real one-byte buffer: a zero-length read returns `Ok(0)`
+        // without touching the socket, which would make the closure assertion
+        // vacuous. So `Ok(0)` here is a genuine EOF, and a timeout means the
+        // handler hung rather than closing — either way it must not answer.
+        let mut buf = [0_u8; 1];
         let read = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buf)).await;
         assert!(
-            matches!(read, Ok(Ok(0)) | Err(_)),
-            "an unauthorized peer must not be answered"
+            matches!(read, Ok(Ok(0))),
+            "an unauthorized peer must be closed without a response, got {read:?}"
         );
         handler.await.expect("handler finished");
 
