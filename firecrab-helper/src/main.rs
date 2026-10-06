@@ -184,9 +184,11 @@ fn wants_teardown(args: &[String]) -> bool {
 
 /// Entry point: hands off to [`run_cli`], the testable half of `main` — this
 /// wrapper exists only because `#[tokio::main]` has to sit directly on
-/// `main` itself.
+/// `main` itself. The subscriber is installed here, before the teardown/run
+/// branch, so `--teardown` (which `install.sh` runs directly) still logs.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    init_tracing();
     run_cli(env::args().collect()).await
 }
 
@@ -219,6 +221,32 @@ fn print_failure(error: &dyn std::error::Error) -> ExitCode {
         source = cause.source();
     }
     ExitCode::FAILURE
+}
+
+/// Installs the process-wide subscriber. Same `RUST_LOG` model as
+/// `firecrab-api`, so one mental model covers both services. Diagnostics go to
+/// stderr, matching this daemon's existing `eprintln!` sites in `dhcp.rs` and
+/// `self_update.rs`; `firecrab-api` uses stdout because it is not a daemon whose
+/// failures are root-level.
+fn init_tracing() {
+    init_tracing_with(std::io::stderr);
+}
+
+/// Writer-parameterized so a test can capture output instead of writing to the
+/// journal. Splitting this out also keeps `run_cli` free of a global subscriber
+/// install, which would otherwise panic when `cargo test` runs several tests in
+/// one process.
+fn init_tracing_with<W>(writer: W)
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
+    tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "firecrab_net_helper=info".into()),
+        )
+        .init();
 }
 
 /// Removes every Firecrab-owned nftables table and network interface: the
