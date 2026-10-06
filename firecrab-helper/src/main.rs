@@ -158,11 +158,7 @@ impl HelperConfig {
         Ok(Self::build(socket_path, allowed_peer_uids, bridge_mtu))
     }
 
-    fn build(
-        socket_path: &str,
-        allowed_peer_uids: HashSet<u32>,
-        bridge_mtu: u32,
-    ) -> Self {
+    fn build(socket_path: &str, allowed_peer_uids: HashSet<u32>, bridge_mtu: u32) -> Self {
         Self {
             socket_path: PathBuf::from(socket_path),
             allowed_peer_uids,
@@ -398,7 +394,10 @@ async fn handle_connection(stream: UnixStream, config: Arc<HelperConfig>) {
     // anyway, because an unknown uid reaching a root-owned socket is exactly what an
     // operator wants to see in the journal.
     if !config.peer_allowed(peer.uid()) {
-        tracing::warn!(peer_uid = peer.uid(), "rejected connection from unauthorized uid");
+        tracing::warn!(
+            peer_uid = peer.uid(),
+            "rejected connection from unauthorized uid"
+        );
         return;
     }
 
@@ -414,7 +413,10 @@ async fn handle_connection(stream: UnixStream, config: Arc<HelperConfig>) {
                     return;
                 }
                 Err(_) => {
-                    tracing::warn!(peer_uid = peer.uid(), "request read timed out; closing connection");
+                    tracing::warn!(
+                        peer_uid = peer.uid(),
+                        "request read timed out; closing connection"
+                    );
                     return;
                 }
             };
@@ -898,7 +900,10 @@ mod tests {
 
     impl io::Write for CaptureWriter {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().expect("capture buffer").extend_from_slice(buf);
+            self.0
+                .lock()
+                .expect("capture buffer")
+                .extend_from_slice(buf);
             Ok(buf.len())
         }
 
