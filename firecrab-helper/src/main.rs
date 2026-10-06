@@ -155,14 +155,30 @@ impl HelperConfig {
             allowed_peer_uids.insert(uid);
         }
 
-        Ok(Self {
+        Ok(Self::build(socket_path, allowed_peer_uids, bridge_mtu))
+    }
+
+    fn build(
+        socket_path: &str,
+        allowed_peer_uids: HashSet<u32>,
+        bridge_mtu: u32,
+    ) -> Self {
+        Self {
             socket_path: PathBuf::from(socket_path),
             allowed_peer_uids,
             bridge_mtu,
             firewall: firewall::FirewallActor::new(),
             bridge: bridge::BridgeActor::new(),
             dhcp: dhcp::DhcpActor::new(),
-        })
+        }
+    }
+
+    /// Same as [`Self::from_values`] without trusting this process's own uid,
+    /// so a test can be the rejected peer. `handle_connection` refuses before
+    /// the socket path is read, so `socket_path` is never used.
+    #[cfg(test)]
+    fn from_values_excluding_self(socket_path: &str, bridge_mtu: u32) -> Self {
+        Self::build(socket_path, HashSet::new(), bridge_mtu)
     }
 
     /// Whether `uid` is on the allowlist.
@@ -228,6 +244,10 @@ fn print_failure(error: &dyn std::error::Error) -> ExitCode {
 /// stderr, matching this daemon's existing `eprintln!` sites in `dhcp.rs` and
 /// `self_update.rs`; `firecrab-api` uses stdout because it is not a daemon whose
 /// failures are root-level.
+///
+/// The default target is `firecrab_helper`, not the `firecrab-helper` binary
+/// name: `tracing` derives its target from `module_path!()`, and Rust's crate
+/// identifier for a hyphenated bin target spells it with an underscore.
 fn init_tracing() {
     init_tracing_with(std::io::stderr);
 }
@@ -244,7 +264,7 @@ where
         .with_writer(writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "firecrab_net_helper=info".into()),
+                .unwrap_or_else(|_| "firecrab_helper=info".into()),
         )
         .init();
 }
@@ -367,9 +387,18 @@ enum AfterResponse {
 /// Serves requests on one accepted connection until it errors, times out, or
 /// a version-mismatch response is sent.
 async fn handle_connection(stream: UnixStream, config: Arc<HelperConfig>) {
-    let Ok(peer) = stream.peer_cred() else { return };
-    // Silent close: unauthenticated peers learn nothing about the protocol.
+    let peer = match stream.peer_cred() {
+        Ok(peer) => peer,
+        Err(error) => {
+            tracing::warn!(%error, "peer credentials unavailable; closing connection");
+            return;
+        }
+    };
+    // Silent close: unauthenticated peers learn nothing about the protocol. Logged
+    // anyway, because an unknown uid reaching a root-owned socket is exactly what an
+    // operator wants to see in the journal.
     if !config.peer_allowed(peer.uid()) {
+        tracing::warn!(peer_uid = peer.uid(), "rejected connection from unauthorized uid");
         return;
     }
 
@@ -378,11 +407,19 @@ async fn handle_connection(stream: UnixStream, config: Arc<HelperConfig>) {
         let envelope: NetworkRequestEnvelope =
             match timeout(REQUEST_TIMEOUT, read_frame(&mut reader)).await {
                 Ok(Ok(envelope)) => envelope,
-                // EOF, oversized, malformed, or a stalled partial frame all
-                // end the connection without a response.
-                Ok(Err(_)) | Err(_) => return,
+                // EOF, oversized, and malformed frames all land here, as does
+                // a peer that simply went away.
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "closing connection");
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!(peer_uid = peer.uid(), "request read timed out; closing connection");
+                    return;
+                }
             };
 
+        let request_id = envelope.request_id;
         let caller = vm_unit::Peer {
             uid: peer.uid(),
             gid: peer.gid(),
@@ -393,7 +430,13 @@ async fn handle_connection(stream: UnixStream, config: Arc<HelperConfig>) {
             response.result,
             Err(HelperFailure::UnsupportedVersion { .. })
         );
-        let wrote = write_frame(&mut writer, &response).await.is_ok();
+        let wrote = match write_frame(&mut writer, &response).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%request_id, %error, "failed to write response");
+                false
+            }
+        };
         if after == AfterResponse::RestartUnits {
             // Best-effort clean FIN so the CLI sees the frame end before we go
             // away. The restart runs even when `wrote` is false: the binaries
@@ -827,7 +870,7 @@ mod tests {
     use super::*;
     use core::assert_matches;
 
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
     use uuid::Uuid;
 
@@ -847,6 +890,71 @@ mod tests {
             .prefix("fc-net")
             .tempdir_in("/tmp")
             .expect("create tempdir")
+    }
+
+    /// Captures subscriber output so a test can assert on log content.
+    #[derive(Clone, Default)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("capture buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CaptureWriter {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl CaptureWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("capture buffer").clone())
+                .expect("utf-8 log output")
+        }
+    }
+
+    /// A rejected peer is both closed out without a response *and* recorded,
+    /// which is the whole point of the log line: the journal is the only place
+    /// an operator can see an unknown uid knocking on the root-owned socket.
+    #[tokio::test]
+    async fn handle_connection_logs_and_closes_for_an_unauthorized_peer() {
+        let capture = CaptureWriter::default();
+        init_tracing_with(capture.clone());
+        // Excludes this process's own uid, so the connecting peer is rejected.
+        let config = Arc::new(HelperConfig::from_values_excluding_self(
+            "/unused.sock",
+            bridge::DEFAULT_BRIDGE_MTU,
+        ));
+        let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+
+        let handler = tokio::spawn(handle_connection(server, config));
+
+        let mut buf = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buf)).await;
+        assert!(
+            matches!(read, Ok(Ok(0)) | Err(_)),
+            "an unauthorized peer must not be answered"
+        );
+        handler.await.expect("handler finished");
+
+        let logged = capture.contents();
+        assert!(
+            logged.contains("rejected connection from unauthorized uid"),
+            "rejection must be logged: {logged}"
+        );
+        assert!(
+            logged.contains(&effective_uid().to_string()),
+            "the rejected uid must be recorded: {logged}"
+        );
     }
 
     fn start_helper(
