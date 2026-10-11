@@ -1,7 +1,9 @@
 mod daemon;
 mod dev;
+mod filesystem;
 mod forward;
 mod lifecycle;
+mod processes;
 mod provision;
 mod repair;
 
@@ -85,6 +87,7 @@ impl Error {
                 daemon::Error::Launchctl { .. }
                 | daemon::Error::ReadyTimeout(_)
                 | daemon::Error::StopTimeout(_)
+                | daemon::Error::Processes(_)
                 | daemon::Error::InvalidMarker(_)
                 | daemon::Error::Io {
                     action:
@@ -217,7 +220,7 @@ fn run_repair() -> Result<i32, Error> {
     let status = repair::run(&layout)?;
     print_daemon_status(&status, &layout);
     report!("[PASS] management SSH and guest services: ready");
-    report!("microManager repaired (installed binaries and managed disks preserved)");
+    report!("microManager repaired (data disk, credentials, and installed binaries preserved)");
     Ok(0)
 }
 

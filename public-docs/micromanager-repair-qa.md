@@ -14,11 +14,13 @@ The test does not install, reinstall, download, or deploy source binaries.
 
 ```sh
 cargo build -p firecrab-cli --locked
+scripts/build-micromanager-macos.sh target/debug/firecrab-micromanager-macos
 scripts/ci-qa-macos-e2e.sh repair
 ```
 
 The wrapper prefers this checkout's `target/debug/firecrab`.
-The installed helper, CLI, disks, and SSH key remain in place.
+The installed helper, CLI, data disk, and SSH key remain in place.
+The healthy runtime scenario also requires the original OS disk identity.
 Default managed paths are the ones used by `service install`.
 For a custom installation, set both variables to its existing absolute paths:
 
@@ -57,13 +59,14 @@ baseline can only be captured after that repair.
 
 ## Progress (G7b)
 
-Before each operation, require `[REPAIR 1/5]` through `[REPAIR 5/5]` for
-validation, shutdown, registration, VM/API startup, and SSH/guest checks.
+Before each operation, require `[REPAIR 1/6]` through `[REPAIR 6/6]` for
+validation, shutdown/helper cleanup, OS backup/repair, registration, VM/API
+startup, and SSH/guest checks.
 Pending readiness and shutdown waits must print elapsed time and current state
 again every ten seconds. The local VM/API readiness deadline is ten seconds;
 shutdown keeps its forty-second deadline. An unready VM/API must time out instead
 of reporting success. A failed validation must not print the shutdown stage.
-Each successful runtime repair also checks G7b for all five stages in order.
+Each successful runtime repair also checks G7b for all six stages in order.
 An unhealthy guest must still fail; progress output does not mean recovery passed.
 Use `service debug --logs` to inspect the console when boot cannot finish.
 The native daemon tests exercise pending-to-ready, repeated progress through a
@@ -72,6 +75,40 @@ timeout, and immediate lost-service/probe-error returns without booting a VM:
 ```sh
 cargo test -p firecrab-cli --bin firecrab micromanager::macos::daemon::tests --locked
 ```
+
+## Offline OS recovery (G7c/G7d)
+
+The helper uses `break=premount` from [Debian initramfs-tools](https://manpages.debian.org/trixie/initramfs-tools-core/initramfs-tools.7.en.html).
+It checks only `/dev/vda1` on a private OS copy. A failed read-only check may run
+`fsck.ext4 -f -y`; a second read-only pass must return zero before commit.
+[Debian e2fsck](https://manpages.debian.org/trixie/e2fsprogs/e2fsck.8.en.html)
+documents the accepted correction exits (0–3) and unresolved errors (4).
+The VM attaches no data disk, directory share, or network. VM/API readiness
+keeps its ten-second deadline; offline filesystem checks use 120 seconds.
+
+Create tiny normal and unattached-inode fixtures under temporary storage.
+The generator requires existing e2fsprogs tools; it reads only the chosen kernel
+and initrd. It refuses an existing output directory.
+
+```sh
+python3 scripts/create-macos-repair-fixture.py \
+  --kernel /absolute/path/system/Image \
+  --initrd /absolute/path/system/initrd.img \
+  --output /private/tmp/firecrab-repair-fixtures
+python3 scripts/ci-qa-macos-os-repair.py \
+  --helper "$PWD/target/debug/firecrab-micromanager-macos" \
+  --fixture-home /private/tmp/firecrab-repair-fixtures/corrupt \
+  --results-dir "$PWD/target/qa/os-repair-corrupt"
+```
+
+Repeat with `clean` and a new results directory. Require helper exit zero,
+`verify_exit=0`, and original OS/data/SSH hash and inode preservation. The corrupt
+case must report `changed=true`; the clean case skips correction. Logs and JSON
+snapshots remain after failures. Installed/default homes, symlinked paths,
+aliased staged images, and open images are rejected before helper execution.
+Native Rust tests verify commit, backup preservation, timeout rollback, and
+scoped cleanup of disposable helper processes. Swift tests check VM locking,
+recovery-copy validation, and stop completion without a delegate callback.
 
 ## Results and restoration
 
@@ -97,7 +134,7 @@ Backups remain available for inspection.
 The Python guard/restoration contract runs in GitHub CI without virtualization:
 
 ```sh
-python3 -m unittest scripts/test_macos_repair_qa.py
+python3 -m unittest scripts/test_macos_repair_qa.py scripts/test_macos_os_repair_qa.py
 cargo test -p firecrab-cli --test macos_service_recovery --locked
 ```
 

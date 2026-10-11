@@ -82,9 +82,9 @@ fn failed_repair_does_not_suggest_repair_again() {
     let output = service(root.path(), &["repair"]);
     assert!(!output.status.success());
     let progress = String::from_utf8(output.stdout).unwrap();
-    assert!(progress.contains("[REPAIR 1/5]"), "{progress}");
+    assert!(progress.contains("[REPAIR 1/6]"), "{progress}");
     assert!(
-        !progress.contains("[REPAIR 2/5]"),
+        !progress.contains("[REPAIR 2/6]"),
         "validation must precede stopping: {progress}"
     );
     let error = String::from_utf8(output.stderr).unwrap();

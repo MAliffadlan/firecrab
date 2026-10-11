@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use super::super::{managed_home, report};
-use super::{daemon, lifecycle::Layout, provision};
+use super::{daemon, filesystem, lifecycle::Layout, provision};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -18,6 +18,8 @@ pub enum Error {
     NotExecutable(PathBuf),
     #[error(transparent)]
     Provision(#[from] provision::Error),
+    #[error(transparent)]
+    Filesystem(#[from] filesystem::Error),
     #[error("microManager repair failed: {0}; inspect `firecrab service debug --logs`")]
     Daemon(#[from] daemon::Error),
     #[error("microManager repair failed: {0}; inspect `firecrab service debug --logs`")]
@@ -25,17 +27,21 @@ pub enum Error {
 }
 
 pub fn run(layout: &Layout) -> Result<daemon::Status, Error> {
-    report!("[REPAIR 1/5] validate installed files and provisioning");
+    report!("[REPAIR 1/6] validate installed files and provisioning");
     validate(layout)?;
+    let helper = repair_helper(layout);
+    filesystem::require_helper(&helper)?;
     let key = layout.managed_home.join("runtime/manager_ed25519");
-    report!("[REPAIR 2/5] stop the resident service and management VM");
+    report!("[REPAIR 2/6] stop the resident service and management VM");
     daemon::stop(layout)?;
-    report!("[REPAIR 3/5] rebuild the launchd plist and daemon wrapper");
+    report!("[REPAIR 3/6] back up, check, and repair the OS filesystem offline");
+    filesystem::repair(layout, &helper)?;
+    report!("[REPAIR 4/6] rebuild the launchd plist and daemon wrapper");
     daemon::install(layout, &layout.helper_path(), &key)?;
-    report!("[REPAIR 4/5] start the management VM and wait for the API");
+    report!("[REPAIR 5/6] start the management VM and wait for the API");
     let status = daemon::start(layout)?;
     let ip = running_manager(&status)?;
-    report!("[REPAIR 5/5] check management SSH and guest services");
+    report!("[REPAIR 6/6] check management SSH and guest services");
     let guest = super::guest_units(layout, ip);
     if guest.state != "pass" {
         return Err(Error::Unhealthy(format!(
@@ -44,6 +50,18 @@ pub fn run(layout: &Layout) -> Result<daemon::Status, Error> {
         )));
     }
     Ok(status)
+}
+
+fn repair_helper(layout: &Layout) -> PathBuf {
+    let candidate = super::helper_path(
+        std::env::var_os(super::HELPER_ENV),
+        std::env::current_exe().ok().as_deref(),
+    );
+    if candidate.is_file() {
+        candidate
+    } else {
+        layout.helper_path()
+    }
 }
 
 /// Reject an incomplete installation before stopping a currently running service.

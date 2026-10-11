@@ -32,8 +32,8 @@ class RepairQA(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("preserved\n")
 
-    def test_progress_requires_all_five_stages_in_order(self):
-        stages = [f"[REPAIR {step}/5] operation" for step in range(1, 6)]
+    def test_progress_requires_all_six_stages_in_order(self):
+        stages = [f"[REPAIR {step}/6] operation" for step in range(1, 7)]
         output = "\n[WAIT] pending\n".join(stages) + "\n[PASS] ready\n"
         qa.require_repair_progress(output)
         for lines in (stages[:-1], stages[::-1], stages + [stages[-1]], []):

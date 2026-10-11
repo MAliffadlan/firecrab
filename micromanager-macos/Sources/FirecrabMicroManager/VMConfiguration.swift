@@ -234,14 +234,15 @@ enum ManagementVMConfiguration {
     static func make(
         options: VMOptions,
         consoleInput: FileHandle = .standardInput,
-        consoleOutput: FileHandle = .standardOutput
+        consoleOutput: FileHandle = .standardOutput,
+        repairingOS: Bool = false
     ) throws -> VZVirtualMachineConfiguration {
         guard VZVirtualMachine.isSupported else {
             throw MicroManagerError.unsupported(
                 "Virtualization.framework is unavailable; run `firecrab service doctor`."
             )
         }
-        guard VZGenericPlatformConfiguration.isNestedVirtualizationSupported else {
+        guard repairingOS || VZGenericPlatformConfiguration.isNestedVirtualizationSupported else {
             throw MicroManagerError.unsupported(
                 "nested virtualization is unavailable; an M3-or-later supported host is required"
             )
@@ -253,13 +254,15 @@ enum ManagementVMConfiguration {
             try validateRegularFile(initialRamdiskURL, label: "initrd", writable: false)
         }
         try validateRegularFile(options.osDiskURL, label: "OS disk", writable: true)
-        try validateRegularFile(options.dataDiskURL, label: "data disk", writable: true)
-        try validateSeparateDisks(options.osDiskURL, options.dataDiskURL)
+        if !repairingOS {
+            try validateRegularFile(options.dataDiskURL, label: "data disk", writable: true)
+            try validateSeparateDisks(options.osDiskURL, options.dataDiskURL)
+        }
 
         let memorySize = try validatedMemorySize(options)
 
         let platform = VZGenericPlatformConfiguration()
-        platform.isNestedVirtualizationEnabled = true
+        platform.isNestedVirtualizationEnabled = !repairingOS
 
         let bootLoader = VZLinuxBootLoader(kernelURL: options.kernelURL)
         bootLoader.initialRamdiskURL = options.initialRamdiskURL
@@ -269,12 +272,15 @@ enum ManagementVMConfiguration {
             url: options.osDiskURL,
             readOnly: false
         )
-        let dataAttachment = try VZDiskImageStorageDeviceAttachment(
-            url: options.dataDiskURL,
-            readOnly: false
-        )
-
-        let network = try makeNetwork(managedHomeURL: options.managedHomeURL)
+        var storage: [VZStorageDeviceConfiguration] = [
+            VZVirtioBlockDeviceConfiguration(attachment: osAttachment),
+        ]
+        if !repairingOS {
+            let dataAttachment = try VZDiskImageStorageDeviceAttachment(
+                url: options.dataDiskURL, readOnly: false
+            )
+            storage.append(VZVirtioBlockDeviceConfiguration(attachment: dataAttachment))
+        }
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration()
         console.attachment = VZFileHandleSerialPortAttachment(
@@ -282,25 +288,20 @@ enum ManagementVMConfiguration {
             fileHandleForWriting: consoleOutput
         )
 
-        let sharedDirectory = VZSharedDirectory(
-            url: options.managedHomeURL,
-            readOnly: false
-        )
-        let fileSystem = VZVirtioFileSystemDeviceConfiguration(tag: "firecrab")
-        fileSystem.share = VZSingleDirectoryShare(directory: sharedDirectory)
-
         let configuration = VZVirtualMachineConfiguration()
         configuration.platform = platform
         configuration.bootLoader = bootLoader
         configuration.cpuCount = options.cpuCount
         configuration.memorySize = memorySize
-        configuration.storageDevices = [
-            VZVirtioBlockDeviceConfiguration(attachment: osAttachment),
-            VZVirtioBlockDeviceConfiguration(attachment: dataAttachment),
-        ]
-        configuration.networkDevices = [network]
+        configuration.storageDevices = storage
         configuration.serialPorts = [console]
-        configuration.directorySharingDevices = [fileSystem]
+        if !repairingOS {
+            configuration.networkDevices = [try makeNetwork(managedHomeURL: options.managedHomeURL)]
+            let sharedDirectory = VZSharedDirectory(url: options.managedHomeURL, readOnly: false)
+            let fileSystem = VZVirtioFileSystemDeviceConfiguration(tag: "firecrab")
+            fileSystem.share = VZSingleDirectoryShare(directory: sharedDirectory)
+            configuration.directorySharingDevices = [fileSystem]
+        }
         configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         configuration.memoryBalloonDevices = [
             VZVirtioTraditionalMemoryBalloonDeviceConfiguration(),
@@ -436,7 +437,7 @@ private func validateRegularFile(_ url: URL, label: String, writable: Bool) thro
     }
 }
 
-private func validateSeparateDisks(_ osDiskURL: URL, _ dataDiskURL: URL) throws {
+func validateSeparateDisks(_ osDiskURL: URL, _ dataDiskURL: URL) throws {
     if osDiskURL == dataDiskURL {
         throw MicroManagerError.invalidArtifact(
             "OS disk and persistent data disk must be different files"

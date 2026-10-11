@@ -36,7 +36,7 @@ def require(condition, detail):
 def require_repair_progress(output):
     stages = [line.split("]", 1)[0] + "]" for line in output.splitlines()
               if line.startswith("[REPAIR ")]
-    expected = [f"[REPAIR {step}/5]" for step in range(1, 6)]
+    expected = [f"[REPAIR {step}/6]" for step in range(1, 7)]
     require(stages == expected, f"G7b repair stages missing, duplicated, or out of order: {stages}")
 
 

@@ -45,6 +45,8 @@ impl Status {
 pub enum Error {
     #[error("HOME is not set; launchd service installation needs a user home")]
     MissingHome,
+    #[error("the loaded microManager service belongs to another managed home; refusing to stop it")]
+    ForeignService,
     #[error("could not {action} {path}: {source}")]
     Io {
         action: &'static str,
@@ -59,6 +61,8 @@ pub enum Error {
     },
     #[error("management daemon did not become ready within {0} seconds")]
     ReadyTimeout(u64),
+    #[error(transparent)]
+    Processes(#[from] super::processes::Error),
     #[error("management VM did not stop within {0} seconds")]
     StopTimeout(u64),
     #[error("invalid manager-ready marker: {0}")]
@@ -256,22 +260,25 @@ fn wait_ready(
 
 fn stop_if_loaded(layout: &Layout) -> Result<(), Error> {
     let paths = paths(layout)?;
-    let vm_pid = fs::read_to_string(&paths.ready)
+    let vm_pid = fs::read_to_string(layout.managed_home.join("runtime/vm-process"))
+        .or_else(|_| fs::read_to_string(&paths.ready))
         .ok()
         .and_then(|marker| vm_pid_from_marker(&marker));
     let domain = domain(layout)?;
     let service = format!("{domain}/{LABEL}");
-    let loaded = ProcessCommand::new("/bin/launchctl")
+    let registered = ProcessCommand::new("/bin/launchctl")
         .args(["print", &service])
         .output()
-        .map_err(|source| io_error("query launchd service", &paths.plist, source))?
-        .status
-        .success();
-    if loaded {
+        .map_err(|source| io_error("query launchd service", &paths.plist, source))?;
+    if registered.status.success() {
+        if !registered_wrapper_matches(&registered.stdout, &paths.wrapper) {
+            return Err(Error::ForeignService);
+        }
         // The registered job can outlive a deleted or damaged plist.
         report!("[STOP] request launchd service and management VM shutdown");
         launchctl("bootout", &[&service], false)?;
     }
+    super::processes::stop_helpers(layout)?;
     let started = Instant::now();
     let mut next_report = Duration::ZERO;
     loop {
@@ -308,7 +315,20 @@ fn stop_if_loaded(layout: &Layout) -> Result<(), Error> {
         thread::sleep(Duration::from_secs(1));
     }
     let _ = fs::remove_file(paths.ready);
+    let _ = fs::remove_file(layout.managed_home.join("runtime/vm-process"));
     Ok(())
+}
+
+fn registered_wrapper_matches(output: &[u8], wrapper: &Path) -> bool {
+    let text = String::from_utf8_lossy(output);
+    let Some(arguments) = text.split_once("arguments = {\n").map(|(_, rest)| rest) else {
+        return false;
+    };
+    arguments
+        .lines()
+        .map(str::trim)
+        .take_while(|line| *line != "}")
+        .any(|line| Path::new(line) == wrapper)
 }
 
 fn vm_pid_from_marker(marker: &str) -> Option<u32> {
@@ -421,6 +441,7 @@ manager_ready={manager_ready}
 console={console}
 known_hosts={known_hosts}
 platform={platform}
+vm_process="$root/runtime/vm-process"
 vm_pid=
 tunnel_pid=
 relay_pid=
@@ -451,11 +472,16 @@ cleanup() {{
     kill -KILL "$vm_pid" 2>/dev/null || true
     wait "$vm_pid" 2>/dev/null || true
   fi
+  if [ "$(sed -n 's/^vm_pid=//p' "$vm_process" 2>/dev/null)" = "$vm_pid" ]; then
+    rm -f "$vm_process"
+  fi
 }}
 trap cleanup EXIT INT TERM
 rm -f "$ready" "$manager_ready"
 FIRECRAB_MICROMANAGER_HOME="$root" "$helper" run >>"$console" 2>&1 &
 vm_pid=$!
+printf 'vm_pid=%s\n' "$vm_pid" >"$vm_process.tmp"
+mv -f "$vm_process.tmp" "$vm_process"
 for _ in $(seq 1 120); do
   [ -f "$manager_ready" ] && break
   kill -0 "$vm_pid" 2>/dev/null || exit 1
@@ -624,6 +650,21 @@ fn io_error(action: &'static str, path: &Path, source: io::Error) -> Error {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn loaded_service_must_use_the_requested_home_wrapper() {
+        let wrapper = Path::new("/tmp/home with spaces/runtime/daemon.sh");
+        let output = b"job = {\n\targuments = {\n\t\t/bin/bash\n\t\t/tmp/home with spaces/runtime/daemon.sh\n\t}\n}\n";
+        assert!(registered_wrapper_matches(output, wrapper));
+        assert!(!registered_wrapper_matches(
+            output,
+            Path::new("/tmp/other/runtime/daemon.sh")
+        ));
+        assert!(!registered_wrapper_matches(
+            b"stdout path = /tmp/home with spaces/runtime/daemon.sh\n",
+            wrapper
+        ));
+    }
 
     fn pending_status() -> Status {
         Status {
