@@ -42,7 +42,9 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Fixed
 
-- None.
+- macOS service repair prints all five stages. Service start and repair report
+  VM/API readiness and elapsed time every ten seconds while waiting. Shutdown
+  waits also report launchd/VM state without changing readiness or time limits.
 
 ### Improved
 

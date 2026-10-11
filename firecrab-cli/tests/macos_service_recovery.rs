@@ -81,6 +81,12 @@ fn failed_repair_does_not_suggest_repair_again() {
     let root = tempfile::tempdir().unwrap();
     let output = service(root.path(), &["repair"]);
     assert!(!output.status.success());
+    let progress = String::from_utf8(output.stdout).unwrap();
+    assert!(progress.contains("[REPAIR 1/5]"), "{progress}");
+    assert!(
+        !progress.contains("[REPAIR 2/5]"),
+        "validation must precede stopping: {progress}"
+    );
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("firecrab service reinstall"), "{error}");
     assert!(!error.contains("Recovery:"), "{error}");

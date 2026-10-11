@@ -55,6 +55,22 @@ If initial SSH is already unavailable, the first repair also checks recovery
 from that condition. Results record a WARNING because the guest configuration
 baseline can only be captured after that repair.
 
+## Progress (G7b)
+
+Before each operation, require `[REPAIR 1/5]` through `[REPAIR 5/5]` for
+validation, shutdown, registration, VM/API startup, and SSH/guest checks.
+Pending readiness and shutdown waits must print elapsed time and current state
+again every ten seconds. A failed validation must not print the shutdown stage.
+Each successful runtime repair also checks G7b for all five stages in order.
+An unhealthy guest must still fail; progress output does not mean recovery passed.
+Use `service debug --logs` to inspect the console when boot cannot finish.
+The native daemon tests exercise pending-to-ready, repeated progress through a
+timeout, and immediate lost-service/probe-error returns without booting a VM:
+
+```sh
+cargo test -p firecrab-cli --bin firecrab micromanager::macos::daemon::tests --locked
+```
+
 ## Results and restoration
 
 Results default to `target/qa/macos-repair/<timestamp>/`:

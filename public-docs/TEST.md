@@ -144,6 +144,7 @@ A17 required tools: ip nft dnsmasq mkfs.ext4 firecracker sha256sum
 - [ ] **G6h — Windows:** shell exit leaves API/helper active and the host API responsive.
 - [ ] **G7 — macOS repair:** `service repair` restores the service and localhost API without downloads or replacing installed binaries, disks, SSH keys, or development overrides. It also recovers a missing/damaged daemon wrapper or launchd plist. Missing installation assets fail before the service stops; unhealthy SSH/guest services/API fail with a nonzero exit code.
 - [ ] **G7a — macOS recovery advice:** service runtime failures suggest `firecrab service repair` without running it. Lost registration in a completed installation suggests repair; a new host suggests install. Source/compiler failures keep their own errors, and `debug --json` stays valid JSON with advice inside its fields.
+- [ ] **G7b — macOS repair progress:** repair prints validation, shutdown, registration, startup, and SSH/guest-check stages before each operation. Pending VM/API and shutdown waits report elapsed time and current state every ten seconds. Progress never changes readiness checks, exit codes, or time limits.
 - [ ] **H1 — Update status:** read-only status check succeeds.
 - [ ] **H2 — Host network:** an uplink is present; loopback and internal helper interfaces are absent from the picker.
 - [ ] **U1 — Update apply (optional separate run):** apply update; host recovers and API returns 200.

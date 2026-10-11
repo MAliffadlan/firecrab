@@ -32,6 +32,24 @@ class RepairQA(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("preserved\n")
 
+    def test_progress_requires_all_five_stages_in_order(self):
+        stages = [f"[REPAIR {step}/5] operation" for step in range(1, 6)]
+        output = "\n[WAIT] pending\n".join(stages) + "\n[PASS] ready\n"
+        qa.require_repair_progress(output)
+        for lines in (stages[:-1], stages[::-1], stages + [stages[-1]], []):
+            with self.assertRaisesRegex(qa.QAError, "G7b"):
+                qa.require_repair_progress("\n".join(lines))
+
+    def test_successful_repair_without_progress_fails_the_runtime_qa(self):
+        runner = qa.QA("cli", self.home, self.install, self.root / "results")
+        self.addCleanup(runner.log.close)
+        with patch.object(runner, "service", return_value=SimpleNamespace(stdout="ready\n")):
+            with redirect_stdout(io.StringIO()), self.assertRaises(qa.QAError):
+                runner.repair()
+        check = runner.summary["checks"][-1]
+        self.assertEqual(check["id"], "G7b")
+        self.assertEqual(check["status"], "FAILED")
+
     def test_running_transitional_and_unknown_vms_block_mutation(self):
         for state in ("running", "starting", "stopping", "unknown", None):
             with self.assertRaises(qa.QAError):

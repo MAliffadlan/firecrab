@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 use firecrab_api_types::HostOs;
 
 use super::super::host_platform::{self, HOST_PLATFORM_DESCRIPTOR_PATH};
+use super::super::report;
 use super::lifecycle::Layout;
 
 const LABEL: &str = "io.firecrab.micromanager";
 const API_URL: &str = "http://127.0.0.1:5523/api/host";
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub struct DaemonPaths {
@@ -120,6 +122,7 @@ pub fn start(layout: &Layout) -> Result<Status, Error> {
     write_host_platform(&paths)?;
     let _ = fs::remove_file(&paths.ready);
     let _ = fs::remove_file(&paths.manager_ready);
+    report!("[START] load the launchd service and boot the management VM");
     launchctl(
         "bootstrap",
         &[
@@ -128,7 +131,26 @@ pub fn start(layout: &Layout) -> Result<Status, Error> {
         ],
         false,
     )?;
-    wait_ready(layout, Duration::from_secs(180))
+    let timeout = Duration::from_secs(180);
+    report!(
+        "[WAIT] VM/API readiness (up to {}s); console: {}",
+        timeout.as_secs(),
+        layout.managed_home.join("runtime/vm-console.log").display()
+    );
+    wait_ready(
+        timeout,
+        || status(layout),
+        |elapsed, status| {
+            report!(
+                "[WAIT] VM/API: {}s/{}s; launchd loaded={}, VM ready={}, API reachable={}",
+                elapsed.as_secs(),
+                timeout.as_secs(),
+                status.loaded,
+                status.ready,
+                status.api_reachable
+            );
+        },
+    )
 }
 
 /// `launchctl bootstrap` of a missing plist reports only "Input/output error".
@@ -210,15 +232,22 @@ fn write_host_platform(paths: &DaemonPaths) -> Result<(), Error> {
     write_atomic(&paths.platform, format!("{descriptor}\n").as_bytes(), 0o600)
 }
 
-fn wait_ready(layout: &Layout, timeout: Duration) -> Result<Status, Error> {
+fn wait_ready(
+    timeout: Duration,
+    mut probe: impl FnMut() -> Result<Status, Error>,
+    mut progress: impl FnMut(Duration, &Status),
+) -> Result<Status, Error> {
     let started = Instant::now();
+    let mut next_report = Duration::ZERO;
     while started.elapsed() < timeout {
-        let status = status(layout)?;
-        if status.success() {
+        let status = probe()?;
+        if status.success() || !status.loaded {
             return Ok(status);
         }
-        if !status.loaded {
-            return Ok(status);
+        let elapsed = started.elapsed();
+        if elapsed >= next_report {
+            progress(elapsed, &status);
+            next_report = elapsed + PROGRESS_INTERVAL;
         }
         thread::sleep(Duration::from_secs(1));
     }
@@ -240,9 +269,11 @@ fn stop_if_loaded(layout: &Layout) -> Result<(), Error> {
         .success();
     if loaded {
         // The registered job can outlive a deleted or damaged plist.
+        report!("[STOP] request launchd service and management VM shutdown");
         launchctl("bootout", &[&service], false)?;
     }
     let started = Instant::now();
+    let mut next_report = Duration::ZERO;
     loop {
         let still_loaded = ProcessCommand::new("/bin/launchctl")
             .args(["print", &service])
@@ -261,8 +292,18 @@ fn stop_if_loaded(layout: &Layout) -> Result<(), Error> {
         if !still_loaded && !vm_alive {
             break;
         }
-        if started.elapsed() >= Duration::from_secs(40) {
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_secs(40) {
             return Err(Error::StopTimeout(40));
+        }
+        if elapsed >= next_report {
+            report!(
+                "[WAIT] service shutdown: {}s/40s; launchd loaded={}, VM running={}",
+                elapsed.as_secs(),
+                still_loaded,
+                vm_alive
+            );
+            next_report = elapsed + PROGRESS_INTERVAL;
         }
         thread::sleep(Duration::from_secs(1));
     }
@@ -583,6 +624,77 @@ fn io_error(action: &'static str, path: &Path, source: io::Error) -> Error {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    fn pending_status() -> Status {
+        Status {
+            loaded: true,
+            ready: false,
+            api_reachable: false,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn readiness_progress_precedes_success_and_keeps_the_health_check() {
+        let mut probes = 0;
+        let mut updates = Vec::new();
+        let result = wait_ready(
+            Duration::from_secs(5),
+            || {
+                probes += 1;
+                let mut status = pending_status();
+                if probes == 2 {
+                    status.ready = true;
+                    status.api_reachable = true;
+                }
+                Ok(status)
+            },
+            |elapsed, status| updates.push((elapsed, status.success())),
+        )
+        .unwrap();
+        assert!(result.success());
+        assert_eq!(probes, 2);
+        assert_eq!(updates.len(), 1);
+        assert!(!updates[0].1);
+    }
+
+    #[test]
+    fn an_unhealthy_vm_reports_again_while_waiting_and_still_times_out() {
+        let mut updates = Vec::new();
+        let result = wait_ready(
+            Duration::from_secs(12),
+            || Ok(pending_status()),
+            |elapsed, status| updates.push((elapsed, status.clone())),
+        );
+        assert!(matches!(result, Err(Error::ReadyTimeout(12))));
+        assert!(
+            updates.len() >= 2,
+            "waiting must remain visible: {updates:?}"
+        );
+        for pair in updates.windows(2) {
+            assert!(pair[1].0 - pair[0].0 >= PROGRESS_INTERVAL);
+        }
+        assert!(updates.iter().all(|(_, status)| !status.success()));
+    }
+
+    #[test]
+    fn a_lost_service_or_probe_error_is_not_hidden_by_progress() {
+        let mut stopped = pending_status();
+        stopped.loaded = false;
+        let result = wait_ready(
+            Duration::from_secs(5),
+            || Ok(stopped.clone()),
+            |_, _| panic!("a stopped service must return immediately"),
+        )
+        .unwrap();
+        assert!(!result.success());
+        let result = wait_ready(
+            Duration::from_secs(5),
+            || Err(Error::InvalidMarker("bad marker".to_string())),
+            |_, _| panic!("a failed probe must return immediately"),
+        );
+        assert!(matches!(result, Err(Error::InvalidMarker(_))));
+    }
 
     #[test]
     fn repairing_registration_preserves_installed_binaries_disks_and_credentials() {

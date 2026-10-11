@@ -25,13 +25,17 @@ pub enum Error {
 }
 
 pub fn run(layout: &Layout) -> Result<daemon::Status, Error> {
+    report!("[REPAIR 1/5] validate installed files and provisioning");
     validate(layout)?;
-    report!("[REPAIR] service registration and management VM");
     let key = layout.managed_home.join("runtime/manager_ed25519");
+    report!("[REPAIR 2/5] stop the resident service and management VM");
     daemon::stop(layout)?;
+    report!("[REPAIR 3/5] rebuild the launchd plist and daemon wrapper");
     daemon::install(layout, &layout.helper_path(), &key)?;
+    report!("[REPAIR 4/5] start the management VM and wait for the API");
     let status = daemon::start(layout)?;
     let ip = running_manager(&status)?;
+    report!("[REPAIR 5/5] check management SSH and guest services");
     let guest = super::guest_units(layout, ip);
     if guest.state != "pass" {
         return Err(Error::Unhealthy(format!(

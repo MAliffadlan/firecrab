@@ -33,6 +33,13 @@ def require(condition, detail):
         raise QAError(detail)
 
 
+def require_repair_progress(output):
+    stages = [line.split("]", 1)[0] + "]" for line in output.splitlines()
+              if line.startswith("[REPAIR ")]
+    expected = [f"[REPAIR {step}/5]" for step in range(1, 6)]
+    require(stages == expected, f"G7b repair stages missing, duplicated, or out of order: {stages}")
+
+
 def require_idle(vms):
     require(isinstance(vms, list), "VM list is not an array")
     for vm in vms:
@@ -114,6 +121,10 @@ class QA:
 
     def service(self, *args, **kwargs):
         return self.run([self.cli, "service", *args], **kwargs)
+
+    def repair(self):
+        output = self.service("repair")
+        self.check("G7b", "repair stage order", lambda: require_repair_progress(output.stdout))
 
     def api(self, route):
         with urllib.request.urlopen("http://127.0.0.1:5523" + route, timeout=5) as response:
@@ -199,7 +210,7 @@ class QA:
     def restart(self):
         self.mutated = True
         self.service("stop")
-        self.service("repair")
+        self.repair()
         self.healthy()
 
     def lost_plist(self):
@@ -209,7 +220,7 @@ class QA:
         require(output.returncode != 0 and REPAIR in output.stderr, "start did not suggest repair")
         require(not self.plist.exists() and self.marker()["vm_pid"] == pid, "start repaired automatically")
         self.api("/api/host")
-        self.service("repair")
+        self.repair()
         require(self.plist.is_file(), "repair did not recreate the plist")
         self.healthy()
 
@@ -219,7 +230,7 @@ class QA:
         output = self.service("start", check=False)
         require(output.returncode != 0 and REPAIR in output.stderr, "missing wrapper did not suggest repair")
         require(not self.wrapper.exists(), "start recreated the wrapper automatically")
-        self.service("repair")
+        self.repair()
         require(self.wrapper.is_file(), "repair did not recreate the wrapper")
         self.healthy()
 
@@ -236,7 +247,7 @@ class QA:
             require(self.marker()["vm_pid"] == marker["vm_pid"], "dev repaired automatically")
         finally:
             self.ready.write_bytes(original)
-        self.service("repair")
+        self.repair()
         self.healthy()
 
     def tunnel_failure(self):
@@ -254,7 +265,7 @@ class QA:
             require(REPAIR in report["api"]["detail"], "JSON diagnostics have no recovery advice")
         finally:
             os.kill(pid, signal.SIGCONT)
-        self.service("repair")
+        self.repair()
         self.healthy()
 
     def restore(self):
