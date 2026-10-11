@@ -58,6 +58,10 @@ Entries land here as work merges, and move under the next version heading when t
   default `Application Support` directory remains one path. Repair completes
   using the guest's fresh virtiofs boot report and live API instead of SSH commands.
 
+- Browser console E2E reloads initial dashboard modules once when Chromium
+  reports `ERR_NETWORK_CHANGED` after a guest bridge is created. Other failures
+  and repeated network errors remain test failures.
+
 ### Improved
 
 - None.
