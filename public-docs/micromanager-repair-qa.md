@@ -61,7 +61,7 @@ baseline can only be captured after that repair.
 
 Before each operation, require `[REPAIR 1/6]` through `[REPAIR 6/6]` for
 validation, shutdown/helper cleanup, OS backup/repair, registration, VM/API
-startup, and SSH/guest checks.
+startup, and guest-boot/API checks.
 Pending readiness and shutdown waits must print elapsed time and current state
 again every ten seconds. The local VM/API readiness deadline is ten seconds;
 shutdown keeps its forty-second deadline. An unready VM/API must time out instead
@@ -75,6 +75,18 @@ timeout, and immediate lost-service/probe-error returns without booting a VM:
 ```sh
 cargo test -p firecrab-cli --bin firecrab micromanager::macos::daemon::tests --locked
 ```
+
+## SSH paths and boot report (G7f)
+
+The default `Application Support` path must remain one OpenSSH known-hosts path.
+Native tests use the real `ssh -G` parser, including spaces, quotes, backslashes,
+and percent tokens. The executable wrapper reconnect test checks this parsing
+as well. Shell, development upload, diagnostics, and port forwards share it.
+
+OS recovery uses the serial console. Repair's final check reads the fresh guest
+boot report through virtiofs and verifies the live API. It does not run an SSH
+command. Invalid schema, mismatched IP, inactive, missing, or duplicate service
+fields must fail. Existing SSH host pins must remain intact.
 
 ## Offline OS recovery (G7c/G7d/G7e)
 

@@ -25,7 +25,7 @@ const FIRECRAB_INSTALL_SHA256: &str =
     "af2fb56b92dff1559cdaa449aa025808e0990437c16ccc0bb2b4d558ef50dacb";
 const DEBIAN_RAW_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 const DATA_DISK_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-const PROVISION_SCHEMA: u32 = 5;
+pub(super) const PROVISION_SCHEMA: u32 = 5;
 const EXTRACT_ARM64_IMAGE: &str =
     include_str!("../../../../scripts/firecracker-menual/extract-arm64-image");
 

@@ -219,7 +219,7 @@ fn run_repair() -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
     let status = repair::run(&layout)?;
     print_daemon_status(&status, &layout);
-    report!("[PASS] management SSH and guest services: ready");
+    report!("[PASS] guest boot report and local API: ready");
     report!("microManager repaired (data disk, credentials, and installed binaries preserved)");
     Ok(0)
 }
@@ -447,6 +447,24 @@ fn run_shell(command: &[String]) -> Result<i32, Error> {
     Ok(code)
 }
 
+/// OpenSSH parses an `-o` value again and expands percent tokens, even
+/// when the entire value is passed as one process argument.
+fn known_hosts_option(path: &Path) -> OsString {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let mut option = b"UserKnownHostsFile=\"".to_vec();
+    for &byte in path.as_os_str().as_bytes() {
+        match byte {
+            b'\\' | b'"' => option.push(b'\\'),
+            b'%' => option.push(b'%'),
+            _ => {}
+        }
+        option.push(byte);
+    }
+    option.push(b'"');
+    OsString::from_vec(option)
+}
+
 /// `ssh` arguments for [`run_shell`]. ssh joins everything after the host
 /// into one line for the remote shell, so each command argument is quoted to
 /// arrive unchanged.
@@ -469,9 +487,7 @@ fn shell_arguments(
         arguments.extend(["-o".into(), option.into()]);
     }
     arguments.push("-o".into());
-    let mut known_hosts = OsString::from("UserKnownHostsFile=");
-    known_hosts.push(runtime.join("known_hosts"));
-    arguments.push(known_hosts);
+    arguments.push(known_hosts_option(&runtime.join("known_hosts")));
     if tty {
         arguments.push("-t".into());
     }
@@ -533,7 +549,7 @@ fn guest_command(
         .args(["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"])
         .args(["-o", "LogLevel=ERROR"])
         .arg("-o")
-        .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
+        .arg(known_hosts_option(&known_hosts))
         .arg(format!("root@{ip}"))
         .arg(command)
         .output()
@@ -853,6 +869,32 @@ mod tests {
     }
 
     #[test]
+    fn openssh_preserves_known_host_paths_with_spaces_quotes_and_percent_tokens() {
+        for path in [
+            "/Users/test/Library/Application Support/Firecrab/runtime/known_hosts",
+            "/tmp/tab\tquote\"single'back\\slash%h/known_hosts",
+        ] {
+            let output = ProcessCommand::new("/usr/bin/ssh")
+                .args(["-G", "-T", "-o"])
+                .arg(known_hosts_option(Path::new(path)))
+                .arg("192.0.2.7")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let config = String::from_utf8(output.stdout).unwrap();
+            let actual = config
+                .lines()
+                .find_map(|line| line.strip_prefix("userknownhostsfile "))
+                .unwrap();
+            assert_eq!(actual, path);
+        }
+    }
+
+    #[test]
     fn the_shell_is_an_interactive_root_login_over_the_management_key() {
         let runtime = Path::new("/managed/runtime");
         let arguments = shell_arguments(runtime, shell_ip(), &[], true);
@@ -864,7 +906,7 @@ mod tests {
         assert_eq!(text[..2], ["-i", "/managed/runtime/manager_ed25519"]);
         assert!(text.contains(&"-t".to_owned()));
         assert!(text.contains(&"StrictHostKeyChecking=accept-new".to_owned()));
-        assert!(text.contains(&"UserKnownHostsFile=/managed/runtime/known_hosts".to_owned()));
+        assert!(text.contains(&"UserKnownHostsFile=\"/managed/runtime/known_hosts\"".to_owned()));
         assert_eq!(text.last().unwrap(), "root@192.0.2.7");
     }
 

@@ -246,12 +246,14 @@ an explicit filesystem-only warning. Failed verification retains the original.
 Only a repair that passes a final read-only filesystem check replaces the OS
 image. A clean check with no restored files keeps the original OS image. Repair then recreates
 `runtime/daemon.sh` and the launchd plist and starts the VM and SSH tunnel. A deleted plist can be recovered even while its launchd job is loaded.
-Success requires launchd readiness, the local API, and a live SSH check of the
-guest API and network helper. Failed checks return a nonzero exit code and point
+OS recovery runs over the serial console. Success requires launchd readiness,
+the live local API, and a current-boot guest report published through virtiofs.
+Repair verifies the report's schema, address, API, and network-helper state
+without another SSH command. Failed checks return a nonzero exit code and point
 to `service debug --logs`.
 
 The CLI prints `[REPAIR 1/6]` through `[REPAIR 6/6]` before validation,
-shutdown/helper cleanup, OS backup/repair, registration, startup, and SSH/guest
+shutdown/helper cleanup, OS backup/repair, registration, startup, and guest boot/API
 checks. Offline filesystem checks have a separate 120-second deadline. During readiness and
 shutdown waits it prints elapsed time and launchd/VM/API state every ten seconds.
 The local VM/API startup readiness deadline is ten seconds. This also applies

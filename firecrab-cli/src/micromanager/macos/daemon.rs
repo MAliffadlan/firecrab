@@ -425,6 +425,9 @@ fn render_wrapper(
     let manager_ready = shell_quote(&paths.manager_ready);
     let console = shell_quote(&layout.managed_home.join("runtime/vm-console.log"));
     let known_hosts = shell_quote(&layout.managed_home.join("runtime/known_hosts"));
+    let known_hosts_option = shell_quote(Path::new(&super::known_hosts_option(
+        &layout.managed_home.join("runtime/known_hosts"),
+    )));
     let platform = shell_quote(&paths.platform);
     let platform_write = shell_quote(Path::new(&format!(
         "mkdir -p /etc/firecrab && cat > {HOST_PLATFORM_DESCRIPTOR_PATH}"
@@ -440,6 +443,7 @@ ready={ready}
 manager_ready={manager_ready}
 console={console}
 known_hosts={known_hosts}
+known_hosts_option={known_hosts_option}
 platform={platform}
 vm_process="$root/runtime/vm-process"
 vm_pid=
@@ -461,7 +465,7 @@ cleanup() {{
     ip=$(sed -n 's/^ip=//p' "$manager_ready" 2>/dev/null)
     if [ -n "$ip" ]; then
       /usr/bin/ssh -i "$key" -o BatchMode=yes -o ConnectTimeout=3 \
-        -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts" \
+        -o StrictHostKeyChecking=accept-new -o "$known_hosts_option" \
         "root@$ip" systemctl poweroff >/dev/null 2>&1 || true
     fi
     kill -TERM "$vm_pid" 2>/dev/null || true
@@ -492,7 +496,7 @@ ip=$(sed -n 's/^ip=//p' "$manager_ready")
 test -n "$ip"
 open_tunnel() {{
   /usr/bin/ssh -i "$key" -o BatchMode=yes -o ConnectTimeout=10 \
-    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts" \
+    -o StrictHostKeyChecking=accept-new -o "$known_hosts_option" \
     -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
     -N -L 127.0.0.1:5523:127.0.0.1:5523 "root@$ip" &
   tunnel_pid=$!
@@ -516,7 +520,7 @@ open_tunnel
 # Tells the guest's API which Mac it serves; failing to only costs the Host view.
 if [ -f "$platform" ]; then
   /usr/bin/ssh -i "$key" -o BatchMode=yes -o ConnectTimeout=10 \
-    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts" \
+    -o StrictHostKeyChecking=accept-new -o "$known_hosts_option" \
     "root@$ip" {platform_write} <"$platform" || true
 fi
 # Serves running VMs' TCP port forwards on 127.0.0.1. A crash restarts only the
@@ -866,7 +870,7 @@ mod tests {
         let root = directory.path();
         let layout = Layout {
             install_dir: root.join("bin"),
-            managed_home: root.join("micromanager"),
+            managed_home: root.join("Application Support/micromanager"),
         };
         let runtime = layout.managed_home.join("runtime");
         fs::create_dir_all(&runtime).unwrap();
@@ -888,7 +892,8 @@ mod tests {
         write_executable(
             &ssh,
             &format!(
-                "#!/bin/bash\ncase \" $* \" in *' -N '*) echo tunnel >>{}; exec sleep 600;; esac\ncat >/dev/null\n",
+                "#!/bin/bash\nactual=$(/usr/bin/ssh -G \"$@\" 2>/dev/null | sed -n 's/^userknownhostsfile //p')\ntest \"$actual\" = {} || exit 1\ncase \" $* \" in *' -N '*) echo tunnel >>{}; exec sleep 600;; esac\ncat >/dev/null\n",
+                shell_quote(&runtime.join("known_hosts")),
                 shell_quote(&tunnels)
             ),
         );

@@ -26,7 +26,7 @@ Entries land here as work merges, and move under the next version heading when t
 - macOS `firecrab service repair` rebuilds the resident service registration and
   restarts the existing management VM without downloading or reinstalling assets.
   It preserves installed binaries, the data disk, and SSH credentials, and checks
-  the local API and live guest services before reporting success.
+  the local API and current-boot guest report before reporting success.
   Service startup, SSH, and API failures suggest the repair command; unhealthy
   status and debug reports include the same recovery advice.
   An idle-runtime macOS E2E phase checks recovery, injected SSH/API failures,
@@ -53,6 +53,10 @@ Entries land here as work merges, and move under the next version heading when t
 - macOS repair also restores missing packaged Debian OS files and package
   manifests from the verified local image cache or checksum-matched lost+found
   files. It preserves existing files and verifies the repaired copy before commit.
+
+- macOS SSH connections quote known-host paths inside OpenSSH options, so the
+  default `Application Support` directory remains one path. Repair completes
+  using the guest's fresh virtiofs boot report and live API instead of SSH commands.
 
 ### Improved
 

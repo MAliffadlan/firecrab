@@ -99,10 +99,7 @@ fn ssh_command(layout: &Layout, ip: IpAddr, command: &str) -> Command {
             "ServerAliveCountMax=3",
         ])
         .arg("-o")
-        .arg(format!(
-            "UserKnownHostsFile={}",
-            runtime.join("known_hosts").display()
-        ))
+        .arg(super::known_hosts_option(&runtime.join("known_hosts")))
         .arg(format!("root@{ip}"))
         .arg(command);
     ssh

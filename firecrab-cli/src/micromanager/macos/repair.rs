@@ -40,16 +40,38 @@ pub fn run(layout: &Layout) -> Result<daemon::Status, Error> {
     daemon::install(layout, &layout.helper_path(), &key)?;
     report!("[REPAIR 5/6] start the management VM and wait for the API");
     let status = daemon::start(layout)?;
+    running_manager(&status)?;
+    report!("[REPAIR 6/6] check guest boot report and local API");
+    let status = daemon::status(layout)?;
     let ip = running_manager(&status)?;
-    report!("[REPAIR 6/6] check management SSH and guest services");
-    let guest = super::guest_units(layout, ip);
-    if guest.state != "pass" {
-        return Err(Error::Unhealthy(format!(
-            "management SSH/guest services: {}",
-            guest.detail
-        )));
-    }
+    // start removes the old report before boot. The guest publishes this
+    // through virtiofs only after systemctl verifies its services.
+    let path = layout.managed_home.join("runtime/manager-ready");
+    managed_home::reject_symlink_components(&path)?;
+    let marker = fs::read_to_string(&path)
+        .map_err(|error| Error::Unhealthy(format!("cannot read guest boot report: {error}")))?;
+    verify_guest_boot_report(&marker, ip)?;
     Ok(status)
+}
+
+fn verify_guest_boot_report(marker: &str, ip: IpAddr) -> Result<(), Error> {
+    for (name, expected) in [
+        ("schema", provision::PROVISION_SCHEMA.to_string()),
+        ("ip", ip.to_string()),
+        ("firecrab_api", "active".to_string()),
+        ("firecrab_net_helper", "active".to_string()),
+    ] {
+        let mut values = marker.lines().filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key == name).then_some(value)
+        });
+        if values.next() != Some(expected.as_str()) || values.next().is_some() {
+            return Err(Error::Unhealthy(format!(
+                "guest boot report: {name} must be {expected}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn repair_helper(layout: &Layout) -> PathBuf {
@@ -179,6 +201,23 @@ mod tests {
         fs::set_permissions(layout.helper_path(), fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_file(layout.managed_home.join("system/Image")).unwrap();
         assert!(matches!(run(&layout), Err(Error::Provision(_))));
+    }
+
+    #[test]
+    fn guest_boot_report_requires_matching_live_address_and_active_services() {
+        let ip = "192.0.2.7".parse().unwrap();
+        let valid = "schema=5\nip=192.0.2.7\nfirecrab_api=active\nfirecrab_net_helper=active\n";
+        verify_guest_boot_report(valid, ip).unwrap();
+        for invalid in [
+            valid.replace("schema=5", "schema=0"),
+            valid.replace("192.0.2.7", "192.0.2.8"),
+            valid.replace("firecrab_api=active", "firecrab_api=failed"),
+            valid.replace("firecrab_net_helper=active\n", ""),
+            format!("{valid}firecrab_api=active\n"),
+            String::new(),
+        ] {
+            assert!(verify_guest_boot_report(&invalid, ip).is_err(), "{invalid}");
+        }
     }
 
     #[test]
