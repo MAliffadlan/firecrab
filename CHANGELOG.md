@@ -50,6 +50,9 @@ Entries land here as work merges, and move under the next version heading when t
   copy before installing a verified result. It preserves the data disk and SSH
   assets, cleans up matching stale helpers, and locks each home against concurrent
   management VMs. Forced VZ stop completion now allows the helper to exit.
+- macOS repair also restores missing packaged Debian OS files and package
+  manifests from the verified local image cache or checksum-matched lost+found
+  files. It preserves existing files and verifies the repaired copy before commit.
 
 ### Improved
 

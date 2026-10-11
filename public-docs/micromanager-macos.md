@@ -236,8 +236,15 @@ guest provisioning and an OS-repair-capable signed helper before stopping anythi
 It stops the VM and any remaining helpers owned by this user and managed home.
 It backs up the OS disk and checks a copy in an initramfs VM before the root is
 mounted. The data disk, host directory share, and network are not attached.
-Only a repair that passes a second read-only filesystem check replaces the OS
-image. A clean check keeps the original OS image. Repair then recreates
+The pinned cached Debian image, when available, is verified and attached
+read-only to restore missing Debian files in binary/library trees (including
+service definitions and generators), plus package lists and checksums.
+Regular files must match installed package checksums; symlinks and manifests
+require matching package versions. Matching `lost+found` files can also be restored.
+Existing files, `/etc` configuration, `/usr/local`, and application data stay unchanged. A missing cache produces
+an explicit filesystem-only warning. Failed verification retains the original.
+Only a repair that passes a final read-only filesystem check replaces the OS
+image. A clean check with no restored files keeps the original OS image. Repair then recreates
 `runtime/daemon.sh` and the launchd plist and starts the VM and SSH tunnel. A deleted plist can be recovered even while its launchd job is loaded.
 Success requires launchd readiness, the local API, and a live SSH check of the
 guest API and network helper. Failed checks return a nonzero exit code and point

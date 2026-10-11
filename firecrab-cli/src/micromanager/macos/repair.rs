@@ -34,7 +34,7 @@ pub fn run(layout: &Layout) -> Result<daemon::Status, Error> {
     let key = layout.managed_home.join("runtime/manager_ed25519");
     report!("[REPAIR 2/6] stop the resident service and management VM");
     daemon::stop(layout)?;
-    report!("[REPAIR 3/6] back up, check, and repair the OS filesystem offline");
+    report!("[REPAIR 3/6] back up, repair the OS filesystem, and restore missing OS files");
     filesystem::repair(layout, &helper)?;
     report!("[REPAIR 4/6] rebuild the launchd plist and daemon wrapper");
     daemon::install(layout, &layout.helper_path(), &key)?;

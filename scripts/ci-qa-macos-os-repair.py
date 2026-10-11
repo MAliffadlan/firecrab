@@ -20,7 +20,9 @@ from datetime import datetime, timezone
 
 HELPER_TIMEOUT = 120
 HELPER_STOP_TIMEOUT = 10
-RESULT_KEYS = {"check_exit", "repair_exit", "verify_exit", "changed"}
+BASE_RESULT_KEYS = {"check_exit", "repair_exit", "verify_exit", "changed"}
+RESULT_KEYS = BASE_RESULT_KEYS | {"restored_files"}
+REFERENCE_IMAGE_NAME = "debian-system.reference.raw"
 DEFAULT_MANAGED_SUFFIX = Path("Library/Application Support/Firecrab/micromanager")
 FIXTURE_MARKER = ".firecrab-os-repair-fixture"
 FIXTURE_MARKER_CONTENT = "isolated OS repair fixture\n"
@@ -184,6 +186,38 @@ def select_staged_image(home):
     return staged.resolve(strict=True)
 
 
+def assert_reference_isolated(reference, staged, home, user_home=None, environ=None):
+    info = required_file(reference)
+    require(info.st_nlink == 1,
+            f"reference OS image must not have hard links: {reference}")
+    protected = [(staged, True)] + list(fixture_assets(home).values())
+    for protected_home in protected_homes(user_home, environ):
+        protected.extend((protected_home / relative, required)
+                         for relative, required in PROTECTED_FILES.values())
+    for path, _required in protected:
+        try:
+            if path.exists() or path.is_symlink():
+                require(not path.is_symlink(),
+                        f"protected disk/SSH asset is a symlink: {path}")
+                other = path.stat()
+                require((info.st_dev, info.st_ino) != (other.st_dev, other.st_ino),
+                        f"reference OS image aliases a protected disk/SSH asset: {path}")
+        except OSError as error:
+            raise QAError(f"could not inspect protected asset {path}: {error}") from error
+
+
+def select_reference_image(staged, home, user_home=None, environ=None):
+    candidate = staged.with_name(REFERENCE_IMAGE_NAME)
+    if not candidate.exists() and not candidate.is_symlink():
+        return None
+    reject_symlink_components(candidate)
+    info = required_file(candidate)
+    require(info.st_nlink == 1,
+            f"reference OS image must not have hard links: {candidate}")
+    assert_reference_isolated(candidate, staged, home, user_home, environ)
+    return candidate.resolve(strict=True)
+
+
 def identity(info):
     return {
         "device": info.st_dev,
@@ -230,13 +264,20 @@ def file_record(path, required=True):
     return {"path": str(path), "sha256": hash_file(path, info), "identity": identity(info)}
 
 
-def capture_preservation(home, staged):
+def capture_preservation(home, staged, reference=None):
     protected = {}
     for name, (path, required) in fixture_assets(home).items():
         try:
             protected[name] = file_record(path, required)
         except (QAError, OSError) as error:
             protected[name] = {"error": str(error)}
+    if reference is None:
+        protected["reference_os_disk"] = None
+    else:
+        try:
+            protected["reference_os_disk"] = file_record(reference)
+        except (QAError, OSError) as error:
+            protected["reference_os_disk"] = {"error": str(error)}
     try:
         staged_record = file_record(staged)
     except (QAError, OSError) as error:
@@ -258,6 +299,10 @@ def require_snapshot_complete(snapshot):
                     f"could not capture optional preservation evidence for {name}: {record}")
         if isinstance(record, dict) and "error" in record:
             raise QAError(f"could not capture preservation evidence for {name}: {record['error']}")
+    reference = snapshot["protected"].get("reference_os_disk")
+    require(reference is None or
+            isinstance(reference, dict) and "error" not in reference,
+            f"could not capture reference OS image preservation evidence: {reference}")
     require(isinstance(snapshot["staged_os_disk"], dict)
             and "error" not in snapshot["staged_os_disk"],
             f"could not capture staged OS image evidence: {snapshot['staged_os_disk']}")
@@ -321,7 +366,7 @@ def require_image_idle(path, runner=None, executable=None):
     return {"path": str(path), "exit_code": result.returncode, "owners": owners}
 
 
-def validate_helper_result(stdout, helper_exit):
+def validate_helper_result(stdout, helper_exit, expect_restored_files=None):
     require(helper_exit == 0, f"repair helper exited with status {helper_exit}")
     if isinstance(stdout, bytes):
         try:
@@ -333,13 +378,17 @@ def validate_helper_result(stdout, helper_exit):
     except (json.JSONDecodeError, TypeError) as error:
         raise QAError(f"helper stdout must contain one JSON object: {error}") from error
     require(isinstance(result, dict), "helper stdout JSON is not an object")
-    require(set(result) == RESULT_KEYS,
+    fields = set(result)
+    require(fields in (BASE_RESULT_KEYS, RESULT_KEYS),
             f"helper JSON fields differ from the contract: {sorted(result)}")
+    result.setdefault("restored_files", 0)
     for name in ("check_exit", "verify_exit"):
         value = result[name]
         maximum = 7 if name == "check_exit" else 255
         require(type(value) is int and 0 <= value <= maximum,
                 f"{name} must be an integer exit status")
+    require(type(result["restored_files"]) is int and result["restored_files"] >= 0,
+            "restored_files must be a nonnegative integer")
     repair_exit = result["repair_exit"]
     require(repair_exit is None or
             (type(repair_exit) is int and 0 <= repair_exit <= 3),
@@ -348,11 +397,17 @@ def validate_helper_result(stdout, helper_exit):
     require(result["verify_exit"] == 0,
             f"helper verification failed with exit {result['verify_exit']}")
     if result["check_exit"] == 0:
-        require(result["repair_exit"] is None and result["changed"] is False,
-                "clean filesystem must skip repair and report changed=false")
+        require(result["repair_exit"] is None,
+                "clean filesystem must skip filesystem repair")
     else:
-        require(result["repair_exit"] is not None and result["changed"] is True,
-                "filesystem repair requires a repair exit and changed=true")
+        require(result["repair_exit"] is not None,
+                "filesystem repair requires a repair exit")
+    expected_changed = result["repair_exit"] is not None or result["restored_files"] > 0
+    require(result["changed"] is expected_changed,
+            "changed must report filesystem repair or restored files")
+    if expect_restored_files is not None:
+        require(result["restored_files"] == expect_restored_files,
+                f"expected {expect_restored_files} restored files, got {result['restored_files']}")
     return result
 
 
@@ -370,7 +425,8 @@ def as_bytes(output):
 
 
 class QA:
-    def __init__(self, helper, fixture_home, results_dir, *, user_home=None, environ=None):
+    def __init__(self, helper, fixture_home, results_dir, *, user_home=None, environ=None,
+                 expect_restored_files=None):
         self.environ = dict(os.environ if environ is None else environ)
         self.user_home = None if user_home is None else Path(user_home)
         self.fixture_input = absolute_path(fixture_home, "--fixture-home")
@@ -378,6 +434,11 @@ class QA:
         self.fixture_home = None
         self.helper = None
         self.staged = None
+        self.reference = None
+        require(expect_restored_files is None or
+                (type(expect_restored_files) is int and expect_restored_files >= 0),
+                "expected restored file count must be a nonnegative integer")
+        self.expect_restored_files = expect_restored_files
         self.results = absolute_path(results_dir, "--results-dir")
         reject_symlink_components(self.results, allow_missing=True)
         require(not self.results.exists(), f"results directory already exists: {self.results}")
@@ -405,6 +466,8 @@ class QA:
             "helper_exit": None,
             "preservation": "NOT_RUN",
         }
+        if expect_restored_files is not None:
+            self.summary["expected_restored_files"] = expect_restored_files
 
     def log_line(self, message):
         self.log.write(message.rstrip("\n") + "\n")
@@ -435,6 +498,8 @@ class QA:
                 f"helper code signature did not verify: {signature.stderr.strip() or signature.stdout.strip()}")
         self.summary["helper_signature"] = "PASS"
         self.staged = select_staged_image(self.fixture_home)
+        self.reference = select_reference_image(
+            self.staged, self.fixture_home, self.user_home, self.environ)
         assets = fixture_assets(self.fixture_home)
         for name in ("fixture_marker", "original_os_disk", "os_kernel", "os_initrd",
                      "data_disk", "ssh_private_key"):
@@ -447,12 +512,14 @@ class QA:
             "helper_resolved": str(self.helper),
             "helper_identity": file_record(self.helper),
             "staged_os_disk": str(self.staged),
+            "reference_os_disk": str(self.reference) if self.reference is not None else None,
+            "reference_image_check": "PASS" if self.reference is not None else "NOT_PRESENT",
             "active_image_check": "PASS",
             "active_images_before": idle_images,
         })
 
     def capture(self):
-        return capture_preservation(self.fixture_home, self.staged)
+        return capture_preservation(self.fixture_home, self.staged, self.reference)
 
     def record_snapshot(self, name, snapshot):
         write_json(self.results / name, snapshot)
@@ -479,6 +546,8 @@ class QA:
 
     def invoke_helper(self):
         command = [str(self.helper), "repair-os", str(self.staged)]
+        if self.reference is not None:
+            command.extend(["--reference", str(self.reference)])
         environment = dict(self.environ)
         environment["FIRECRAB_MICROMANAGER_HOME"] = str(self.fixture_home)
         self.log_line("$ " + shlex.join(command))
@@ -527,7 +596,8 @@ class QA:
         idle_error = self.record_staged_idle_after()
         require(idle_error is None,
                 f"post-helper image idle check failed: {idle_error}")
-        self.summary["result"] = validate_helper_result(stdout, process.returncode)
+        self.summary["result"] = validate_helper_result(
+            stdout, process.returncode, self.expect_restored_files)
         return self.summary["result"]
 
     def write_helper_output(self, stdout, stderr):
@@ -608,9 +678,12 @@ def main(argv=None):
     parser.add_argument("--fixture-home", required=True,
                         help="isolated fixture home; installed/default homes are rejected")
     parser.add_argument("--results-dir", required=True, help="new private evidence directory")
+    parser.add_argument("--expect-restored-files", type=int,
+                        help="require this exact number of restored configuration files")
     args = parser.parse_args(argv)
     try:
-        qa = QA(args.helper, args.fixture_home, args.results_dir)
+        qa = QA(args.helper, args.fixture_home, args.results_dir,
+                expect_restored_files=args.expect_restored_files)
     except QAError as error:
         print(f"FAILED OS repair QA setup: {error}", file=sys.stderr)
         return 2

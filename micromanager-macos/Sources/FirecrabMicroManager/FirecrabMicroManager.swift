@@ -9,7 +9,7 @@ Commands:
   validate         Show and validate the managed VM configuration
   provision        EFI boot the Debian image and run first-boot provisioning
   run              Boot the managed VM and attach its serial console
-  repair-os <copy> Check and repair a private OS copy before it is installed
+  repair-os <copy> [--reference <image>] Check filesystem and restore missing OS files
 
 Environment:
   FIRECRAB_MICROMANAGER_HOME  Override the managed configuration root
@@ -50,11 +50,15 @@ struct FirecrabMicroManager {
                     print(usage)
                     return
                 }
-                guard vmArguments.count == 1, vmArguments[0].hasPrefix("/") else {
+                guard (vmArguments.count == 1 || vmArguments.count == 3),
+                    vmArguments[0].hasPrefix("/"),
+                    vmArguments.count == 1 || (vmArguments[1] == "--reference" && vmArguments[2].hasPrefix("/"))
+                else {
                     throw MicroManagerError.argument("repair-os requires an absolute private OS copy path")
                 }
                 let result = try await repairOS(options: VMOptions.managedDefaults(),
-                    disk: URL(fileURLWithPath: vmArguments[0]))
+                    disk: URL(fileURLWithPath: vmArguments[0]),
+                    reference: vmArguments.count == 3 ? URL(fileURLWithPath: vmArguments[2]) : nil)
                 let data = try JSONEncoder().encode(result)
                 print(String(decoding: data, as: UTF8.self))
                 exit(result.verified ? 0 : 1)

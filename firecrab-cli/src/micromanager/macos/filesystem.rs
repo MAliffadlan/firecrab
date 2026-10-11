@@ -11,7 +11,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::super::{managed_home, report};
-use super::lifecycle::Layout;
+use super::{lifecycle::Layout, provision};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -35,19 +35,20 @@ struct CheckResult {
     repair_exit: Option<i32>,
     verify_exit: i32,
     changed: bool,
+    #[serde(default)]
+    restored_files: u64,
 }
 
 impl CheckResult {
     fn verified(&self) -> bool {
-        self.verify_exit == 0
-            && if self.changed {
-                (1..=7).contains(&self.check_exit)
-                    && self
-                        .repair_exit
-                        .is_some_and(|status| (0..=3).contains(&status))
-            } else {
-                self.check_exit == 0 && self.repair_exit.is_none()
-            }
+        let checked = (self.check_exit == 0 && self.repair_exit.is_none())
+            || ((1..=7).contains(&self.check_exit)
+                && self
+                    .repair_exit
+                    .is_some_and(|status| (0..=3).contains(&status)));
+        checked
+            && self.verify_exit == 0
+            && self.changed == (self.repair_exit.is_some() || self.restored_files > 0)
     }
 }
 
@@ -55,7 +56,8 @@ pub fn require_helper(helper: &Path) -> Result<(), Error> {
     let output = Command::new(helper)
         .args(["repair-os", "--help"])
         .output()?;
-    if !output.status.success() || !String::from_utf8_lossy(&output.stdout).contains("repair-os") {
+    if !output.status.success() || !String::from_utf8_lossy(&output.stdout).contains("--reference")
+    {
         return Err(Error::Helper(helper.to_owned()));
     }
     Ok(())
@@ -97,13 +99,17 @@ fn check_copy(
     layout: &Layout,
     working: &Path,
     directory: &Path,
+    reference: Option<&Path>,
     timeout: Duration,
 ) -> io::Result<CheckResult> {
     let stdout = File::create(directory.join("result.json"))?;
     let stderr = File::create(directory.join("console.log"))?;
-    let mut child = Command::new(helper)
-        .arg("repair-os")
-        .arg(working)
+    let mut command = Command::new(helper);
+    command.arg("repair-os").arg(working);
+    if let Some(reference) = reference {
+        command.arg("--reference").arg(reference);
+    }
+    let mut child = command
         .env("FIRECRAB_MICROMANAGER_HOME", &layout.managed_home)
         .stdin(Stdio::null())
         .stdout(stdout)
@@ -188,15 +194,34 @@ fn repair_with_timeout(layout: &Layout, helper: &Path, timeout: Duration) -> Res
         .keep();
     let backup = directory.join("debian-system.before.raw");
     let working = directory.join("debian-system.repaired.raw");
-    let attempt = || -> io::Result<bool> {
+    let attempt = || -> io::Result<Option<u64>> {
         report!("[BACKUP] OS disk: {}", backup.display());
         copy_image(&os_disk, &backup)?;
         copy_image(&backup, &working)?;
         let staged = fs::metadata(&working)?;
-        let result = check_copy(helper, layout, &working, &directory, timeout)?;
+        let archive = layout
+            .managed_home
+            .join("downloads")
+            .join(provision::DEBIAN_ARCHIVE);
+        managed_home::reject_symlink_components(&archive).map_err(io::Error::other)?;
+        let reference = directory.join("debian-system.reference.raw");
+        report!("[CHECK] cached Debian image for missing OS files");
+        let cached = provision::cached_os_reference(&layout.managed_home, &reference)
+            .map_err(io::Error::other)?;
+        if !cached {
+            report!("[WARN] Debian image cache unavailable; checking filesystem only");
+        }
+        let result = check_copy(
+            helper,
+            layout,
+            &working,
+            &directory,
+            cached.then_some(reference.as_path()),
+            timeout,
+        )?;
         unused(&working)?;
         if !result.changed {
-            return Ok(false);
+            return Ok(None);
         }
         // Keep the original until the detached copy has passed verification.
         unused(&os_disk)?;
@@ -235,16 +260,28 @@ fn repair_with_timeout(layout: &Layout, helper: &Path, timeout: Duration) -> Res
                 "verified OS disk installed, but directory sync failed: {error}"
             )));
         }
-        Ok(true)
+        Ok(Some(result.restored_files))
     };
     match attempt() {
-        Ok(true) => report!(
-            "[PASS] OS filesystem repaired and verified; backup: {}",
-            backup.display()
-        ),
-        Ok(false) => {
+        Ok(Some(restored)) => {
+            fs::remove_file(directory.join("debian-system.reference.raw")).or_else(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })?;
+            report!(
+                "[PASS] OS filesystem verified; restored OS files={}; backup: {}",
+                restored,
+                backup.display()
+            );
+        }
+        Ok(None) => {
             fs::remove_dir_all(&directory)?;
-            report!("[PASS] OS filesystem clean; original disk preserved");
+            report!(
+                "[PASS] OS filesystem and available packaged files clean; original disk preserved"
+            );
         }
         Err(error) => {
             return Err(Error::Recovery {
@@ -329,6 +366,23 @@ mod tests {
     }
 
     #[test]
+    fn verified_missing_file_restoration_commits_even_when_the_filesystem_was_clean() {
+        let (_root, layout, helper) = fixture(
+            r#"printf restored >"$2"
+echo '{"check_exit":0,"repair_exit":null,"verify_exit":0,"changed":true,"restored_files":3}'"#,
+        );
+        repair(&layout, &helper).unwrap();
+        assert_eq!(
+            fs::read(layout.managed_home.join("system/debian-system.raw")).unwrap(),
+            b"restored"
+        );
+        assert_eq!(
+            fs::read(layout.managed_home.join("data/firecrab-data.raw")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
     fn failed_verification_nonzero_helper_and_timeout_leave_original_unchanged() {
         for script in [
             "printf broken >\"$2\"\necho '{\"check_exit\":4,\"repair_exit\":1,\"verify_exit\":4,\"changed\":true}'",
@@ -387,6 +441,28 @@ mod tests {
                 b"original"
             );
         }
+    }
+
+    #[test]
+    fn an_invalid_or_symlinked_cache_leaves_the_original_untouched() {
+        let (_root, layout, helper) = fixture("exit 99");
+        let downloads = layout.managed_home.join("downloads");
+        fs::create_dir(&downloads).unwrap();
+        let archive = downloads.join(provision::DEBIAN_ARCHIVE);
+        fs::write(&archive, b"invalid cache").unwrap();
+        assert!(repair(&layout, &helper).is_err());
+        fs::remove_file(&archive).unwrap();
+        std::os::unix::fs::symlink(layout.managed_home.join("data/firecrab-data.raw"), &archive)
+            .unwrap();
+        assert!(repair(&layout, &helper).is_err());
+        assert_eq!(
+            fs::read(layout.managed_home.join("system/debian-system.raw")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            fs::read(layout.managed_home.join("data/firecrab-data.raw")).unwrap(),
+            b"original"
+        );
     }
 
     #[test]

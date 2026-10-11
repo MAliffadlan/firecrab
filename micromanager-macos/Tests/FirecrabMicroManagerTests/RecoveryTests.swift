@@ -89,3 +89,35 @@ func consoleAcceptsOnlyACompleteFilesystemResultAndRequiresVerification() throws
     #expect(OSRepairResult(check_exit: 0, repair_exit: nil, verify_exit: 0, changed: false).verified)
     #expect(OSRepairResult(check_exit: 8, repair_exit: 0, verify_exit: 0, changed: true).verified == false)
 }
+
+@Test
+func recoveryReferenceRejectsAliasesAndRequiresThePrivateDirectory() throws {
+    let (home, options, working) = try fixture()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let reference = working.deletingLastPathComponent().appendingPathComponent("debian-system.reference.raw")
+    try Data("cached image".utf8).write(to: reference)
+    #expect(try recoveryReference(options, disk: working, reference: reference) == reference)
+    try FileManager.default.removeItem(at: reference)
+    try FileManager.default.linkItem(at: working, to: reference)
+    #expect(throws: MicroManagerError.self) { try recoveryReference(options, disk: working, reference: reference) }
+    try FileManager.default.removeItem(at: reference)
+    try FileManager.default.createSymbolicLink(at: reference, withDestinationURL: options.osDiskURL)
+    #expect(throws: MicroManagerError.self) { try recoveryReference(options, disk: working, reference: reference) }
+    #expect(throws: MicroManagerError.self) { try recoveryReference(options, disk: working, reference: options.osDiskURL) }
+}
+
+@Test @MainActor
+func missingFilesCanChangeACleanFilesystemButStillRequireVerification() {
+    let pipe = Pipe()
+    let console = OSRepairConsole(input: pipe.fileHandleForWriting, restoreFiles: true)
+    console.consume(Data("\(console.marker):0:-1:0:3\n".utf8))
+    #expect(console.result?.restored_files == 3)
+    #expect(console.result?.changed == true)
+    #expect(console.result?.verified == true)
+    #expect(OSRepairResult(check_exit: 0, repair_exit: nil, verify_exit: 8,
+        changed: true, restored_files: 3).verified == false)
+    #expect(OSRepairResult(check_exit: 0, repair_exit: nil, verify_exit: 0,
+        changed: false, restored_files: 3).verified == false)
+    #expect(OSRepairResult(check_exit: 0, repair_exit: nil, verify_exit: 0,
+        changed: false, restored_files: -1).verified == false)
+}

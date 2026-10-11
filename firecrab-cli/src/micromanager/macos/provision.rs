@@ -303,6 +303,27 @@ fn reset_failed_system(system: &Path, runtime: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Use only the pinned local cache for offline recovery. Never download here.
+pub(super) fn cached_os_reference(home: &Path, destination: &Path) -> Result<bool, Error> {
+    let archive = home.join("downloads").join(DEBIAN_ARCHIVE);
+    if !archive.exists() {
+        return Ok(false);
+    }
+    let directory = destination
+        .parent()
+        .expect("private reference has a parent");
+    let cached_copy = directory.join(DEBIAN_ARCHIVE);
+    fs::copy(&archive, &cached_copy)
+        .map_err(|source| io_error("stage Debian cache", &archive, source))?;
+    fs::set_permissions(&cached_copy, fs::Permissions::from_mode(0o600))
+        .map_err(|source| io_error("protect Debian cache", &cached_copy, source))?;
+    artifact::verify(&cached_copy, HashAlgorithm::Sha512, DEBIAN_SHA512)?;
+    prepare_os_disk(&cached_copy, destination, directory)?;
+    fs::remove_file(&cached_copy)
+        .map_err(|source| io_error("remove staged Debian cache", &cached_copy, source))?;
+    Ok(true)
+}
+
 fn prepare_os_disk(archive: &Path, destination: &Path, system: &Path) -> Result<(), Error> {
     if destination.is_file() {
         validate_os_disk(destination)?;
@@ -828,6 +849,35 @@ fn io_error(action: &'static str, path: &Path, source: io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires FIRECRAB_REPAIR_QA_DEBIAN_ARCHIVE pointing to the pinned cached image"]
+    fn verified_cached_reference_is_private_and_leaves_the_cache_unchanged() {
+        let source = PathBuf::from(
+            std::env::var_os("FIRECRAB_REPAIR_QA_DEBIAN_ARCHIVE").expect("cached Debian archive"),
+        );
+        let original = fs::metadata(&source).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let downloads = home.join("downloads");
+        fs::create_dir_all(&downloads).unwrap();
+        let cache = downloads.join(DEBIAN_ARCHIVE);
+        fs::copy(&source, &cache).unwrap();
+        let directory = root.path().join("recovery");
+        fs::create_dir(&directory).unwrap();
+        let reference = directory.join("debian-system.reference.raw");
+        assert!(cached_os_reference(&home, &reference).unwrap());
+        assert_eq!(fs::metadata(&reference).unwrap().len(), DEBIAN_RAW_BYTES);
+        assert_eq!(
+            fs::metadata(&reference).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!directory.join(DEBIAN_ARCHIVE).exists());
+        artifact::verify(&cache, HashAlgorithm::Sha512, DEBIAN_SHA512).unwrap();
+        let after = fs::metadata(&source).unwrap();
+        assert_eq!(after.len(), original.len());
+        assert_eq!(after.modified().unwrap(), original.modified().unwrap());
+    }
 
     #[test]
     fn gpt_linux_partition_partuuid_is_derived_from_disk() {

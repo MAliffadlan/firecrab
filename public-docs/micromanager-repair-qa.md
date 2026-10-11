@@ -76,14 +76,15 @@ timeout, and immediate lost-service/probe-error returns without booting a VM:
 cargo test -p firecrab-cli --bin firecrab micromanager::macos::daemon::tests --locked
 ```
 
-## Offline OS recovery (G7c/G7d)
+## Offline OS recovery (G7c/G7d/G7e)
 
 The helper uses `break=premount` from [Debian initramfs-tools](https://manpages.debian.org/trixie/initramfs-tools-core/initramfs-tools.7.en.html).
 It checks only `/dev/vda1` on a private OS copy. A failed read-only check may run
 `fsck.ext4 -f -y`; a second read-only pass must return zero before commit.
 [Debian e2fsck](https://manpages.debian.org/trixie/e2fsprogs/e2fsck.8.en.html)
 documents the accepted correction exits (0–3) and unresolved errors (4).
-The VM attaches no data disk, directory share, or network. VM/API readiness
+The VM attaches no data disk, directory share, or network. A verified cached
+Debian reference may be attached read-only for missing packaged OS files. VM/API readiness
 keeps its ten-second deadline; offline filesystem checks use 120 seconds.
 
 Create tiny normal and unattached-inode fixtures under temporary storage.
@@ -110,6 +111,16 @@ Native Rust tests verify commit, backup preservation, timeout rollback, and
 scoped cleanup of disposable helper processes. Swift tests check VM locking,
 recovery-copy validation, and stop completion without a delegate callback.
 
+For G7e, use a marked disposable Debian fixture with a missing `libdbus` link
+and generator directory. Place the authenticated cached image beside its staged
+copy as `debian-system.reference.raw`. The runner includes it in preservation
+snapshots and passes `--reference` to the helper. Require `restored_files > 0`,
+`changed=true`, and `verify_exit=0`, even when the initial filesystem is clean.
+Repeat with `--expect-restored-files 0` to check that another repair restores
+nothing. Version/checksum mismatches must fail without committing an OS image.
+Boot only repaired disk copies in a separate managed home and check live SSH,
+`dbus`, network services, and the guest API within the ten-second readiness limit.
+
 ## Results and restoration
 
 Results default to `target/qa/macos-repair/<timestamp>/`:
@@ -134,7 +145,7 @@ Backups remain available for inspection.
 The Python guard/restoration contract runs in GitHub CI without virtualization:
 
 ```sh
-python3 -m unittest scripts/test_macos_repair_qa.py scripts/test_macos_os_repair_qa.py
+python3 -m unittest scripts/test_macos_repair_qa.py scripts/test_macos_os_repair_qa.py scripts/test_macos_os_files.py
 cargo test -p firecrab-cli --test macos_service_recovery --locked
 ```
 

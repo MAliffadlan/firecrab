@@ -235,7 +235,8 @@ enum ManagementVMConfiguration {
         options: VMOptions,
         consoleInput: FileHandle = .standardInput,
         consoleOutput: FileHandle = .standardOutput,
-        repairingOS: Bool = false
+        repairingOS: Bool = false,
+        referenceOS: URL? = nil
     ) throws -> VZVirtualMachineConfiguration {
         guard VZVirtualMachine.isSupported else {
             throw MicroManagerError.unsupported(
@@ -259,6 +260,14 @@ enum ManagementVMConfiguration {
             try validateSeparateDisks(options.osDiskURL, options.dataDiskURL)
         }
 
+        if let referenceOS {
+            guard repairingOS else {
+                throw MicroManagerError.argument("reference disks are allowed only during OS repair")
+            }
+            try validateRegularFile(referenceOS, label: "cached OS reference", writable: false)
+            try validateSeparateDisks(referenceOS, options.osDiskURL)
+            try validateSeparateDisks(referenceOS, options.dataDiskURL)
+        }
         let memorySize = try validatedMemorySize(options)
 
         let platform = VZGenericPlatformConfiguration()
@@ -280,6 +289,11 @@ enum ManagementVMConfiguration {
                 url: options.dataDiskURL, readOnly: false
             )
             storage.append(VZVirtioBlockDeviceConfiguration(attachment: dataAttachment))
+        }
+
+        if let referenceOS {
+            let referenceAttachment = try VZDiskImageStorageDeviceAttachment(url: referenceOS, readOnly: true)
+            storage.append(VZVirtioBlockDeviceConfiguration(attachment: referenceAttachment))
         }
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration()
