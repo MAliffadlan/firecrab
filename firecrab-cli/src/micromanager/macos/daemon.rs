@@ -131,7 +131,7 @@ pub fn start(layout: &Layout) -> Result<Status, Error> {
         ],
         false,
     )?;
-    let timeout = Duration::from_secs(180);
+    let timeout = Duration::from_secs(10);
     report!(
         "[WAIT] VM/API readiness (up to {}s); console: {}",
         timeout.as_secs(),

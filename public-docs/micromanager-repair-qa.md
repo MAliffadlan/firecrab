@@ -60,7 +60,9 @@ baseline can only be captured after that repair.
 Before each operation, require `[REPAIR 1/5]` through `[REPAIR 5/5]` for
 validation, shutdown, registration, VM/API startup, and SSH/guest checks.
 Pending readiness and shutdown waits must print elapsed time and current state
-again every ten seconds. A failed validation must not print the shutdown stage.
+again every ten seconds. The local VM/API readiness deadline is ten seconds;
+shutdown keeps its forty-second deadline. An unready VM/API must time out instead
+of reporting success. A failed validation must not print the shutdown stage.
 Each successful runtime repair also checks G7b for all five stages in order.
 An unhealthy guest must still fail; progress output does not mean recovery passed.
 Use `service debug --logs` to inspect the console when boot cannot finish.

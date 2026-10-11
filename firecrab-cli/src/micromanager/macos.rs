@@ -811,7 +811,7 @@ mod tests {
     #[test]
     fn service_runtime_failures_recommend_repair() {
         for error in [
-            Error::Daemon(daemon::Error::ReadyTimeout(180)),
+            Error::Daemon(daemon::Error::ReadyTimeout(10)),
             Error::Daemon(daemon::Error::StopTimeout(40)),
             Error::Daemon(daemon::Error::Launchctl {
                 action: "bootstrap",

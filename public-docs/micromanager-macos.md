@@ -242,8 +242,11 @@ to `service debug --logs`.
 The CLI prints `[REPAIR 1/5]` through `[REPAIR 5/5]` before validation,
 shutdown, registration, startup, and SSH/guest checks. During readiness and
 shutdown waits it prints elapsed time and launchd/VM/API state every ten seconds.
-Readiness can take up to 180 seconds. The startup line gives the VM console log
-path; inspect it with `service debug --logs` when boot remains blocked.
+The local VM/API startup readiness deadline is ten seconds. This also applies
+when `install`, `dev`, or `repair` starts the VM. If the VM/API is not ready,
+the command returns a nonzero exit code.
+The startup line gives the VM console log path; inspect it with
+`service debug --logs` when boot remains blocked.
 
 When `start`, `stop`, or `dev` encounters a launchd, VM-readiness, SSH, or localhost
 API failure, the CLI suggests `firecrab service repair`, then retrying the command.

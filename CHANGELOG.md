@@ -44,7 +44,8 @@ Entries land here as work merges, and move under the next version heading when t
 
 - macOS service repair prints all five stages. Service start and repair report
   VM/API readiness and elapsed time every ten seconds while waiting. Shutdown
-  waits also report launchd/VM state without changing readiness or time limits.
+  waits also report launchd/VM state. Local VM/API startup uses a ten-second
+  readiness deadline; health checks stay unchanged.
 
 ### Improved
 
