@@ -82,7 +82,7 @@ pub enum Command {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Rebuild the macOS service registration and restart the existing management VM.
+    /// Repair the macOS service, remaining helpers, and OS filesystem with a backup.
     #[cfg(target_os = "macos")]
     Repair,
     /// Remove microManager and optionally all managed VM data.

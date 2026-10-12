@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use super::super::{managed_home, report};
-use super::{daemon, lifecycle::Layout, provision};
+use super::{daemon, filesystem, lifecycle::Layout, provision};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -18,6 +18,8 @@ pub enum Error {
     NotExecutable(PathBuf),
     #[error(transparent)]
     Provision(#[from] provision::Error),
+    #[error(transparent)]
+    Filesystem(#[from] filesystem::Error),
     #[error("microManager repair failed: {0}; inspect `firecrab service debug --logs`")]
     Daemon(#[from] daemon::Error),
     #[error("microManager repair failed: {0}; inspect `firecrab service debug --logs`")]
@@ -25,21 +27,63 @@ pub enum Error {
 }
 
 pub fn run(layout: &Layout) -> Result<daemon::Status, Error> {
+    report!("[REPAIR 1/6] validate installed files and provisioning");
     validate(layout)?;
-    report!("[REPAIR] service registration and management VM");
+    let helper = repair_helper(layout);
+    filesystem::require_helper(&helper)?;
     let key = layout.managed_home.join("runtime/manager_ed25519");
+    report!("[REPAIR 2/6] stop the resident service and management VM");
     daemon::stop(layout)?;
+    report!("[REPAIR 3/6] back up, repair the OS filesystem, and restore missing OS files");
+    filesystem::repair(layout, &helper)?;
+    report!("[REPAIR 4/6] rebuild the launchd plist and daemon wrapper");
     daemon::install(layout, &layout.helper_path(), &key)?;
+    report!("[REPAIR 5/6] start the management VM and wait for the API");
     let status = daemon::start(layout)?;
+    running_manager(&status)?;
+    report!("[REPAIR 6/6] check guest boot report and local API");
+    let status = daemon::status(layout)?;
     let ip = running_manager(&status)?;
-    let guest = super::guest_units(layout, ip);
-    if guest.state != "pass" {
-        return Err(Error::Unhealthy(format!(
-            "management SSH/guest services: {}",
-            guest.detail
-        )));
-    }
+    // start removes the old report before boot. The guest publishes this
+    // through virtiofs only after systemctl verifies its services.
+    let path = layout.managed_home.join("runtime/manager-ready");
+    managed_home::reject_symlink_components(&path)?;
+    let marker = fs::read_to_string(&path)
+        .map_err(|error| Error::Unhealthy(format!("cannot read guest boot report: {error}")))?;
+    verify_guest_boot_report(&marker, ip)?;
     Ok(status)
+}
+
+fn verify_guest_boot_report(marker: &str, ip: IpAddr) -> Result<(), Error> {
+    for (name, expected) in [
+        ("schema", provision::PROVISION_SCHEMA.to_string()),
+        ("ip", ip.to_string()),
+        ("firecrab_api", "active".to_string()),
+        ("firecrab_net_helper", "active".to_string()),
+    ] {
+        let mut values = marker.lines().filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key == name).then_some(value)
+        });
+        if values.next() != Some(expected.as_str()) || values.next().is_some() {
+            return Err(Error::Unhealthy(format!(
+                "guest boot report: {name} must be {expected}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn repair_helper(layout: &Layout) -> PathBuf {
+    let candidate = super::helper_path(
+        std::env::var_os(super::HELPER_ENV),
+        std::env::current_exe().ok().as_deref(),
+    );
+    if candidate.is_file() {
+        candidate
+    } else {
+        layout.helper_path()
+    }
 }
 
 /// Reject an incomplete installation before stopping a currently running service.
@@ -157,6 +201,23 @@ mod tests {
         fs::set_permissions(layout.helper_path(), fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_file(layout.managed_home.join("system/Image")).unwrap();
         assert!(matches!(run(&layout), Err(Error::Provision(_))));
+    }
+
+    #[test]
+    fn guest_boot_report_requires_matching_live_address_and_active_services() {
+        let ip = "192.0.2.7".parse().unwrap();
+        let valid = "schema=5\nip=192.0.2.7\nfirecrab_api=active\nfirecrab_net_helper=active\n";
+        verify_guest_boot_report(valid, ip).unwrap();
+        for invalid in [
+            valid.replace("schema=5", "schema=0"),
+            valid.replace("192.0.2.7", "192.0.2.8"),
+            valid.replace("firecrab_api=active", "firecrab_api=failed"),
+            valid.replace("firecrab_net_helper=active\n", ""),
+            format!("{valid}firecrab_api=active\n"),
+            String::new(),
+        ] {
+            assert!(verify_guest_boot_report(&invalid, ip).is_err(), "{invalid}");
+        }
     }
 
     #[test]
