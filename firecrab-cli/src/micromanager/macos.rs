@@ -15,7 +15,7 @@ use std::process::{Child, Command as ProcessCommand, ExitStatus};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Command, debug, report};
+use super::{Command, DevCommand, debug, report};
 
 const HELPER_NAME: &str = "firecrab-micromanager-macos";
 const HELPER_ENV: &str = "FIRECRAB_MICROMANAGER_HELPER";
@@ -117,11 +117,15 @@ pub fn run(command: Command) -> Result<i32, Error> {
         Command::Status => run_status(),
         Command::Debug { json, logs, tail } => run_debug(debug::Options::new(json, logs, tail)),
         Command::Dev {
+            command,
             source,
             release,
             restore,
             yes,
-        } => run_dev(source.as_deref(), release, restore, yes),
+        } => match command {
+            Some(command) => run_dev_control(command),
+            None => run_dev(source.as_deref(), release, restore, yes),
+        },
         Command::Shell { command } => run_shell(&command),
         Command::ForwardPorts {
             manager,
@@ -266,6 +270,13 @@ fn run_dev(source: Option<&Path>, release: bool, restore: bool, yes: bool) -> Re
     }
     report!("[PASS] API: http://127.0.0.1:5523/");
     report!("  logs: firecrab service debug --logs --tail 100");
+    Ok(0)
+}
+
+fn run_dev_control(command: DevCommand) -> Result<i32, Error> {
+    let layout = lifecycle::Layout::from_process_env()?;
+    let ip = running_guest_ip(&layout)?;
+    dev::control(&layout, ip, command)?;
     Ok(0)
 }
 
@@ -421,16 +432,7 @@ fn run_shell(command: &[String]) -> Result<i32, Error> {
     use std::io::IsTerminal;
 
     let layout = lifecycle::Layout::from_process_env()?;
-    let paths = daemon::paths(&layout)?;
-    let status = daemon::status(&layout)?;
-    let guest_marker = fs::read_to_string(&paths.manager_ready).unwrap_or_default();
-    let ip = status
-        .detail
-        .as_deref()
-        .and_then(manager_ip)
-        .or_else(|| manager_ip(&guest_marker))
-        .filter(|_| status.loaded)
-        .ok_or(Error::ShellNotRunning)?;
+    let ip = running_guest_ip(&layout)?;
     let runtime = layout.managed_home.join("runtime");
     if !runtime.join("manager_ed25519").is_file() {
         return Err(Error::ShellCredentials(runtime));
@@ -445,6 +447,19 @@ fn run_shell(command: &[String]) -> Result<i32, Error> {
         eprintln!("{REPAIR_HINT}");
     }
     Ok(code)
+}
+
+fn running_guest_ip(layout: &lifecycle::Layout) -> Result<std::net::IpAddr, Error> {
+    let paths = daemon::paths(layout)?;
+    let status = daemon::status(layout)?;
+    let guest_marker = fs::read_to_string(&paths.manager_ready).unwrap_or_default();
+    status
+        .detail
+        .as_deref()
+        .and_then(manager_ip)
+        .or_else(|| manager_ip(&guest_marker))
+        .filter(|_| status.loaded)
+        .ok_or(Error::ShellNotRunning)
 }
 
 /// OpenSSH parses an `-o` value again and expands percent tokens, even

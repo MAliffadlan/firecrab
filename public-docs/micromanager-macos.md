@@ -79,11 +79,18 @@ is not required; inspect guest logs with `service debug --logs`.
 ./target/debug/firecrab service dev --source /path/to/firecrab # Select checkout
 ./target/debug/firecrab service dev --release                 # Optimized local build
 ./target/debug/firecrab service dev --yes                     # Skip download prompt
+./target/debug/firecrab service dev start                     # Start guest API + helper
+./target/debug/firecrab service dev stop                      # Stop guest API + helper
+./target/debug/firecrab service dev restart                   # Restart guest API + helper
 ./target/debug/firecrab service debug --logs --tail 100       # Inspect logs
 ./target/debug/firecrab service shell                         # Root shell in the guest
 ./target/debug/firecrab service dev --restore                 # Return to installed binaries
 ./target/debug/firecrab service dev --help                    # List options
 ```
+
+`dev start`, `stop`, and `restart` require a running management VM and preserve
+microManager, deployed binaries, and development overrides. They do not rebuild
+sources and cannot be combined with build or restore options.
 
 `dev` builds local sources in debug mode; `--release` optimizes the same sources.
 `--restore` returns to the packaged API/helper from `service install` or the latest

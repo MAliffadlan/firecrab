@@ -61,9 +61,17 @@ executables. Run the command again after source edits; it does not watch files.
 .\target\debug\firecrab.exe service dev --source 'C:\work\firecrab'
 .\target\debug\firecrab.exe service dev --release
 .\target\debug\firecrab.exe service dev --yes
+.\target\debug\firecrab.exe service dev start
+.\target\debug\firecrab.exe service dev stop
+.\target\debug\firecrab.exe service dev restart
 .\target\debug\firecrab.exe service dev --restore # Installed release binaries
 npm run dev --prefix firecrab-frontend            # http://localhost:8080
 ```
+
+`dev start`, `stop`, and `restart` require a running management VM and preserve
+microManager's scheduled task, the WSL distribution, deployed binaries, and
+development overrides. They do not rebuild sources and cannot be combined with
+build or restore options.
 
 Vite proxies `/api` and `/ws` to `127.0.0.1:5523` through WSL localhost forwarding.
 For running MicroVMs, the source-built net-helper binds each TCP forwarded port
