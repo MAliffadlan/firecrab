@@ -579,6 +579,7 @@ mod tests {
         for action in [
             "install",
             "reinstall",
+            "repair",
             "start",
             "stop",
             "status",

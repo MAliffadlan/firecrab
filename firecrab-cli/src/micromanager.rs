@@ -82,8 +82,8 @@ pub enum Command {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Repair the macOS service, remaining helpers, and OS filesystem with a backup.
-    #[cfg(target_os = "macos")]
+    /// Repair the resident service using the existing managed VM and installed binaries.
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     Repair,
     /// Remove microManager and optionally all managed VM data.
     Uninstall {
@@ -268,7 +268,6 @@ mod tests {
         assert!(TestCli::try_parse_from(["test", "debug", "--logs", "--tail", "1001"]).is_err());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn repair_requires_no_install_or_download_options() {
         let repair = TestCli::try_parse_from(["test", "repair"]).unwrap();

@@ -8,6 +8,7 @@ mod dev;
 mod doctor;
 mod lifecycle;
 mod provision;
+mod repair;
 mod wsl;
 
 use super::{Command, DevCommand, debug};
@@ -29,6 +30,8 @@ pub enum Error {
     #[error(transparent)]
     Dev(#[from] super::dev::Error),
     #[error(transparent)]
+    Repair(#[from] repair::Error),
+    #[error(transparent)]
     Wsl(#[from] wsl::Error),
     #[error("the management VM did not become healthy: {0}")]
     Unhealthy(String),
@@ -46,8 +49,12 @@ pub fn run(command: Command) -> Result<i32, Error> {
     match command {
         Command::Install { yes } => run_install(false, yes),
         Command::Reinstall { yes } => run_install(true, yes),
-        #[cfg(target_os = "macos")]
-        Command::Repair => Err(Error::MacosOnly("repair")),
+        #[cfg(any(target_os = "macos", target_os = "windows", test))]
+        Command::Repair => {
+            let status = repair::run(&lifecycle::Layout::from_process_env()?)?;
+            print_daemon_status(&status);
+            Ok(0)
+        }
         Command::Uninstall { purge } => {
             run_uninstall(&lifecycle::Layout::from_process_env()?, purge)
         }

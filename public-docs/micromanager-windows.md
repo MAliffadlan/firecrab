@@ -122,6 +122,7 @@ The nested workload boots Debian's own kernel from `linux-image-amd64` or `linux
 firecrab service status
 firecrab service stop
 firecrab service start
+firecrab service repair             # rebuild the task and restart installed guest services
 firecrab service reinstall          # provision the distribution again, preserve data
 firecrab service uninstall          # remove the scheduled task, preserve the distribution and data
 firecrab service uninstall --purge  # also unregister the distribution and delete managed data
@@ -130,6 +131,30 @@ firecrab service uninstall --purge  # also unregister the distribution and delet
 The dashboard and API are available at `http://127.0.0.1:5523/` while status is healthy.
 The API stays loopback-only inside Debian and reaches Windows through WSL localhost forwarding, so no SSH tunnel is involved.
 `--purge` is deliberately destructive and refuses unsafe paths, symlinks, and roots whose final component is not `micromanager`.
+
+## Repair an existing installation
+
+```powershell
+firecrab service repair
+```
+
+`repair` validates the existing `distro\ext4.vhdx`, completed provisioning,
+registered `firecrab-debian` distribution, and task-registration prerequisites
+before stopping the resident service. It recreates a missing or damaged
+`runtime\microManager-task.xml` and replaces the per-user scheduled task.
+It then starts the holder, reloads systemd, clears failed unit state, enables
+and restarts the installed helper and API, and checks both live guest services
+and the Windows localhost API. Older installations using `firecrab-net-helper`
+are supported. Progress prints six stages; readiness has the same five-minute
+deadline as `service start`. Any failed stage returns a nonzero exit code.
+
+The command uses the existing disk and binaries without downloads, package
+installation, reimporting the distribution, or changing `service dev` overrides.
+It restarts only `firecrab-debian`; other distributions remain running.
+Windows repair restores service registration and unit state; it does not perform
+the macOS backend's offline OS filesystem recovery. An incomplete installation
+requires `service reinstall`. For a failed repair, collect
+`firecrab service debug --logs --tail 100`.
 
 ## Resident service
 
