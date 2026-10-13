@@ -23,6 +23,14 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Added
 
+- The dashboard's Host tab has a Firecrab panel with the version and what
+  `firecrab info` prints: the install prefix, data, config and unit
+  directories, and the address the API listens on. `GET /api/info` serves the
+  same installation fields, plus the configured Firecracker version and live
+  API/helper service states. The panel refreshes every ten seconds and clears
+  stale states when the API becomes unavailable. CLI `firecrab info --json`
+  retains its six-field report.
+
 - macOS and Windows `firecrab service dev start`, `stop`, and `restart` control
   the guest API and helper without rebuilding sources or stopping microManager.
   They preserve the current development overrides and require a running management VM.

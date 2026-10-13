@@ -28,6 +28,7 @@ import type {
   ShellRevisionResponse,
   StorageDeviceResponse,
   StorageRootResponse,
+  FirecrabInfoResponse,
   UpdateCheckResponse,
   UpdateImageKernelRequest,
   UpdateMicroNetworkRequest,
@@ -186,6 +187,11 @@ export function getNetworkInfo(): Promise<NetworkInfoResponse> {
 
 export function getHostStatus(): Promise<HostStatusResponse> {
   return fetchJson("/api/host");
+}
+
+/** Build, install paths, Firecracker version, and live service state (GET /api/info). */
+export function getFirecrabInfo(signal?: AbortSignal): Promise<FirecrabInfoResponse> {
+  return fetchJson("/api/info", { signal });
 }
 
 /** Newest release vs. this build (`GET /api/update`), cached 30 minutes by the API. */
