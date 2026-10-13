@@ -232,12 +232,35 @@ curl -fsS http://127.0.0.1:5523/api/host
 ```
 
 `repair` checks the installed CLI/helper, OS/data disks, SSH key, and completed
-guest provisioning before stopping anything. It then stops the management VM,
-recreates `runtime/daemon.sh` and the launchd plist, and starts the VM and SSH
-tunnel. A deleted plist can be recovered even while its launchd job is loaded.
-Success requires launchd readiness, the local API, and a live SSH check of the
-guest API and network helper. Failed checks return a nonzero exit code and point
+guest provisioning and an OS-repair-capable signed helper before stopping anything.
+It stops the VM and any remaining helpers owned by this user and managed home.
+It backs up the OS disk and checks a copy in an initramfs VM before the root is
+mounted. The data disk, host directory share, and network are not attached.
+The pinned cached Debian image, when available, is verified and attached
+read-only to restore missing Debian files in binary/library trees (including
+service definitions and generators), plus package lists and checksums.
+Regular files must match installed package checksums; symlinks and manifests
+require matching package versions. Matching `lost+found` files can also be restored.
+Existing files, `/etc` configuration, `/usr/local`, and application data stay unchanged. A missing cache produces
+an explicit filesystem-only warning. Failed verification retains the original.
+Only a repair that passes a final read-only filesystem check replaces the OS
+image. A clean check with no restored files keeps the original OS image. Repair then recreates
+`runtime/daemon.sh` and the launchd plist and starts the VM and SSH tunnel. A deleted plist can be recovered even while its launchd job is loaded.
+OS recovery runs over the serial console. Success requires launchd readiness,
+the live local API, and a current-boot guest report published through virtiofs.
+Repair verifies the report's schema, address, API, and network-helper state
+without another SSH command. Failed checks return a nonzero exit code and point
 to `service debug --logs`.
+
+The CLI prints `[REPAIR 1/6]` through `[REPAIR 6/6]` before validation,
+shutdown/helper cleanup, OS backup/repair, registration, startup, and guest boot/API
+checks. Offline filesystem checks have a separate 120-second deadline. During readiness and
+shutdown waits it prints elapsed time and launchd/VM/API state every ten seconds.
+The local VM/API startup readiness deadline is ten seconds. This also applies
+when `install`, `dev`, or `repair` starts the VM. If the VM/API is not ready,
+the command returns a nonzero exit code.
+The startup line gives the VM console log path; inspect it with
+`service debug --logs` when boot remains blocked.
 
 When `start`, `stop`, or `dev` encounters a launchd, VM-readiness, SSH, or localhost
 API failure, the CLI suggests `firecrab service repair`, then retrying the command.
@@ -251,13 +274,14 @@ Run the repeatable [repair E2E and QA](micromanager-repair-qa.md) on an idle
 installation with `scripts/ci-qa-macos-e2e.sh repair`. It retains logs, results,
 and registration backups, and restores injected failures before returning.
 
-The command downloads nothing and keeps the installed binaries, OS/data disks,
-provisioning assets, SSH key, known host keys, and guest development overrides.
+The command downloads nothing and keeps installed binaries, the data disk,
+provisioning assets, SSH keys, and guest development overrides. Backups and
+failed-check logs are retained under `runtime/repairs/os-*/`; clean-check copies
+are removed. A failed filesystem check never installs an unverified image.
 Restarting the management VM stops running MicroVMs. `start` uses the existing
-service registration; `repair` rebuilds it. Missing binaries, an incomplete
-installation, and disk filesystem damage need separate recovery; `repair` does
-not re-provision or run a filesystem repair tool. Use `reinstall` when installed
-assets or guest provisioning need replacement.
+registration; `repair` rebuilds it. Missing binaries or incomplete provisioning
+still need their own recovery. A checkout uses its signed sibling helper for
+OS checks when present; build it with `scripts/build-micromanager-macos.sh target/debug/firecrab-micromanager-macos` before repair.
 
 ## Related
 

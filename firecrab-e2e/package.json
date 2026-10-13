@@ -7,7 +7,7 @@
   "scripts": {
     "test": "playwright test",
     "test:import": "node scripts/test-import.mjs",
-    "test:runner": "node --test scripts/test-runner.mjs",
+    "test:runner": "node --test scripts/test-runner.mjs scripts/test-navigation.mjs",
     "test:register": "playwright test tests/microregistry-register.spec.ts",
     "test:ipv6": "playwright test tests/network-ipv6.spec.ts",
     "test:dhcp": "playwright test tests/oci-dhcp-boot.spec.ts",
