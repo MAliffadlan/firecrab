@@ -5,9 +5,20 @@ use std::process::{Command, Stdio};
 use super::lifecycle::Layout;
 pub use crate::micromanager::dev::{Checkout, Error};
 use crate::micromanager::{
+    DevCommand,
     dev::{guest_script, io_error},
     report,
 };
+
+pub fn control(layout: &Layout, ip: IpAddr, command: DevCommand) -> Result<(), Error> {
+    run_ssh(
+        layout,
+        ip,
+        &format!("bash -s -- {}", command.as_str()),
+        guest_script()?,
+        "guest service control",
+    )
+}
 
 pub fn deploy(
     layout: &Layout,
