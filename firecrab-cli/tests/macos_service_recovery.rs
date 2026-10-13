@@ -77,6 +77,26 @@ fn start_on_a_new_host_suggests_install() {
 }
 
 #[test]
+fn dev_controls_require_a_running_guest_without_installing_or_building() {
+    let root = tempfile::tempdir().unwrap();
+    completed_install(root.path());
+    for action in ["start", "stop", "restart"] {
+        let output = service(root.path(), &["dev", action]);
+        assert!(!output.status.success());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("management VM is not running"), "{error}");
+        assert!(error.contains("firecrab service start"), "{error}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            fs::read(root.path().join("micromanager/data/firecrab-data.raw")).unwrap(),
+            b"preserved"
+        );
+        assert!(!root.path().join("micromanager/runtime/daemon.sh").exists());
+        assert!(!root.path().join("Library/LaunchAgents").exists());
+    }
+}
+
+#[test]
 fn failed_repair_does_not_suggest_repair_again() {
     let root = tempfile::tempdir().unwrap();
     let output = service(root.path(), &["repair"]);

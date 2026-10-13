@@ -23,6 +23,9 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Added
 
+- macOS and Windows `firecrab service dev start`, `stop`, and `restart` control
+  the guest API and helper without rebuilding sources or stopping microManager.
+  They preserve the current development overrides and require a running management VM.
 - macOS `firecrab service repair` rebuilds the resident service registration and
   restarts the existing management VM without downloading or reinstalling assets.
   It preserves installed binaries, the data disk, and SSH credentials, and checks
