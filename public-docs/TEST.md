@@ -151,7 +151,7 @@ A17 required tools: ip nft dnsmasq mkfs.ext4 firecracker sha256sum
 - [ ] **G7f — macOS SSH paths:** default `Application Support` paths remain one OpenSSH known-hosts path. Check the real `ssh -G` parser, wrapper tunnel/reconnect, shell, dev, and port-forward arguments. Repair verifies the current-boot guest report without an SSH command; missing, inactive, duplicate, or mismatched fields fail. Retain existing host pins and reject a changed host key.
 - [ ] **H1 — Update status:** read-only status check succeeds.
 - [ ] **H2 — Host network:** an uplink is present; loopback and internal helper interfaces are absent from the picker.
-- [ ] **H3 — Firecrab info:** the API reports its version and install paths, and the Host tab's Firecrab panel shows them.
+- [ ] **H3 — Firecrab info:** the API reports build/install info, the Firecracker version, and API/helper states. The Host panel shows and refreshes them; an API outage must not retain stale active states.
 - [ ] **U1 — Update apply (optional separate run):** apply update; host recovers and API returns 200.
 
 Hosted macOS and Windows runners do build, unit, and diagnostic checks.

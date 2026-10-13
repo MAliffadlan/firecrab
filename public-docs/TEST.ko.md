@@ -151,7 +151,7 @@ A17 필수 도구: ip nft dnsmasq mkfs.ext4 firecracker sha256sum
 - [ ] **G7f — macOS SSH 경로:** `Application Support` 경로를 OpenSSH가 하나의 호스트 키 파일 경로로 해석한다. 실제 `ssh -G`와 데몬 연결 복구 테스트로 확인한다. shell, dev, 포트 전달도 같은 경로 처리를 사용한다. repair의 마지막 검사는 SSH 명령 없이 이번 부팅의 게스트 보고를 확인한다. 필드 누락·비활성·중복·주소 불일치를 거부한다. 기존 호스트 키를 보존하고 변경된 키는 거부한다.
 - [ ] **H1 — 업데이트 상태:** 읽기 전용 상태 확인 성공.
 - [ ] **H2 — 호스트 네트워크:** uplink가 있으며 loopback·내부 helper 인터페이스는 선택 목록에 없다.
-- [ ] **H3 — Firecrab 정보:** API가 버전과 설치 경로를 알려 주고, Host 탭의 Firecrab 패널이 이를 표시한다.
+- [ ] **H3 — Firecrab 정보:** API가 버전·설치 경로·Firecracker 버전·API/helper 서비스 상태를 알려 준다. Host 탭에서 표시와 상태 갱신을 확인한다. 조회 실패 시 이전 실행 상태를 표시하지 않는다.
 - [ ] **U1 — 업데이트 적용(별도 선택 실행):** 적용 후 호스트가 복구되고 API가 200을 반환한다.
 
 호스팅 macOS·Windows 러너는 빌드·단위 테스트·진단만 수행한다.

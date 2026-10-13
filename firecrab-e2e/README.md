@@ -57,7 +57,7 @@ Host Firecrab panel only (H3, Linux/macOS/Windows):
 npm run test:host --prefix firecrab-e2e
 ```
 
-Expect **2 passed**: info fields/panel placement and API-unavailable messaging.
+Expect **6 passed**: info and runtime fields/panel placement, unavailable messaging, missing runtime tools, older API compatibility, service-state refresh/outage recovery, and stalled request handling.
 This command starts only Vite and mocks all API responses. It needs no running
 API, management VM, or Docker. It fails if port 8080 is already occupied instead
 of reusing another checkout's frontend. Stop Vite before this command.

@@ -1,29 +1,44 @@
 import { useEffect, useState } from "react";
-import type { FirecrabInfo } from "../bindings";
+import type { FirecrabInfoResponse } from "../bindings";
 import { getFirecrabInfo } from "../api/client";
 import { useI18n } from "../i18n";
 
-/**
- * The Firecrab running on this host: its version, and what `firecrab info`
- * prints, which is where it is installed. It is fixed for as long as the API
- * runs, so it is read once rather than polled.
- */
+const POLL_MILLIS = 10_000;
+const REQUEST_TIMEOUT_MILLIS = 5_000;
+
+/** Installation information and live service state on this Firecrab host. */
 export default function FirecrabPanel() {
   const { t } = useI18n();
-  const [info, setInfo] = useState<FirecrabInfo | null>(null);
+  const [info, setInfo] = useState<FirecrabInfoResponse | null>(null);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    getFirecrabInfo()
-      .then((next) => {
-        if (!cancelled) setInfo(next);
-      })
-      .catch(() => {
-        if (!cancelled) setFailed(true);
-      });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let controller: AbortController | undefined;
+    const refresh = async () => {
+      controller = new AbortController();
+      const deadline = setTimeout(() => controller?.abort(), REQUEST_TIMEOUT_MILLIS);
+      try {
+        const next = await getFirecrabInfo(controller.signal);
+        if (cancelled) return;
+        setInfo(next);
+        setFailed(false);
+      } catch {
+        if (cancelled) return;
+        // Do not leave a green service state visible after losing the API.
+        setInfo(null);
+        setFailed(true);
+      } finally {
+        clearTimeout(deadline);
+      }
+      if (!cancelled) timer = setTimeout(refresh, POLL_MILLIS);
+    };
+    void refresh();
     return () => {
       cancelled = true;
+      clearTimeout(timer);
+      controller?.abort();
     };
   }, []);
 
@@ -34,6 +49,12 @@ export default function FirecrabPanel() {
         <dl className="detail-fields mono">
           <dt>version</dt>
           <dd>{info.version}</dd>
+          <dt>firecracker</dt>
+          <dd>{info.firecrackerVersion ?? t("Unavailable", "확인 불가")}</dd>
+          <dt>{t("API service", "API 서비스")}</dt>
+          <dd><ServiceStatus state={info.apiService} unit="firecrab-api.service" /></dd>
+          <dt>{t("helper service", "helper 서비스")}</dt>
+          <dd><ServiceStatus state={info.netHelperService} unit={info.helperUnit ?? "firecrab-helper.service"} /></dd>
           <dt>prefix</dt>
           <dd>{info.prefix}</dd>
           <dt>datadir</dt>
@@ -52,4 +73,22 @@ export default function FirecrabPanel() {
       )}
     </section>
   );
+}
+
+function ServiceStatus({ state, unit }: { state?: string; unit: string }) {
+  const { t } = useI18n();
+  const labels: Record<string, [string, string]> = {
+    active: ["active", "실행 중"],
+    inactive: ["inactive", "중지됨"],
+    failed: ["failed", "실패"],
+    activating: ["activating", "시작 중"],
+    deactivating: ["deactivating", "중지 중"],
+    reloading: ["reloading", "다시 불러오는 중"],
+    maintenance: ["maintenance", "유지 보수 중"],
+    unknown: ["unknown", "확인 불가"],
+  };
+  const value = state ?? "unknown";
+  const label = labels[value];
+  const color = value === "active" ? " running" : value === "failed" ? " error" : "";
+  return <span className={`state-badge${color}`} title={unit}>{label ? t(...label) : value}</span>;
 }

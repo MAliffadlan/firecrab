@@ -1037,6 +1037,21 @@ impl FirecrabInfo {
     }
 }
 
+/// GET /api/info adds runtime probes without changing the CLI's six-field report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FirecrabInfoResponse {
+    #[serde(flatten)]
+    pub info: FirecrabInfo,
+    /// Version of the configured Firecracker binary, or null when unavailable.
+    pub firecracker_version: Option<String>,
+    /// systemd ActiveState, or "unknown" if it cannot be queried.
+    pub api_service: String,
+    pub net_helper_service: String,
+    /// Canonical or legacy helper unit actually queried.
+    pub helper_unit: String,
+}
+
 /// `GET /api/update`, and the `--json` output of `firecrab update --check`.
 /// One type for both so the CLI's report and the API's answer cannot drift.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2367,6 +2382,29 @@ mod tests {
         assert_eq!(json["apiBase"], "http://127.0.0.1:5523");
         assert_eq!(json.as_object().unwrap().len(), 6);
         assert_eq!(serde_json::from_value::<FirecrabInfo>(json).unwrap(), info);
+    }
+
+    #[test]
+    fn firecrab_info_response_keeps_cli_fields_flat_and_adds_runtime_fields() {
+        let response = FirecrabInfoResponse {
+            info: FirecrabInfo::from_lookup("0.3.1", "http://127.0.0.1:5523", |_| None),
+            firecracker_version: Some("v1.17.0".to_owned()),
+            api_service: "active".to_owned(),
+            net_helper_service: "failed".to_owned(),
+            helper_unit: "firecrab-helper.service".to_owned(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["version"], "0.3.1");
+        assert_eq!(json["apiBase"], "http://127.0.0.1:5523");
+        assert_eq!(json["firecrackerVersion"], "v1.17.0");
+        assert_eq!(json["apiService"], "active");
+        assert_eq!(json["netHelperService"], "failed");
+        assert_eq!(json["helperUnit"], "firecrab-helper.service");
+        assert_eq!(json.as_object().unwrap().len(), 10);
+        assert_eq!(
+            serde_json::from_value::<FirecrabInfoResponse>(json).unwrap(),
+            response
+        );
     }
 
     #[test]

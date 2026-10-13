@@ -218,7 +218,8 @@ pass H2
 
 http GET /api/info
 expect H3 200
-json_get 'd["version"] + d["datadir"]' >/dev/null
+json_get 'd["version"] + d["datadir"] + d["apiService"] + d["netHelperService"] + d["helperUnit"]' >/dev/null
+json_get 'd["firecrackerVersion"] or "unknown"' >/dev/null
 pass H3
 
 http POST /api/micro-networks \

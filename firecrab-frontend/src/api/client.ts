@@ -28,7 +28,7 @@ import type {
   ShellRevisionResponse,
   StorageDeviceResponse,
   StorageRootResponse,
-  FirecrabInfo,
+  FirecrabInfoResponse,
   UpdateCheckResponse,
   UpdateImageKernelRequest,
   UpdateMicroNetworkRequest,
@@ -189,9 +189,9 @@ export function getHostStatus(): Promise<HostStatusResponse> {
   return fetchJson("/api/host");
 }
 
-/** This build and where it is installed (`GET /api/info`), the same fields `firecrab info` prints. */
-export function getFirecrabInfo(): Promise<FirecrabInfo> {
-  return fetchJson("/api/info");
+/** Build, install paths, Firecracker version, and live service state (GET /api/info). */
+export function getFirecrabInfo(signal?: AbortSignal): Promise<FirecrabInfoResponse> {
+  return fetchJson("/api/info", { signal });
 }
 
 /** Newest release vs. this build (`GET /api/update`), cached 30 minutes by the API. */

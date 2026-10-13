@@ -26,7 +26,10 @@ Entries land here as work merges, and move under the next version heading when t
 - The dashboard's Host tab has a Firecrab panel with the version and what
   `firecrab info` prints: the install prefix, data, config and unit
   directories, and the address the API listens on. `GET /api/info` serves the
-  same fields, and `firecrab info --json` now shares their type.
+  same installation fields, plus the configured Firecracker version and live
+  API/helper service states. The panel refreshes every ten seconds and clears
+  stale states when the API becomes unavailable. CLI `firecrab info --json`
+  retains its six-field report.
 
 - macOS `firecrab service repair` rebuilds the resident service registration and
   restarts the existing management VM without downloading or reinstalling assets.
