@@ -19,6 +19,17 @@ markers. They do not create a manifest or replace its kernel or OS.
 An installation without `<managed-home>/micromanager.toml` uses the legacy
 download pins for validation and offline OS repair.
 
+## Command behavior
+
+| Command | Installation behavior |
+| --- | --- |
+| First `service install` | Install directly from the bundled TOML. |
+| `service install` on a legacy installation | Apply the TOML and record the completed installation. |
+| `service reinstall` | Remove the service registration, old scripts, installed TOML, and provisioning records; install again from the bundled TOML. Preserve managed data. |
+| `service uninstall --purge` | Remove the service registration and all managed files, including legacy scripts, TOML, disks, keys, and downloads. Windows also unregisters `firecrab-debian`. |
+
+Plain `service uninstall` continues to preserve managed data for a later install.
+
 ## Explicit installation and migration
 
 Run either command with a CLI that embeds the new manifest:
@@ -45,6 +56,7 @@ It preserves the persistent data disk and management SSH client keys. It clears
 the cached SSH server fingerprint because the new OS generates new server keys.
 A different manifest also reprovisions the OS. Repeating an install with the same completed
 manifest preserves it.
+`reinstall` always rebuilds the OS and boot files, even when the TOML is unchanged.
 
 Provisioning installs the exact Debian kernel named in the TOML. It extracts that
 kernel into `system/Image` and copies its matching initrd into `system/initrd.img`.
@@ -58,6 +70,10 @@ Migration reprovisions the existing `firecrab-debian` WSL distribution. It does
 not unregister or reimport it, so its data remains in place. The rootfs image is
 used only when importing a missing distribution. A completed matching manifest
 is reused by `install`; `reinstall` runs the guest provisioner again.
+Reinstallation removes the old task registration, installation scripts, and
+completion records before rebuilding them. TOML provisioning also removes
+Firecrab's development service overrides so the release installer starts its
+installed binaries. User service overrides and distribution data remain in place.
 
 The TOML's Debian kernel is installed and used for the nested Firecracker check.
 It is separate from Microsoft's shared WSL kernel. Migration does not replace

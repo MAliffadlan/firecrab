@@ -85,6 +85,7 @@ pub fn prepare(
     managed_home: &Path,
     artifacts: &DownloadedArtifacts,
     manifest: &Manifest,
+    reinstall: bool,
 ) -> Result<PreparedLayout, Error> {
     let system = managed_home.join("system");
     let data = managed_home.join("data");
@@ -98,7 +99,7 @@ pub fn prepare(
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
             .map_err(|source| io_error("protect directory", directory, source))?;
     }
-    reset_failed_system(&system, &runtime, manifest)?;
+    reset_system(&system, &runtime, manifest, reinstall)?;
 
     let os_disk = system.join("debian-system.raw");
     prepare_os_disk(&artifacts.debian_archive, &os_disk, &system)?;
@@ -223,7 +224,12 @@ fn validate_arm64_image(path: &Path) -> Result<(), Error> {
     }
 }
 
-fn reset_failed_system(system: &Path, runtime: &Path, manifest: &Manifest) -> Result<(), Error> {
+fn reset_system(
+    system: &Path,
+    runtime: &Path,
+    manifest: &Manifest,
+    reinstall: bool,
+) -> Result<(), Error> {
     let failed = runtime.join("provision.failed");
     let provisioned = runtime.join("provisioned");
     let incomplete = runtime.join("provision.phase").is_file() && !provisioned.is_file();
@@ -234,12 +240,14 @@ fn reset_failed_system(system: &Path, runtime: &Path, manifest: &Manifest) -> Re
             .any(|line| line == format!("schema={PROVISION_SCHEMA}"))
             || !manifest.matches_marker(&marker)?
             || !manifest::marker_value_matches(&marker, "kernel", &manifest.macos.kernel_version));
-    if !failed.is_file() && !outdated && !incomplete {
+    if !reinstall && !failed.is_file() && !outdated && !incomplete {
         return Ok(());
     }
     report!(
         "[RESET] {} Debian system disk; persistent data is preserved",
-        if outdated {
+        if reinstall {
+            "reinstalled"
+        } else if outdated {
             "outdated"
         } else if failed.is_file() {
             "failed"
@@ -1072,7 +1080,7 @@ mod tests {
         assert!(error.to_string().contains("stopped during firecrab"));
         assert!(error.to_string().contains("service reinstall"));
 
-        reset_failed_system(&system, &runtime, &Manifest::bundled().unwrap()).unwrap();
+        reset_system(&system, &runtime, &Manifest::bundled().unwrap(), false).unwrap();
         assert!(!system.join("debian-system.raw").exists());
         assert!(!runtime.join("provision.phase").exists());
         assert_eq!(
@@ -1134,7 +1142,7 @@ mod tests {
         assert!(!home.path().join(manifest::FILE_NAME).exists());
 
         let manifest = Manifest::bundled().unwrap();
-        reset_failed_system(&system, &runtime, &manifest).unwrap();
+        reset_system(&system, &runtime, &manifest, false).unwrap();
         assert!(!system.join("debian-system.raw").exists());
         assert!(!system.join("Image").exists());
         assert!(!runtime.join("provisioned").exists());
@@ -1162,7 +1170,7 @@ mod tests {
             .verify_provisioned(&marker, "kernel", &manifest.macos.kernel_version)
             .unwrap();
         manifest.save(home.path()).unwrap();
-        reset_failed_system(&system, &runtime, &manifest).unwrap();
+        reset_system(&system, &runtime, &manifest, false).unwrap();
         require_guest_provisioned(home.path()).unwrap();
         assert_eq!(
             fs::read(system.join("debian-system.raw")).unwrap(),
@@ -1172,6 +1180,20 @@ mod tests {
         assert_eq!(
             fs::read(data.join("firecrab-data.raw")).unwrap(),
             b"keep data"
+        );
+        super::super::super::managed_home::clear_installation_state(home.path()).unwrap();
+        reset_system(&system, &runtime, &manifest, true).unwrap();
+        assert!(!system.join("debian-system.raw").exists());
+        assert!(!system.join("Image").exists());
+        assert!(!system.join("initrd.img").exists());
+        assert!(!home.path().join(manifest::FILE_NAME).exists());
+        assert_eq!(
+            fs::read(data.join("firecrab-data.raw")).unwrap(),
+            b"keep data"
+        );
+        assert_eq!(
+            fs::read(runtime.join("manager_ed25519")).unwrap(),
+            b"keep key"
         );
     }
 

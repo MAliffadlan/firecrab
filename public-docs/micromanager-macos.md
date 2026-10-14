@@ -138,7 +138,7 @@ firecrab service status
 firecrab service stop
 firecrab service start
 firecrab service repair             # rebuild service registration and restart the existing VM
-firecrab service reinstall          # replace binaries/OS when needed, preserve data
+firecrab service reinstall          # remove installation state, rebuild from TOML, preserve data
 firecrab service uninstall          # stop daemon and remove binaries, preserve data
 firecrab service uninstall --purge  # also delete managed OS and persistent data
 ```

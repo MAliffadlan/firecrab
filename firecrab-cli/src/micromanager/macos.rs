@@ -15,7 +15,7 @@ use std::process::{Child, Command as ProcessCommand, ExitStatus};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Command, DevCommand, debug, manifest, report};
+use super::{Command, DevCommand, debug, managed_home, manifest, report};
 
 const HELPER_NAME: &str = "firecrab-micromanager-macos";
 const HELPER_ENV: &str = "FIRECRAB_MICROMANAGER_HELPER";
@@ -48,6 +48,8 @@ pub enum Error {
     Dev(#[from] dev::Error),
     #[error(transparent)]
     Manifest(#[from] manifest::Error),
+    #[error(transparent)]
+    ManagedHome(#[from] managed_home::Error),
     #[error("could not launch EFI provisioning helper {path}: {source}")]
     ProvisionHelper {
         path: PathBuf,
@@ -165,13 +167,18 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
     // Before anything changes, so declining the download leaves the host as it was.
     let manifest = manifest::Manifest::bundled()?;
     let artifacts = provision::download_all(&layout.managed_home, &manifest, assume_yes)?;
-    daemon::stop(&layout)?;
+    if reinstall {
+        daemon::uninstall(&layout)?;
+        managed_home::clear_installation_state(&layout.managed_home)?;
+    } else {
+        daemon::stop(&layout)?;
+    }
     if install_binaries {
         lifecycle::install_from(&cli_source, &helper_source, &layout, reinstall)?;
     } else {
         report!("[PASS] binaries: already installed");
     }
-    let prepared = provision::prepare(&layout.managed_home, &artifacts, &manifest)?;
+    let prepared = provision::prepare(&layout.managed_home, &artifacts, &manifest, reinstall)?;
     let guest_result = ensure_guest_provisioned(&layout, &prepared)?;
     manifest.verify_provisioned(&guest_result, "kernel", &manifest.macos.kernel_version)?;
     let daemon_paths = daemon::install(&layout, &layout.helper_path(), &prepared.ssh_private_key)?;

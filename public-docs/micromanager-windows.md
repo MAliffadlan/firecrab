@@ -126,7 +126,7 @@ firecrab service status
 firecrab service stop
 firecrab service start
 firecrab service repair             # rebuild the task and restart installed guest services
-firecrab service reinstall          # provision the distribution again, preserve data
+firecrab service reinstall          # remove installation state, provision from TOML, preserve data
 firecrab service uninstall          # remove the scheduled task, preserve the distribution and data
 firecrab service uninstall --purge  # also unregister the distribution and delete managed data
 ```

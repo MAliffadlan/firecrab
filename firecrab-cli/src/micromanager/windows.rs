@@ -11,7 +11,7 @@ mod provision;
 mod repair;
 mod wsl;
 
-use super::{Command, DevCommand, debug, manifest};
+use super::{Command, DevCommand, debug, managed_home, manifest};
 use doctor::Status;
 use wsl::DISTRO_NAME;
 
@@ -27,6 +27,8 @@ pub enum Error {
     Provision(#[from] provision::Error),
     #[error(transparent)]
     Manifest(#[from] manifest::Error),
+    #[error(transparent)]
+    ManagedHome(#[from] managed_home::Error),
     #[error(transparent)]
     Daemon(#[from] daemon::Error),
     #[error(transparent)]
@@ -112,7 +114,12 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
     lifecycle::prepare(&layout)?;
     // Before the service stops, so declining the download leaves it running.
     let artifacts = provision::download_all(&host, &layout.downloads(), assume_yes)?;
-    daemon::stop()?;
+    if reinstall {
+        daemon::uninstall(&layout)?;
+        managed_home::clear_installation_state(&layout.managed_home)?;
+    } else {
+        daemon::stop()?;
+    }
 
     let imported = provision::ensure_distro(&layout, &artifacts.debian_rootfs)?;
     let guest = provision::ensure_provisioned(&layout, &host, reinstall || imported)?;
@@ -715,6 +722,17 @@ mod tests {
     #[test]
     fn purge_unregisters_the_distribution_and_deletes_the_managed_home() {
         let (_directory, layout) = layout();
+        manifest::Manifest::bundled()
+            .unwrap()
+            .save(&layout.managed_home)
+            .unwrap();
+        std::fs::write(
+            layout.provision().join("legacy-install.sh"),
+            b"legacy installer",
+        )
+        .unwrap();
+        std::fs::write(layout.provision_marker(), b"legacy marker").unwrap();
+        std::fs::write(layout.distro().join("ext4.vhdx"), b"distribution data").unwrap();
         let wsl = fake::answer(|line| match line {
             "wsl.exe --list --quiet" => Ok("Debian\nfirecrab-debian\n".into()),
             "wsl.exe --list --running --quiet" => Ok(String::new()),
@@ -726,6 +744,11 @@ mod tests {
         assert!(
             wsl.calls()
                 .contains(&"wsl.exe --unregister firecrab-debian".to_string())
+        );
+        assert!(
+            !wsl.calls()
+                .iter()
+                .any(|line| line == "wsl.exe --unregister Debian")
         );
     }
 

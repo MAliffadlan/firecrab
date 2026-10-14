@@ -281,6 +281,12 @@ fn provision(layout: &Layout, host: &Host, force: bool, share: &str) -> Result<S
             return Ok(result);
         }
     }
+    let directory = layout.provision();
+    fs::create_dir_all(&directory).map_err(|source| Error::Io {
+        action: "create provisioning directory",
+        path: directory,
+        source,
+    })?;
     write_script(
         &layout.provision().join("guest-provision.sh"),
         &guest_provision_script(host, share),
@@ -420,6 +426,7 @@ phase apt-update
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 phase apt-install
+{clean_guest_installation}
 apt-get install -y ca-certificates curl sudo tar findutils xz-utils gzip zstd lz4 lzop \
   nftables dnsmasq dnsmasq-utils iproute2 jq e2fsprogs fakeroot busybox-static socat \
   binutils initramfs-tools {kernel_package}
@@ -470,6 +477,14 @@ exit 0
             None => format!("linux-image-{}", host.debian_architecture),
         },
         architecture = host.architecture,
+        clean_guest_installation = if host.manifest_id.is_some() {
+            r#"for unit in firecrab-api firecrab-helper firecrab-net-helper; do
+  rm -f "/etc/systemd/system/$unit.service.d/90-firecrab-dev.conf"
+done
+systemctl daemon-reload"#
+        } else {
+            ""
+        },
         firecracker = host.firecracker_version,
         firecracker_archive = host.artifacts[1].filename,
         installer = host.artifacts[3].filename,
@@ -811,6 +826,60 @@ mod tests {
             assert_eq!(provision(&layout, &host, false, SHARE).unwrap(), marker);
             assert!(untouched.calls().is_empty());
             assert_eq!(fs::read(&disk).unwrap(), b"keep distribution");
+            drop(untouched);
+            super::super::super::managed_home::clear_installation_state(&layout.managed_home)
+                .unwrap();
+            assert!(!layout.provision_marker().exists());
+            assert!(!layout.provision().exists());
+            assert!(!layout.managed_home.join(manifest::FILE_NAME).exists());
+            let wsl = guest(&layout, Ok(marker.clone()));
+            assert_eq!(provision(&layout, &host, true, SHARE).unwrap(), marker);
+            assert_eq!(wsl.calls().len(), 1);
+            assert_eq!(fs::read(&disk).unwrap(), b"keep distribution");
+        }
+    }
+
+    #[test]
+    fn toml_provisioning_removes_old_development_overrides_and_preserves_user_configuration() {
+        let manifest = Manifest::bundled().unwrap();
+        let host = host_from_manifest(&manifest, "x86_64").unwrap();
+        let script = guest_provision_script(&host, SHARE);
+        let cleanup = script
+            .split_once("\nphase apt-install\n")
+            .unwrap()
+            .1
+            .split_once("\napt-get install ")
+            .unwrap()
+            .0;
+        let cleanup = cleanup.replace("/etc/systemd/system", "${FIRECRAB_TEST_UNIT_ROOT}");
+        let root = tempfile::tempdir().unwrap();
+        for unit in ["firecrab-api", "firecrab-helper", "firecrab-net-helper"] {
+            let directory = root.path().join(format!("{unit}.service.d"));
+            fs::create_dir(&directory).unwrap();
+            fs::write(
+                directory.join("90-firecrab-dev.conf"),
+                b"old development binary",
+            )
+            .unwrap();
+            fs::write(directory.join("10-user.conf"), b"keep user config").unwrap();
+        }
+        let output = std::process::Command::new("bash")
+            .args(["-c", &format!("set -eu\nsystemctl() {{ :; }}\n{cleanup}")])
+            .env("FIRECRAB_TEST_UNIT_ROOT", root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for unit in ["firecrab-api", "firecrab-helper", "firecrab-net-helper"] {
+            let directory = root.path().join(format!("{unit}.service.d"));
+            assert!(!directory.join("90-firecrab-dev.conf").exists());
+            assert_eq!(
+                fs::read(directory.join("10-user.conf")).unwrap(),
+                b"keep user config"
+            );
         }
     }
 
