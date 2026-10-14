@@ -509,6 +509,7 @@ dependencies = [
 name = "firecrab-cli"
 version = "0.3.1"
 dependencies = [
+ "axum",
  "clap",
  "crossterm",
  "firecrab-api-types",

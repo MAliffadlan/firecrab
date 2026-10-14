@@ -1,5 +1,6 @@
 # microManager on macOS
 
+To change the management VM's CPU, RAM, data disk, or network, use [`firecrab service resorce` or the web Host screen](micromanager-resources.md).
 microManager runs Firecrab inside a managed Debian VM built on Apple `Virtualization.framework`.
 Linux hosts continue to run Firecracker directly through KVM and do not use this launcher.
 The complete install, nested KVM, Firecracker workload, launchd recovery, and localhost API path has been validated on an Apple M5 running macOS 26.6.2.

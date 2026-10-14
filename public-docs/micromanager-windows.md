@@ -1,5 +1,7 @@
 # microManager on Windows
 
+To change CPU, RAM, the managed disk, or WSL2 networking, use [`firecrab service resorce` or the web Host screen](micromanager-resources.md). CPU, RAM, and networking settings affect all WSL2 distributions.
+
 microManager runs Firecrab inside a managed Debian distribution on WSL2.
 Linux hosts continue to run Firecracker directly through KVM and do not use this launcher.
 The commands, their output, and the managed-data layout match [microManager on macOS](micromanager-macos.md).
@@ -159,7 +161,7 @@ requires `service reinstall`. For a failed repair, collect
 ## Resident service
 
 WSL stops a distribution about 15 seconds after its last client exits, even with systemd running inside.
-The per-user scheduled task `\Firecrab\microManager` holds it open with `wslg.exe -- sleep infinity`, which shows no console window.
+The per-user scheduled task `\Firecrab\microManager` runs the native resource controller in a hidden window. The controller holds WSL open with a windowless `wsl.exe --exec sleep infinity` child and serves Host resource controls on loopback port 5524.
 The task starts at logon and fires again every minute; `IgnoreNew` makes that a no-op while the holder runs.
 Together they bring the distribution back after `wsl --shutdown` or a crash, like launchd's `KeepAlive` on macOS.
 In the lab the API answered again 100 seconds after `wsl --shutdown`: up to a minute for the trigger, then the boot.

@@ -31,7 +31,11 @@ pub enum Error {
 }
 
 pub fn run(layout: &Layout) -> Result<daemon::Status, Error> {
-    run_with(layout, daemon::task_definition, daemon::READY_TIMEOUT)
+    run_with(
+        layout,
+        || daemon::task_definition(layout),
+        daemon::READY_TIMEOUT,
+    )
 }
 
 fn run_with(

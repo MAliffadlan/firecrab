@@ -2,8 +2,9 @@
 //!
 //! WSL stops a distribution about 15 seconds after its last client exits, even
 //! with systemd running inside, so something has to hold it open. A per-user
-//! scheduled task runs `wslg.exe -- sleep infinity`: no console window, no
-//! administrator rights. The task starts at logon and re-fires every minute,
+//! scheduled task runs the native resource controller in a hidden window.
+//! It owns a windowless `wsl.exe --exec sleep infinity` holder. No administrator
+//! rights are needed. The task starts at logon and re-fires every minute,
 //! and `IgnoreNew` makes that a no-op while the holder runs. Together they play
 //! the part of launchd's `RunAtLoad` and `KeepAlive` on macOS.
 
@@ -72,11 +73,11 @@ impl Status {
 /// Registers (or replaces) the task. It is written to `runtime/` first because
 /// `schtasks /Create /XML` only reads definitions from a file.
 pub fn install(layout: &Layout) -> Result<PathBuf, Error> {
-    register(layout, &task_definition()?)
+    register(layout, &task_definition(layout)?)
 }
 
 /// Resolve registration prerequisites before repair stops a running service.
-pub(super) fn task_definition() -> Result<String, Error> {
+pub(super) fn task_definition(layout: &Layout) -> Result<String, Error> {
     let user = user_id(
         std::env::var("USERNAME").ok(),
         std::env::var("USERDOMAIN").ok(),
@@ -85,10 +86,20 @@ pub(super) fn task_definition() -> Result<String, Error> {
     if !launcher.is_file() {
         return Err(Error::MissingLauncher(launcher));
     }
-    Ok(render_task(&user, &launcher))
+    let cli = std::env::current_exe().map_err(|source| Error::Io {
+        action: "resolve the native resource controller",
+        path: layout.managed_home.clone(),
+        source,
+    })?;
+    Ok(render_resource_task(&user, &cli, &layout.managed_home))
 }
 
 pub(super) fn register(layout: &Layout, task: &str) -> Result<PathBuf, Error> {
+    super::super::resource::controller_id(&layout.managed_home).map_err(|error| Error::Io {
+        action: "initialize resource controller identity",
+        path: layout.managed_home.clone(),
+        source: io::Error::other(error.to_string()),
+    })?;
     let definition = layout.runtime().join("microManager-task.xml");
     fs::write(&definition, utf16_with_bom(task)).map_err(|source| Error::Io {
         action: "write the scheduled task definition",
@@ -152,8 +163,20 @@ fn publish_host_platform() {
         Some(version) => format!("WSL2 {version}"),
         None => "WSL2".to_string(),
     };
-    let descriptor =
-        host_platform::descriptor_json(HostOs::Windows, name, &version, &virtualization);
+    let controller_id = Layout::from_process_env().ok().and_then(|layout| {
+        super::super::resource::read::<String>(
+            &layout.runtime().join("resource-controller-id.json"),
+        )
+        .ok()
+        .flatten()
+    });
+    let descriptor = host_platform::descriptor_with_controller(
+        HostOs::Windows,
+        name,
+        &version,
+        &virtualization,
+        controller_id,
+    );
     let script = format!(
         "mkdir -p /etc/firecrab && printf '%s\\n' {} > {HOST_PLATFORM_DESCRIPTOR_PATH}",
         wsl::shell_quote(&descriptor)
@@ -316,7 +339,7 @@ fn launcher_in(program_files: Option<PathBuf>) -> PathBuf {
         .join("wslg.exe")
 }
 
-fn render_task(user: &str, launcher: &Path) -> String {
+fn render_task(user: &str, launcher: &Path, arguments: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -355,7 +378,7 @@ fn render_task(user: &str, launcher: &Path) -> String {
   <Actions Context="Author">
     <Exec>
       <Command>{launcher}</Command>
-      <Arguments>-d {distro} -u root -- sleep infinity</Arguments>
+      <Arguments>{arguments}</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -363,7 +386,21 @@ fn render_task(user: &str, launcher: &Path) -> String {
         distro = DISTRO_NAME,
         user = xml_escape(user),
         launcher = xml_escape(&launcher.to_string_lossy()),
+        arguments = xml_escape(arguments),
     )
+}
+
+fn render_resource_task(user: &str, cli: &Path, home: &Path) -> String {
+    let windows = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let launcher = windows.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let cli = cli.to_string_lossy().replace('\'', "''");
+    let home = home.to_string_lossy().replace('\'', "''");
+    let arguments = format!(
+        "-NoProfile -NonInteractive -WindowStyle Hidden -Command \"& '{cli}' service resource-server --home '{home}'\""
+    );
+    render_task(user, &launcher, &arguments)
 }
 
 /// The XML declares UTF-16, so the bytes on disk must match it.
@@ -389,10 +426,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resource_controller_owns_the_holder_and_preserves_custom_managed_home() {
+        let task = render_resource_task(
+            "LAB\\dev",
+            Path::new("C:\\Apps\\firecrab.exe"),
+            Path::new("C:\\User Data\\micromanager"),
+        );
+        assert!(task.contains("-WindowStyle Hidden"));
+        assert!(task.contains("&apos;C:\\Apps\\firecrab.exe&apos; service resource-server"));
+        assert!(
+            task.contains("service resource-server --home &apos;C:\\User Data\\micromanager&apos;")
+        );
+        assert!(task.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+    }
+
+    #[test]
     fn the_task_holds_the_managed_distribution_open() {
         let task = render_task(
             "LAB\\dev & co",
             Path::new("C:\\Program Files\\WSL\\wslg.exe"),
+            "-d firecrab-debian -u root -- sleep infinity",
         );
         assert!(task.contains("<UserId>LAB\\dev &amp; co</UserId>"));
         assert!(task.contains("<Command>C:\\Program Files\\WSL\\wslg.exe</Command>"));

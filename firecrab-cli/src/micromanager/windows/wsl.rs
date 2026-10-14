@@ -83,7 +83,16 @@ fn execute(program: &str, args: &[&str]) -> std::io::Result<Output> {
     if let Some(output) = fake::reply(program, args) {
         return Ok(output);
     }
-    let output = ProcessCommand::new(program).args(args).output()?;
+    let mut command = ProcessCommand::new(program);
+    command.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // The resource controller has no visible console. Captured probes
+        // must not create a new window on every browser poll.
+        command.creation_flags(0x08000000);
+    }
+    let output = command.output()?;
     Ok(Output {
         success: output.status.success(),
         stdout: output.stdout,

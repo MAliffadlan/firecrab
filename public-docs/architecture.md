@@ -59,7 +59,7 @@ The host requires Store WSL2 and usable nested `/dev/kvm`; native ARM64 installa
 ![Windows: scheduled task, managed WSL2 distribution, localhost forwarding, and current MicroVM limitation](../assets/architecture/micromanager-windows.en.svg)
 
 1. `firecrab service start` enables the per-user scheduled task `\Firecrab\microManager`.
-2. The task runs `wslg.exe -- sleep infinity` to keep the distribution alive. It starts at logon and retries every minute, with `IgnoreNew` preventing duplicate holders.
+2. The task runs the native resource controller in a hidden window. The controller owns a windowless `wsl.exe --exec sleep infinity` child to keep the distribution alive and serves resource controls on host loopback port 5524. The task starts at logon and retries every minute, with `IgnoreNew` preventing duplicate holders.
 3. WSL2 boots the managed distribution with systemd. OS and data share `distro\ext4.vhdx`; each start writes Windows and WSL versions to the guest's `/etc/firecrab/host-platform.json`.
 4. systemd starts helper, then `firecrab-api`.
 5. WSL localhost forwarding exposes the guest's loopback API on Windows at `127.0.0.1:5523`, without an SSH tunnel.

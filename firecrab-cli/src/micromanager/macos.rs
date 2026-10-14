@@ -2,10 +2,11 @@ mod daemon;
 mod dev;
 mod filesystem;
 mod forward;
-mod lifecycle;
+pub(super) mod lifecycle;
 mod processes;
 mod provision;
 mod repair;
+pub(super) mod resource;
 
 use std::ffi::OsString;
 use std::fs;
@@ -30,6 +31,8 @@ const PROVISION_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Resource(#[from] super::resource::Error),
     #[error("could not resolve the running firecrab executable: {0}")]
     CurrentExecutable(#[source] std::io::Error),
     #[error("could not find {0}; build or reinstall the signed macOS helper first")]
@@ -108,6 +111,9 @@ impl Error {
 
 pub fn run(command: Command) -> Result<i32, Error> {
     match command {
+        Command::Resource { options } => Ok(super::resource::run(options)?),
+        Command::ResourceServer { home } => Ok(super::resource_server::run(home)?),
+        Command::ResourceApply { id } => Ok(super::resource::run_apply(&id)?),
         Command::Install { yes } => run_install(false, yes),
         Command::Reinstall { yes } => run_install(true, yes),
         Command::Repair => run_repair(),
@@ -213,6 +219,11 @@ fn run_start() -> Result<i32, Error> {
     let paths = daemon::paths(&layout)?;
     if paths.plist.is_file() && paths.wrapper.is_file() {
         provision::require_guest_provisioned(&layout.managed_home)?;
+        daemon::install(
+            &layout,
+            &layout.helper_path(),
+            &layout.managed_home.join("runtime/manager_ed25519"),
+        )?;
     }
     let status = daemon::start(&layout)?;
     print_daemon_status(&status, &layout);
@@ -821,6 +832,9 @@ fn command_arguments(command: &Command) -> Vec<OsString> {
         | Command::Stop
         | Command::Status
         | Command::Debug { .. }
+        | Command::Resource { .. }
+        | Command::ResourceServer { .. }
+        | Command::ResourceApply { .. }
         | Command::Dev { .. }
         | Command::Shell { .. }
         | Command::ForwardPorts { .. } => {
