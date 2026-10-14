@@ -221,7 +221,7 @@ Catalog guests keep the agent and Shell repository under `/usr/local/sbin` and `
 | Kernels | `/api/kernels`, `/{version}/install`, `/{version}` |
 | OCI | `/api/oci/inspect`, `POST /api/oci/import`, `GET /api/oci/import/{alias}` |
 | MicroRegistry | `/api/microregistry`, `POST /register`, `GET /register/{alias}`, `GET`/`PUT`/`DELETE /docker-hub` (Docker Hub login; secret write-only) |
-| Host | `/api/host` and `/api/network` |
+| Host | `/api/host`, `/api/network`, and `/api/info` |
 | Update | `/api/update` (`GET` check, `POST` start) and `GET /api/update/progress` |
 
 ## Host
@@ -247,6 +247,29 @@ Catalog guests keep the agent and Shell repository under `/usr/local/sbin` and `
 - `architecture` spells ARM64 as `arm64` on every host.
 - Disk figures come from the filesystem that holds, or will hold, the VM directory.
 - APIs before this field omit `platform`.
+
+`GET /api/info` reports this build, its installation paths, the Firecracker version, and live service states. The dashboard's Firecrab panel shows them. The six installation fields remain the same as `firecrab info --json`.
+
+```json
+{
+  "version": "0.3.1",
+  "prefix": "/usr/local",
+  "datadir": "/var/lib/firecrab",
+  "confdir": "/etc/firecrab",
+  "unitdir": "/etc/systemd/system",
+  "apiBase": "http://127.0.0.1:5523",
+  "firecrackerVersion": "v1.17.0",
+  "apiService": "active",
+  "netHelperService": "active",
+  "helperUnit": "firecrab-helper.service"
+}
+```
+
+- `version` is the running API's, and `apiBase` is the address it listens on.
+- The paths come from the API's own environment, with `install.sh`'s defaults when a variable is unset.
+- `firecrackerVersion` comes from the configured VM runtime binary's `--version`; unavailable, failing, or timed-out probes return `null`.
+- `apiService` and `netHelperService` report systemd `ActiveState`, or `unknown` when unavailable. `helperUnit` identifies the canonical or legacy helper unit queried.
+- Each runtime probe has a two-second deadline. A failed probe does not hide the build or installation fields. CLI `firecrab info --json` keeps its original six-field shape.
 
 ## Update
 

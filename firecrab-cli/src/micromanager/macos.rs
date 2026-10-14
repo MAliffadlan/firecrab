@@ -1,8 +1,11 @@
 mod daemon;
 mod dev;
+mod filesystem;
 mod forward;
 mod lifecycle;
+mod processes;
 mod provision;
+mod repair;
 
 use std::ffi::OsString;
 use std::fs;
@@ -12,10 +15,12 @@ use std::process::{Child, Command as ProcessCommand, ExitStatus};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Command, debug, report};
+use super::{Command, DevCommand, debug, report};
 
 const HELPER_NAME: &str = "firecrab-micromanager-macos";
 const HELPER_ENV: &str = "FIRECRAB_MICROMANAGER_HELPER";
+const REPAIR_HINT: &str = "Recovery: run `firecrab service repair`, then retry the command.";
+const INSTALL_HINT: &str = "Recovery: run `firecrab service install`.";
 /// The guest powers itself off once its script ends. A shutdown that hangs
 /// must not hang `install` with it: once the guest reports it is done, the
 /// helper gets this long to see the VM stop, then is asked, then made, to.
@@ -35,6 +40,8 @@ pub enum Error {
     Daemon(#[from] daemon::Error),
     #[error(transparent)]
     Provision(#[from] provision::Error),
+    #[error(transparent)]
+    Repair(#[from] repair::Error),
     #[error(transparent)]
     Forward(#[from] forward::Error),
     #[error(transparent)]
@@ -67,21 +74,58 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// Keep service recovery advice separate from installation and source errors.
+    pub fn recovery_hint(&self) -> Option<&'static str> {
+        match self {
+            Self::Daemon(daemon::Error::NotInstalled(_)) => {
+                let installed = lifecycle::Layout::from_process_env()
+                    .is_ok_and(|layout| repair::validate(&layout).is_ok());
+                Some(if installed { REPAIR_HINT } else { INSTALL_HINT })
+            }
+            Self::Daemon(
+                daemon::Error::Launchctl { .. }
+                | daemon::Error::ReadyTimeout(_)
+                | daemon::Error::StopTimeout(_)
+                | daemon::Error::Processes(_)
+                | daemon::Error::InvalidMarker(_)
+                | daemon::Error::Io {
+                    action:
+                        "read daemon marker" | "query launchd service" | "query stopped launchd service",
+                    ..
+                },
+            )
+            | Self::Dev(
+                dev::Error::GuestNotReady
+                | dev::Error::GuestSshUnavailable { .. }
+                | dev::Error::GuestSshInterrupted(_)
+                | dev::Error::LocalApiUnavailable,
+            ) => Some(REPAIR_HINT),
+            _ => None,
+        }
+    }
+}
+
 pub fn run(command: Command) -> Result<i32, Error> {
     match command {
         Command::Install { yes } => run_install(false, yes),
         Command::Reinstall { yes } => run_install(true, yes),
+        Command::Repair => run_repair(),
         Command::Uninstall { purge } => run_uninstall(purge),
         Command::Start => run_start(),
         Command::Stop => run_stop(),
         Command::Status => run_status(),
         Command::Debug { json, logs, tail } => run_debug(debug::Options::new(json, logs, tail)),
         Command::Dev {
+            command,
             source,
             release,
             restore,
             yes,
-        } => run_dev(source.as_deref(), release, restore, yes),
+        } => match command {
+            Some(command) => run_dev_control(command),
+            None => run_dev(source.as_deref(), release, restore, yes),
+        },
         Command::Shell { command } => run_shell(&command),
         Command::ForwardPorts {
             manager,
@@ -171,8 +215,17 @@ fn run_start() -> Result<i32, Error> {
         provision::require_guest_provisioned(&layout.managed_home)?;
     }
     let status = daemon::start(&layout)?;
-    print_daemon_status(&status);
+    print_daemon_status(&status, &layout);
     Ok(i32::from(!status.success()))
+}
+
+fn run_repair() -> Result<i32, Error> {
+    let layout = lifecycle::Layout::from_process_env()?;
+    let status = repair::run(&layout)?;
+    print_daemon_status(&status, &layout);
+    report!("[PASS] guest boot report and local API: ready");
+    report!("microManager repaired (data disk, credentials, and installed binaries preserved)");
+    Ok(0)
 }
 
 fn run_dev(source: Option<&Path>, release: bool, restore: bool, yes: bool) -> Result<i32, Error> {
@@ -220,6 +273,13 @@ fn run_dev(source: Option<&Path>, release: bool, restore: bool, yes: bool) -> Re
     Ok(0)
 }
 
+fn run_dev_control(command: DevCommand) -> Result<i32, Error> {
+    let layout = lifecycle::Layout::from_process_env()?;
+    let ip = running_guest_ip(&layout)?;
+    dev::control(&layout, ip, command)?;
+    Ok(0)
+}
+
 fn run_stop() -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
     daemon::stop(&layout)?;
@@ -230,13 +290,14 @@ fn run_stop() -> Result<i32, Error> {
 fn run_status() -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
     let status = daemon::status(&layout)?;
-    print_daemon_status(&status);
+    print_daemon_status(&status, &layout);
     print_log_paths(&layout);
     Ok(i32::from(!status.success()))
 }
 
 fn run_debug(options: debug::Options) -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
+    let repair_available = repair::validate(&layout).is_ok();
     let mut report = debug::DebugReport::new(
         "macos",
         &layout.managed_home,
@@ -253,9 +314,14 @@ fn run_debug(options: debug::Options) -> Result<i32, Error> {
             let installed = daemon::paths(&layout)
                 .is_ok_and(|paths| paths.plist.is_file() && paths.wrapper.is_file());
             report.service = if !installed {
-                debug::Probe::fail(
-                    "managed launchd files are missing; run `firecrab service install`",
-                )
+                debug::Probe::fail(format!(
+                    "managed launchd files are missing; {}",
+                    if repair_available {
+                        REPAIR_HINT
+                    } else {
+                        INSTALL_HINT
+                    }
+                ))
             } else if status.loaded {
                 debug::Probe::pass("launchd agent loaded")
             } else {
@@ -308,6 +374,14 @@ fn run_debug(options: debug::Options) -> Result<i32, Error> {
             report.api = debug::Probe::unavailable("service status unavailable");
         }
     }
+    if repair_available {
+        for probe in [&mut report.service, &mut report.guest, &mut report.api] {
+            if probe.state != "pass" && !probe.detail.contains(REPAIR_HINT) {
+                probe.detail.push_str("; ");
+                probe.detail.push_str(REPAIR_HINT);
+            }
+        }
+    }
     if let Err(error) = provision::require_guest_provisioned(&layout.managed_home) {
         report.guest = debug::Probe::fail(error.to_string());
         report.api =
@@ -358,16 +432,7 @@ fn run_shell(command: &[String]) -> Result<i32, Error> {
     use std::io::IsTerminal;
 
     let layout = lifecycle::Layout::from_process_env()?;
-    let paths = daemon::paths(&layout)?;
-    let status = daemon::status(&layout)?;
-    let guest_marker = fs::read_to_string(&paths.manager_ready).unwrap_or_default();
-    let ip = status
-        .detail
-        .as_deref()
-        .and_then(manager_ip)
-        .or_else(|| manager_ip(&guest_marker))
-        .filter(|_| status.loaded)
-        .ok_or(Error::ShellNotRunning)?;
+    let ip = running_guest_ip(&layout)?;
     let runtime = layout.managed_home.join("runtime");
     if !runtime.join("manager_ed25519").is_file() {
         return Err(Error::ShellCredentials(runtime));
@@ -377,7 +442,42 @@ fn run_shell(command: &[String]) -> Result<i32, Error> {
         .args(shell_arguments(&runtime, ip, command, tty))
         .status()
         .map_err(Error::ShellSsh)?;
-    Ok(status.code().unwrap_or(1))
+    let code = status.code().unwrap_or(1);
+    if code == 255 {
+        eprintln!("{REPAIR_HINT}");
+    }
+    Ok(code)
+}
+
+fn running_guest_ip(layout: &lifecycle::Layout) -> Result<std::net::IpAddr, Error> {
+    let paths = daemon::paths(layout)?;
+    let status = daemon::status(layout)?;
+    let guest_marker = fs::read_to_string(&paths.manager_ready).unwrap_or_default();
+    status
+        .detail
+        .as_deref()
+        .and_then(manager_ip)
+        .or_else(|| manager_ip(&guest_marker))
+        .filter(|_| status.loaded)
+        .ok_or(Error::ShellNotRunning)
+}
+
+/// OpenSSH parses an `-o` value again and expands percent tokens, even
+/// when the entire value is passed as one process argument.
+fn known_hosts_option(path: &Path) -> OsString {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let mut option = b"UserKnownHostsFile=\"".to_vec();
+    for &byte in path.as_os_str().as_bytes() {
+        match byte {
+            b'\\' | b'"' => option.push(b'\\'),
+            b'%' => option.push(b'%'),
+            _ => {}
+        }
+        option.push(byte);
+    }
+    option.push(b'"');
+    OsString::from_vec(option)
 }
 
 /// `ssh` arguments for [`run_shell`]. ssh joins everything after the host
@@ -402,9 +502,7 @@ fn shell_arguments(
         arguments.extend(["-o".into(), option.into()]);
     }
     arguments.push("-o".into());
-    let mut known_hosts = OsString::from("UserKnownHostsFile=");
-    known_hosts.push(runtime.join("known_hosts"));
-    arguments.push(known_hosts);
+    arguments.push(known_hosts_option(&runtime.join("known_hosts")));
     if tty {
         arguments.push("-t".into());
     }
@@ -466,7 +564,7 @@ fn guest_command(
         .args(["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"])
         .args(["-o", "LogLevel=ERROR"])
         .arg("-o")
-        .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
+        .arg(known_hosts_option(&known_hosts))
         .arg(format!("root@{ip}"))
         .arg(command)
         .output()
@@ -494,7 +592,7 @@ fn print_log_paths(layout: &lifecycle::Layout) {
     );
 }
 
-fn print_daemon_status(status: &daemon::Status) {
+fn print_daemon_status(status: &daemon::Status, layout: &lifecycle::Layout) {
     report!(
         "[{}] launchd: {}",
         if status.loaded { "PASS" } else { "FAILED" },
@@ -528,6 +626,9 @@ fn print_daemon_status(status: &daemon::Status) {
             "unreachable"
         }
     );
+    if !status.success() && repair::validate(layout).is_ok() {
+        report!("{REPAIR_HINT}");
+    }
 }
 
 fn ensure_guest_provisioned(
@@ -712,6 +813,7 @@ fn helper_path(override_path: Option<OsString>, current_exe: Option<&Path>) -> P
 
 fn command_arguments(command: &Command) -> Vec<OsString> {
     match command {
+        Command::Repair => unreachable!("repair is handled by the CLI"),
         Command::Install { .. }
         | Command::Reinstall { .. }
         | Command::Uninstall { .. }
@@ -740,8 +842,71 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[test]
+    fn service_runtime_failures_recommend_repair() {
+        for error in [
+            Error::Daemon(daemon::Error::ReadyTimeout(10)),
+            Error::Daemon(daemon::Error::StopTimeout(40)),
+            Error::Daemon(daemon::Error::Launchctl {
+                action: "bootstrap",
+                detail: "Input/output error".to_string(),
+            }),
+            Error::Daemon(daemon::Error::InvalidMarker("missing IP".to_string())),
+            Error::Dev(dev::Error::GuestNotReady),
+            Error::Dev(dev::Error::GuestSshUnavailable {
+                ip: "192.0.2.7".parse().unwrap(),
+                detail: "kex_exchange_identification: read: Connection reset by peer".to_string(),
+            }),
+            Error::Dev(dev::Error::GuestSshInterrupted("source upload")),
+            Error::Dev(dev::Error::LocalApiUnavailable),
+        ] {
+            assert_eq!(error.recovery_hint(), Some(REPAIR_HINT), "{error}");
+        }
+    }
+
+    #[test]
+    fn source_provisioning_and_repair_failures_keep_their_own_guidance() {
+        for error in [
+            Error::Dev(dev::Error::Checkout {
+                path: PathBuf::from("/missing"),
+                detail: "not a checkout".to_string(),
+            }),
+            Error::Dev(dev::Error::Command("guest development build/deployment")),
+            Error::Provision(provision::Error::GuestProvision("incomplete".to_string())),
+            Error::ShellCredentials(PathBuf::from("/missing")),
+            Error::Repair(repair::Error::Unhealthy("SSH unavailable".to_string())),
+        ] {
+            assert_eq!(error.recovery_hint(), None, "{error}");
+        }
+    }
     fn shell_ip() -> std::net::IpAddr {
         "192.0.2.7".parse().unwrap()
+    }
+
+    #[test]
+    fn openssh_preserves_known_host_paths_with_spaces_quotes_and_percent_tokens() {
+        for path in [
+            "/Users/test/Library/Application Support/Firecrab/runtime/known_hosts",
+            "/tmp/tab\tquote\"single'back\\slash%h/known_hosts",
+        ] {
+            let output = ProcessCommand::new("/usr/bin/ssh")
+                .args(["-G", "-T", "-o"])
+                .arg(known_hosts_option(Path::new(path)))
+                .arg("192.0.2.7")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let config = String::from_utf8(output.stdout).unwrap();
+            let actual = config
+                .lines()
+                .find_map(|line| line.strip_prefix("userknownhostsfile "))
+                .unwrap();
+            assert_eq!(actual, path);
+        }
     }
 
     #[test]
@@ -756,7 +921,7 @@ mod tests {
         assert_eq!(text[..2], ["-i", "/managed/runtime/manager_ed25519"]);
         assert!(text.contains(&"-t".to_owned()));
         assert!(text.contains(&"StrictHostKeyChecking=accept-new".to_owned()));
-        assert!(text.contains(&"UserKnownHostsFile=/managed/runtime/known_hosts".to_owned()));
+        assert!(text.contains(&"UserKnownHostsFile=\"/managed/runtime/known_hosts\"".to_owned()));
         assert_eq!(text.last().unwrap(), "root@192.0.2.7");
     }
 
