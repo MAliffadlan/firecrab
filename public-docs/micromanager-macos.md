@@ -119,14 +119,15 @@ scripts/build-micromanager-macos.sh target/debug/firecrab-micromanager-macos
 ```
 
 The default binary directory is `~/.local/bin`, and `FIRECRAB_INSTALL_DIR` overrides it.
+`install` and `reinstall` select the bundled [TOML release manifest](micromanager-manifest.md); existing installations keep their current files until either command migrates them.
 `install` performs the complete managed-host gate before returning success:
 
 1. Download the pinned Debian 13 ARM64 archive, Firecracker v1.17.0, and Firecrab v0.2.2 guest assets.
 2. Verify every SHA-512 or SHA-256 digest before atomically publishing an artifact.
 3. Extract the 3 GiB GPT OS disk and create a separate 16 GiB sparse persistent data disk.
-4. EFI-boot Debian with a cloud-init seed and install Firecracker, Firecrab, OpenSSH, and systemd units.
+4. EFI-boot Debian with a cloud-init seed and install the manifest's kernel, Firecracker, Firecrab, OpenSSH, and systemd units.
 5. Require usable guest `/dev/kvm` and boot a real nested Firecracker busybox workload to its serial success marker.
-6. Register and start the launchd resident VM plus the key-only SSH localhost API tunnel.
+6. Register and start the launchd resident VM plus the key-only SSH localhost API tunnel; verify the selected boot kernel and save the installed TOML.
 
 A clean install downloads about 306 MiB and normally takes minutes rather than seconds.
 On a terminal, `install` and `reinstall` first list each pending artifact's mirror, digest, and size and ask before downloading; `--yes` skips the question, and a script or CI run never sees it.
@@ -187,7 +188,7 @@ The launcher enables nested virtualization explicitly and uses VZ NAT for the ou
 Use `service start` for the resident API and `service dev` to rebuild the guest API and network helper from local source.
 The guest publishes its DHCP address through a private virtiofs marker, and the daemon establishes the localhost SSH tunnel only after Firecrab API, net-helper, and SSH are active.
 Stop requests guest `systemctl poweroff`, then escalates from helper TERM to KILL after 30 seconds.
-A provisioning schema change replaces only the OS disk; the ext4 data disk is detected by label and never reformatted on reinstall.
+A provisioning schema change or TOML migration replaces only the OS disk; the ext4 data disk is detected by label and never reformatted on reinstall.
 
 ## Validation and troubleshooting
 

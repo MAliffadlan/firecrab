@@ -9,6 +9,7 @@ mod host_platform;
 #[cfg(target_os = "macos")]
 mod macos;
 mod managed_home;
+mod manifest;
 // Everything but the `wsl.exe` and `schtasks.exe` calls is plain Rust, so the
 // Windows backend also builds and runs its tests on the Linux CI runner.
 #[cfg(any(target_os = "windows", test))]

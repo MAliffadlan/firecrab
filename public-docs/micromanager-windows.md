@@ -106,6 +106,9 @@ See [CI and runtime E2E](ci.md#windows-runtime-e2e) for phase options and artifa
 firecrab service install
 ```
 
+`install` and `reinstall` select the bundled [TOML release manifest](micromanager-manifest.md).
+Existing installations keep their current files until either command migrates them.
+
 `install` performs the complete managed-host gate before returning success:
 
 1. Download the pinned Debian 13 WSL rootfs 1.26.0.0, Firecracker v1.17.0, and Firecrab v0.2.2 guest assets.
@@ -113,10 +116,10 @@ firecrab service install
 3. Import the `firecrab-debian` distribution with `wsl --import`; the user's own distributions are never touched.
 4. Install the guest packages, Firecracker, and Firecrab with `install.sh --no-deps` under the distribution's systemd.
 5. Require usable guest `/dev/kvm` and boot a real nested Firecracker busybox workload to its serial success marker.
-6. Register and start the scheduled task that keeps the distribution running, then wait for the localhost API.
+6. Register and start the scheduled task that keeps the distribution running, then wait for the localhost API and save the installed TOML.
 
 The Debian rootfs is the build Microsoft's WSL manifest uses for `wsl --install -d Debian`.
-The nested workload boots Debian's own kernel from `linux-image-amd64` or `linux-image-arm64`, because WSL runs Microsoft's kernel.
+The nested workload boots the exact Debian kernel selected in the TOML, because WSL runs Microsoft's kernel.
 
 ```powershell
 firecrab service status

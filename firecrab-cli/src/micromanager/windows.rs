@@ -11,7 +11,7 @@ mod provision;
 mod repair;
 mod wsl;
 
-use super::{Command, DevCommand, debug};
+use super::{Command, DevCommand, debug, manifest};
 use doctor::Status;
 use wsl::DISTRO_NAME;
 
@@ -25,6 +25,8 @@ pub enum Error {
     Lifecycle(#[from] lifecycle::Error),
     #[error(transparent)]
     Provision(#[from] provision::Error),
+    #[error(transparent)]
+    Manifest(#[from] manifest::Error),
     #[error(transparent)]
     Daemon(#[from] daemon::Error),
     #[error(transparent)]
@@ -64,7 +66,13 @@ pub fn run(command: Command) -> Result<i32, Error> {
         Command::Debug { json, logs, tail } => run_debug(debug::Options::new(json, logs, tail)),
         Command::Doctor { json } => run_doctor(json),
         Command::Validate => {
-            run_validate(provision::host()?, &lifecycle::Layout::from_process_env()?)
+            let layout = lifecycle::Layout::from_process_env()?;
+            let installed = manifest::Manifest::installed(&layout.managed_home)?;
+            let host = match &installed {
+                Some(manifest) => provision::host_from_manifest(manifest, std::env::consts::ARCH)?,
+                None => provision::host()?.clone(),
+            };
+            run_validate(&host, &layout)
         }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Command::Shell { command } => run_shell(&command),
@@ -98,15 +106,21 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
         println!("{}", doctor::render_human(&report));
         return Err(Error::NotReady);
     }
-    let host = provision::host()?;
+    let manifest = manifest::Manifest::bundled()?;
+    let host = provision::host_from_manifest(&manifest, std::env::consts::ARCH)?;
     let layout = lifecycle::Layout::from_process_env()?;
     lifecycle::prepare(&layout)?;
     // Before the service stops, so declining the download leaves it running.
-    let artifacts = provision::download_all(host, &layout.downloads(), assume_yes)?;
+    let artifacts = provision::download_all(&host, &layout.downloads(), assume_yes)?;
     daemon::stop()?;
 
     let imported = provision::ensure_distro(&layout, &artifacts.debian_rootfs)?;
-    let guest = provision::ensure_provisioned(&layout, host, reinstall || imported)?;
+    let guest = provision::ensure_provisioned(&layout, &host, reinstall || imported)?;
+    manifest.verify_provisioned(
+        &guest,
+        "workload_kernel",
+        host.kernel_version.expect("TOML host has a kernel"),
+    )?;
     let task = daemon::install(&layout)?;
     let status = daemon::start()?;
     if !status.success() {
@@ -116,6 +130,7 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
             status.task, status.ready, status.api_reachable
         )));
     }
+    manifest.save(&layout.managed_home)?;
     println!(
         "microManager {}\n  managed data: {}\n  distribution: {DISTRO_NAME} (WSL 2, {})\n  Debian WSL rootfs {}: {}\n  Firecracker {}: {}\n  Firecrab {} host: {}\n  guest installer: {}\n  provision marker: {}\n  scheduled task: \\{} ({})\n  API: http://127.0.0.1:5523/\n  guest: {}",
         if reinstall {
@@ -125,17 +140,21 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
         },
         layout.managed_home.display(),
         host.architecture,
-        provision::DEBIAN_ROOTFS_VERSION,
+        host.rootfs_version,
         artifacts.debian_rootfs.display(),
-        provision::FIRECRACKER_VERSION,
+        host.firecracker_version,
         artifacts.firecracker.display(),
-        provision::FIRECRAB_VERSION,
+        host.firecrab_version,
         artifacts.firecrab_host.display(),
         artifacts.installer.display(),
         layout.provision_marker().display(),
         daemon::TASK_NAME,
         task.display(),
         guest.lines().collect::<Vec<_>>().join(", ")
+    );
+    println!(
+        "  manifest: {}",
+        layout.managed_home.join(manifest::FILE_NAME).display()
     );
     Ok(0)
 }

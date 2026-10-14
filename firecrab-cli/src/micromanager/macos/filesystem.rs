@@ -199,11 +199,6 @@ fn repair_with_timeout(layout: &Layout, helper: &Path, timeout: Duration) -> Res
         copy_image(&os_disk, &backup)?;
         copy_image(&backup, &working)?;
         let staged = fs::metadata(&working)?;
-        let archive = layout
-            .managed_home
-            .join("downloads")
-            .join(provision::DEBIAN_ARCHIVE);
-        managed_home::reject_symlink_components(&archive).map_err(io::Error::other)?;
         let reference = directory.join("debian-system.reference.raw");
         report!("[CHECK] cached Debian image for missing OS files");
         let cached = provision::cached_os_reference(&layout.managed_home, &reference)
