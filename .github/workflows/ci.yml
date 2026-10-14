@@ -129,11 +129,14 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show
 
-      - name: Windows CLI clippy and tests
-        run: |
-          cargo clippy -p firecrab-cli --all-targets -- -D warnings
-          cargo test -p firecrab-cli --locked
-          cargo build -p firecrab-cli --locked
+      - name: Windows CLI clippy
+        run: cargo clippy -p firecrab-cli --all-targets -- -D warnings
+
+      - name: Windows CLI tests
+        run: cargo test -p firecrab-cli --locked
+
+      - name: Windows CLI build
+        run: cargo build -p firecrab-cli --locked
 
       - name: Windows QA runner contract (PowerShell 5.1)
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-ci-qa-windows.ps1

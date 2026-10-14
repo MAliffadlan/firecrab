@@ -165,7 +165,7 @@ pub fn lock(home: &Path) -> Result<File, Error> {
         .write(true)
         .open(home.join("runtime/resource.lock"))?;
     file.try_lock_exclusive().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::WouldBlock {
+        if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
             Error::Busy
         } else {
             error.into()
@@ -500,9 +500,18 @@ mod tests {
     fn resource_changes_are_serialized() {
         let dir = tempfile::tempdir().unwrap();
         let first = lock(dir.path()).unwrap();
-        assert!(matches!(lock(dir.path()), Err(Error::Busy)));
+        let blocked = lock(dir.path());
+        assert!(matches!(blocked, Err(Error::Busy)), "{blocked:?}");
         drop(first);
         lock(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn lock_file_errors_are_not_reported_as_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("runtime/resource.lock")).unwrap();
+        let result = lock(dir.path());
+        assert!(matches!(result, Err(Error::Io(_))), "{result:?}");
     }
 
     #[test]
