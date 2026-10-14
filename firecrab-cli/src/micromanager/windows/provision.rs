@@ -839,6 +839,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn toml_provisioning_removes_old_development_overrides_and_preserves_user_configuration() {
         let manifest = Manifest::bundled().unwrap();
@@ -883,6 +884,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn toml_guest_scripts_are_valid_bash_and_select_debian_not_wsl_kernels() {
         let manifest = Manifest::bundled().unwrap();
