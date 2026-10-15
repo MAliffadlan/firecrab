@@ -153,7 +153,7 @@ A17 필수 도구: ip nft dnsmasq mkfs.ext4 firecracker sha256sum
 - [ ] **H1 — 업데이트 상태:** 읽기 전용 상태 확인 성공.
 - [ ] **H2 — 호스트 네트워크:** uplink가 있으며 loopback·내부 helper 인터페이스는 선택 목록에 없다.
 - [ ] **H3 — Firecrab 정보:** API가 버전·설치 경로·Firecracker 버전·API/helper 서비스 상태를 알려 준다. Host 탭에서 표시와 상태 갱신을 확인한다. 조회 실패 시 이전 실행 상태를 표시하지 않는다.
-- [ ] **U1 — 업데이트 적용(별도 선택 실행):** 적용 후 호스트가 복구되고 API가 200을 반환한다.
+- [ ] **U1 — 업데이트 적용(별도 선택 실행):** 적용 후 호스트가 복구되고 API가 200을 반환한다. 대시보드 팝업이 릴리스 노트를 보여 주고, 새 API가 응답할 때까지 게이지·퍼센트·단계를 표시한다.
 
 호스팅 macOS·Windows 러너는 빌드·단위 테스트·진단만 수행한다.
 런타임 E2E는 M3 이상 네이티브 Mac 또는 WSL2가 있는 Windows 호스트에서 준비 상태를 확인한 뒤 수행한다.
@@ -216,6 +216,7 @@ curl -i "$API/api/host"             # G4: 200
 curl -i "$API/"                    # G4: HTML 200
 curl -i "$API/api/no-such-route"    # G5: requestId가 포함된 JSON 404
 curl -i "$API/api/update"           # H1: 읽기 전용 확인
+curl -i "$API/api/update/progress"  # H1: idle 또는 마지막 실행
 curl -i "$API/api/network"          # H2: uplink 목록
 curl -i "$API/api/info"             # H3: 버전과 설치 경로
 ```

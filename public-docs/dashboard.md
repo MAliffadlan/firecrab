@@ -49,6 +49,7 @@ npm run dev --prefix firecrab-frontend
 | Images | M2Image inventory, OCI Import, and MicroRegistry |
 | Kernels | Digest-pinned kernel installation and lifecycle |
 | Host | Host OS with its icon, then health and capacity; a Firecrab panel under it shows install info, the Firecracker version, and API/helper service states |
+| Update | The nav's **Update** button opens a dialog with the release notes; the run shows a gauge, the percent, and its stage |
 
 The Firecrab panel refreshes every ten seconds. Active services use a green indicator; failed services use red. Unavailable runtime probes show unknown values. An API outage or a request exceeding five seconds clears old service states and retries automatically.
 
