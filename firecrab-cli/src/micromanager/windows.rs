@@ -6,6 +6,7 @@
 mod daemon;
 mod dev;
 mod doctor;
+mod filesystem;
 mod lifecycle;
 mod provision;
 mod repair;

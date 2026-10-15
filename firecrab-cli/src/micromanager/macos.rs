@@ -5,6 +5,7 @@ mod forward;
 mod lifecycle;
 mod processes;
 mod provision;
+mod provision_log;
 mod repair;
 mod ssh;
 
@@ -703,6 +704,17 @@ fn ensure_guest_provisioned(
     }
 
     report!("[BOOT] Debian EFI provisioning VM");
+    let log = prepared
+        .provision_marker
+        .with_file_name("guest-provision.log");
+    managed_home::reject_symlink_components(&log)?;
+    let mut output =
+        provision_log::Output::new(log.clone()).map_err(|source| lifecycle::Error::Io {
+            action: "read provisioning log",
+            path: log.clone(),
+            source,
+        })?;
+    report!("[LOGS] provisioning: {}", log.display());
     let helper = layout.helper_path();
     let mut child = ProcessCommand::new(&helper)
         .arg("provision")
@@ -714,11 +726,16 @@ fn ensure_guest_provisioned(
         })?;
     let run = wait_for_provisioning(
         &mut child,
-        || provision::guest_finished(prepared),
+        || {
+            output.print_new(false);
+            provision::guest_finished(prepared)
+        },
         PROVISION_POWEROFF_GRACE,
         PROVISION_STOP_GRACE,
-    )
-    .map_err(|source| Error::ProvisionHelper {
+    );
+    // The final output can arrive between the last poll and helper exit.
+    output.print_new(true);
+    let run = run.map_err(|source| Error::ProvisionHelper {
         path: helper,
         source,
     })?;
@@ -747,7 +764,7 @@ enum ProvisionRun {
 
 fn wait_for_provisioning(
     child: &mut Child,
-    guest_finished: impl Fn() -> bool,
+    mut guest_finished: impl FnMut() -> bool,
     poweroff_grace: Duration,
     stop_grace: Duration,
 ) -> io::Result<ProvisionRun> {
@@ -756,8 +773,9 @@ fn wait_for_provisioning(
         if let Some(status) = child.try_wait()? {
             return Ok(ProvisionRun::Exited(status));
         }
+        let finished = guest_finished();
         match finished_at {
-            None if guest_finished() => finished_at = Some(Instant::now()),
+            None if finished => finished_at = Some(Instant::now()),
             Some(at) if Instant::now().duration_since(at) >= poweroff_grace => break,
             _ => {}
         }
@@ -1057,8 +1075,22 @@ mod tests {
     fn a_running_guest_is_never_stopped_before_it_finishes() {
         // Stands in for a guest that is still provisioning: it exits on its own.
         let mut child = provisioning("sleep 1; exit 0");
-        let run = wait_for_provisioning(&mut child, || false, SHORT, SHORT).unwrap();
+        let mut reports = 0;
+        let run = wait_for_provisioning(
+            &mut child,
+            || {
+                reports += 1;
+                false
+            },
+            SHORT,
+            SHORT,
+        )
+        .unwrap();
         assert!(matches!(run, ProvisionRun::Exited(status) if status.success()));
+        assert!(
+            reports > 1,
+            "pending provisioning must keep reporting progress"
+        );
     }
 
     #[test]

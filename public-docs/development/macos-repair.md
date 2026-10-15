@@ -63,7 +63,7 @@ Before each operation, require `[REPAIR 1/6]` through `[REPAIR 6/6]` for
 validation, shutdown/helper cleanup, OS backup/repair, registration, VM/API
 startup, and guest-boot/API checks.
 Pending readiness and shutdown waits must print elapsed time and current state
-again every ten seconds. The local VM/API readiness deadline is ten seconds;
+again every ten seconds. The local VM/API readiness deadline is 120 seconds;
 shutdown keeps its forty-second deadline. An unready VM/API must time out instead
 of reporting success. A failed validation must not print the shutdown stage.
 Each successful runtime repair also checks G7b for all six stages in order.
@@ -93,13 +93,51 @@ fields must fail. Existing SSH host pins must remain intact.
 The helper uses `break=premount` from [Debian initramfs-tools](https://manpages.debian.org/trixie/initramfs-tools-core/initramfs-tools.7.en.html).
 It checks only `/dev/vda1` on a private OS copy. A failed read-only check may run
 `fsck.ext4 -f -y`; a second read-only pass must return zero before commit.
+This includes exit 12 when a read-only check aborts on directory corruption
+with uncorrected errors (4) and an operational error (8). Other operational,
+usage, cancellation, and library failures do not trigger correction.
 [Debian e2fsck](https://manpages.debian.org/trixie/e2fsprogs/e2fsck.8.en.html)
 documents the accepted correction exits (0–3) and unresolved errors (4).
 The VM attaches no data disk, directory share, or network. A verified cached
 Debian reference may be attached read-only for missing packaged OS files. VM/API readiness
-keeps its ten-second deadline; offline filesystem checks use 120 seconds.
+has a 120-second deadline; offline filesystem checks use 120 seconds.
 
-Create tiny normal and unattached-inode fixtures under temporary storage.
+Repair creates the backup and working disk as file-level CoW snapshots on APFS.
+Each attempt uses a dated directory, for example
+`runtime/repairs/os-2026-10-15_23-45-12+0900-Ab12Cd/debian-system.before.raw`.
+Names use the host's local date/time, numeric UTC offset, and a random suffix
+to avoid collisions when attempts start in the same second.
+Unchanged blocks are shared; writes to either file allocate independent blocks.
+Both files remain ordinary RAW images with no parent-file dependency.
+`[SNAPSHOT] CoW` confirms native cloning succeeded. Unsupported filesystems fall
+back to a full copy and print `[SNAPSHOT] CoW unavailable` before copying.
+Permission and disk-full errors fail instead of starting a full copy.
+`snapshots.json` records each snapshot's source, method, and logical byte size.
+The logical byte size does not measure unique physical storage used by a clone.
+Retention keeps one rollback backup from the latest fully successful repair and
+one failed attempt's backup/working disk set. A new rollback replaces the previous
+one only after the management VM, guest boot report, and API pass the final checks.
+A failure or interrupted repair preserves the previous rollback. A failed or
+partial snapshot copy cannot displace the last complete failure backup.
+An unchanged clean attempt removes its disk copies. Cached reference RAW files
+are removed after checking. Backup directories retain only disks and the
+`snapshots.json`/`retention.json` metadata needed to validate and retain them.
+Diagnostics are stored separately under `runtime/logs/repairs/<attempt-name>/`:
+`console.log`, `result.json`, `error.log` when available, and JSON metadata.
+The attempt name matches its backup directory, including the date and time.
+`[LOGS]` prints this path; failures report separate backup and log paths.
+Logs, including clean checks, keep the latest ten attempts independently of
+backup retention. Expiring old logs never removes a retained rollback or failure
+backup. Unneeded backup directories are removed instead of holding log history.
+`retention.json` records completion state. `[CLEANUP]` reports removed files.
+Cleanup runs at the next repair and after completion, including recognized older
+`os-*` directories with dated or legacy random names. Unknown files, symlinks,
+and unrecognized layouts are preserved.
+Cleanup errors print a warning without hiding the repair result.
+Recognized older backups have their inline diagnostics moved to the matching log
+directory before cleanup. Existing diagnostic files are never overwritten.
+
+Create tiny normal, unattached-inode, and corrupt-directory fixtures under temporary storage.
 The generator requires existing e2fsprogs tools; it reads only the chosen kernel
 and initrd. It refuses an existing output directory.
 
@@ -114,7 +152,9 @@ python3 scripts/ci-qa-macos-os-repair.py \
   --results-dir "$PWD/target/qa/os-repair-corrupt"
 ```
 
-Repeat with `clean` and a new results directory. Require helper exit zero,
+Repeat with `clean` and `directory-corrupt`, each with a new results directory.
+The directory case must report `check_exit=12` followed by successful correction.
+Require helper exit zero,
 `verify_exit=0`, and original OS/data/SSH hash and inode preservation. The corrupt
 case must report `changed=true`; the clean case skips correction. Logs and JSON
 snapshots remain after failures. Installed/default homes, symlinked paths,
@@ -122,6 +162,8 @@ aliased staged images, and open images are rejected before helper execution.
 Native Rust tests verify commit, backup preservation, timeout rollback, and
 scoped cleanup of disposable helper processes. Swift tests check VM locking,
 recovery-copy validation, and stop completion without a delegate callback.
+Snapshot tests check independent writes, source deletion, unsupported-file-system
+fallback, and refusal to overwrite existing snapshots.
 
 For G7e, use a marked disposable Debian fixture with a missing `libdbus` link
 and generator directory. Place the authenticated cached image beside its staged
@@ -131,7 +173,7 @@ snapshots and passes `--reference` to the helper. Require `restored_files > 0`,
 Repeat with `--expect-restored-files 0` to check that another repair restores
 nothing. Version/checksum mismatches must fail without committing an OS image.
 Boot only repaired disk copies in a separate managed home and check live SSH,
-`dbus`, network services, and the guest API within the ten-second readiness limit.
+`dbus`, network services, and the guest API within the 120-second readiness limit.
 
 ## Results and restoration
 

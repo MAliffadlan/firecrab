@@ -72,17 +72,18 @@ Runtime doctor must report `ready: true`; hosted build/unit jobs do not prove ru
   Missing prerequisites fail before stopping; invalid boot reports/API checks fail nonzero.
   Follow [repair QA](macos-repair.md) for preservation checks.
 - [ ] **G7a — macOS recovery advice:** service runtime failures suggest `firecrab service repair` without running it. Lost registration in a completed installation suggests repair; a new host suggests install. Source/compiler failures keep their own errors, and `debug --json` stays valid JSON with advice inside its fields.
-- [ ] **G7b — macOS repair progress:** repair prints validation, shutdown/helper cleanup, OS backup/repair, registration, startup, and guest-boot/API-check stages before each operation. Pending VM/API and shutdown waits report elapsed time and current state every ten seconds. Local VM/API readiness times out after ten seconds; shutdown keeps its forty-second deadline. Health checks and failure exit codes stay unchanged.
+- [ ] **G7b — macOS repair progress:** repair prints validation, shutdown/helper cleanup, OS backup/repair, registration, startup, and guest-boot/API-check stages before each operation. Pending VM/API and shutdown waits report elapsed time and current state every ten seconds. Local VM/API readiness times out after 120 seconds; shutdown keeps its forty-second deadline. Health checks and failure exit codes stay unchanged.
 - [ ] **G7c — macOS OS filesystem repair:** a tiny unattached-inode fixture is corrected and passes a second read-only check. Clean checks keep the original OS inode. Failed checks and timeouts keep the original, backup, data disk, and SSH assets. Offline checks use a separate 120-second deadline.
 - [ ] **G7d — macOS helper cleanup:** stale helpers are matched by owner, executable, and managed home. Helpers for another home survive. A per-home lock prevents simultaneous management VMs and OS commit.
 - [ ] **G7e — Missing Debian files:** restore only verified missing packaged files and matching-version links/manifests.
   Preserve existing files, `/etc`, app data, and OS/data/SSH/reference assets.
   Reject failed verification; a second repair restores zero files.
-  The repaired copy must boot with SSH, dbus, networking, and API ready within ten seconds.
+  The repaired copy must boot with SSH, dbus, networking, and API ready within 120 seconds.
 - [ ] **G7f — macOS SSH paths:** default `Application Support` paths remain one OpenSSH known-hosts path. Check the real `ssh -G` parser, wrapper tunnel/reconnect, shell, dev, and port-forward arguments. Repair verifies the current-boot guest report without an SSH command; missing, inactive, duplicate, or mismatched fields fail. Retain existing host pins and reject a changed host key.
-- [ ] **G8 — Windows repair:** recreate the task/XML and restart installed API/helper, including legacy helper names.
-  Preserve disk, binaries, provisioning, data, and dev overrides; no downloads, reimport, or global WSL shutdown.
-  Missing prerequisites fail before stopping; every failed stage returns nonzero.
+- [ ] **G8 — Windows repair:** back up the WSL disk, check a detached copy in a separate WSL2 rescue distribution, and replace only verified repairs.
+  Recreate the task/XML and restart installed API/helper, including legacy helper names.
+  Preserve binaries, provisioning, data, and dev overrides; no downloads, reimport, or global WSL shutdown.
+  Missing Administrator rights or rescue tools fail before stopping; every failed stage returns nonzero.
   Require live services and Windows API within the five-minute readiness deadline.
 - [ ] **H1 — Update status:** `GET /api/update` succeeds; `GET /api/update/progress` reports `idle` or the last run.
 - [ ] **H2 — Host network:** an uplink is present; loopback and internal helper interfaces are absent from the picker.
