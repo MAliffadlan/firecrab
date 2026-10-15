@@ -240,7 +240,7 @@ async fn teardown() -> Result<(), TeardownError> {
 async fn run() -> Result<(), StartupError> {
     let config = Arc::new(HelperConfig::load().await?);
     // Required for NAT'd VM egress to work at all; previously a manual
-    // operator step (public-docs/networking.md). Global and
+    // operator step (public-docs/guides/networking.md). Global and
     // idempotent, so doing it once here (rather than on every ensure_bridge
     // call) is enough.
     bridge::enable_ip_forward().map_err(StartupError::IpForward)?;

@@ -32,6 +32,7 @@ import type {
   UpdateCheckResponse,
   UpdateImageKernelRequest,
   UpdateMicroNetworkRequest,
+  UpdateProgressResponse,
   UpdateStartResponse,
   UpdateVmShellsRequest,
   UpdateVmPortForwardsRequest,
@@ -202,6 +203,11 @@ export function getUpdateCheck(): Promise<UpdateCheckResponse> {
 /** Launch the detached updater (`POST /api/update`); answers 202 immediately. */
 export function startUpdate(): Promise<UpdateStartResponse> {
   return fetchJson("/api/update", { method: "POST" });
+}
+
+/** How far the latest update run got (`GET /api/update/progress`); `idle` when none has run. */
+export function getUpdateProgress(): Promise<UpdateProgressResponse> {
+  return fetchJson("/api/update/progress");
 }
 
 /** Template registry aliases available for create (`GET /api/images`). */

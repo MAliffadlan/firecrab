@@ -456,7 +456,7 @@ jobs:
           test "$code" -eq 1
 
       - name: QA work list (API, no guest boot)
-        # Shared QA IDs from public-docs/qa.md: see scripts/ci-qa-api.sh.
+        # Shared QA IDs from public-docs/development/qa.md: see scripts/ci-qa-api.sh.
         # Leaves the later "ci" / 172.31.0.0/24 smoke network contract unchanged.
         run: |
           mkdir -p target/qa
@@ -517,7 +517,7 @@ jobs:
 
       - name: QA VM lifetime
         timeout-minutes: 30
-        # R1–R7 and X7 from public-docs/qa.md; restarts the installed API.
+        # R1–R7 and X7 from public-docs/development/qa.md; restarts the installed API.
         env:
           FIRECRAB_QA_HELPER_UPGRADE: "1"
         run: scripts/ci-qa-lifetime.sh alpine:3.21

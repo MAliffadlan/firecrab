@@ -23,6 +23,16 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Added
 
+- Updating from the dashboard opens a dialog that shows what the new release
+  changes, then a gauge with the overall percent and the stage (check,
+  download, verify, apply, restart) until the API is back on the new version.
+  A run that fails says why in the dialog instead of leaving it waiting for ten
+  minutes. `firecrab update --apply` shows the same stages with a gauge and the
+  percent. `GET /api/update` carries the release's `notes` and `releaseUrl`,
+  and `GET /api/update/progress` reports the run, which the updater records in
+  `$DATADIR/updates/progress.json` so it survives the restart that ends an
+  update.
+
 - The dashboard's Host tab has a Firecrab panel with the version and what
   `firecrab info` prints: the install prefix, data, config and unit
   directories, and the address the API listens on. `GET /api/info` serves the
@@ -367,9 +377,9 @@ provisioning, compliance artifacts, and release validation.
   preview, clipboard copy commands, and host fingerprint verification ([#186]).
 - VM table row actions are reorganized into a kebab dropdown menu with direct
   SSH connect ([#186]).
-- [`public-docs/dashboard.md`](public-docs/dashboard.md),
-  [`public-docs/api.md`](public-docs/api.md), and
-  [`public-docs/oci.md`](public-docs/oci.md) document the SSH connect panel,
+- [`public-docs/guides/dashboard.md`](public-docs/guides/dashboard.md),
+  [`public-docs/reference/api.md`](public-docs/reference/api.md), and
+  [`public-docs/guides/oci.md`](public-docs/guides/oci.md) document the SSH connect panel,
   endpoints, and guest sshd service ([#186]).
 - Host release archives include `LICENSE`, `THIRD_PARTY_NOTICES.txt`, the
   license inventory, and the GPL-2.0 text required by `extract-vmlinux`;
@@ -438,7 +448,7 @@ provisioning, compliance artifacts, and release validation.
   downloaded POSIX or PowerShell installer ([#254]).
 - Networking, API, and dashboard docs cover IPv6 create-time choice, NAT66 vs
   direct egress, and guest sysctl ([#178]).
-- [`public-docs/ci.md`](public-docs/ci.md) documents the Clippy gate ([#198]).
+- [`public-docs/development/ci.md`](public-docs/development/ci.md) documents the Clippy gate ([#198]).
 
 ## [0.1.2] - 2026-08-21
 
@@ -449,9 +459,9 @@ place, and OCI import provisions its own kernel instead of borrowing a guest ima
 
 - OCI import pairs a digest-pinned MicroRegistry kernel, cached at `.oci/kernel/<arch>/` ([#145]).
 - `FIRECRAB_OCI_KERNEL_PATH` names a host copy of that kernel ([#145]).
-- [`public-docs/oci.md`](public-docs/oci.md) gains a contents table and an import architecture diagram ([#145]).
+- [`public-docs/guides/oci.md`](public-docs/guides/oci.md) gains a contents table and an import architecture diagram ([#145]).
 - `firecrab-cli` workspace crate ships `firecrab doctor`/`info`/`status` ([#152], [#152-comment]).
-- [`public-docs/firecrab-cli.md`](public-docs/firecrab-cli.md) documents the CLI's architecture and all three subcommands ([#152]).
+- [`public-docs/reference/cli.md`](public-docs/reference/cli.md) documents the CLI's architecture and all three subcommands ([#152]).
 - Left nav rail gets solid SVG icons matched to each feature (MicroVM, Networks, Storage, Images, Host), replacing Unicode glyphs ([#165]).
 - `firecrab update --check` compares the installed version with the newest GitHub Release, with human-readable and JSON output ([#163], [#171]).
 - `firecrab update --apply` verifies the matching host bundle and delegates an atomic privileged swap to `firecrab-net-helper` ([#163], [#171]).
