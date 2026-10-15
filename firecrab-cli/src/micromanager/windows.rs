@@ -108,9 +108,9 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
         println!("{}", doctor::render_human(&report));
         return Err(Error::NotReady);
     }
-    let manifest = manifest::Manifest::bundled()?;
-    let host = provision::host_from_manifest(&manifest, std::env::consts::ARCH)?;
     let layout = lifecycle::Layout::from_process_env()?;
+    let manifest = manifest::Manifest::for_install(&layout.managed_home)?;
+    let host = provision::host_from_manifest(&manifest, std::env::consts::ARCH)?;
     lifecycle::prepare(&layout)?;
     // Before the service stops, so declining the download leaves it running.
     let artifacts = provision::download_all(&host, &layout.downloads(), assume_yes)?;
@@ -128,7 +128,8 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
         "workload_kernel",
         host.kernel_version.expect("TOML host has a kernel"),
     )?;
-    let task = daemon::install(&layout)?;
+    let task =
+        daemon::install_with_runtime(&layout, &manifest.runtime.clone().unwrap_or_default())?;
     let status = daemon::start()?;
     if !status.success() {
         print_daemon_status(&status);
@@ -167,6 +168,11 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
 }
 
 fn run_start() -> Result<i32, Error> {
+    if daemon::task_state() == daemon::TaskState::Missing {
+        return Err(daemon::Error::NotInstalled.into());
+    }
+    let layout = lifecycle::Layout::from_process_env()?;
+    daemon::install(&layout)?;
     let status = daemon::start()?;
     print_daemon_status(&status);
     Ok(i32::from(!status.success()))

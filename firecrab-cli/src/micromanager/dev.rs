@@ -28,6 +28,9 @@ const OPTIONAL_SOURCE_INPUTS: &[&str] = &["packaging/micromanager.toml"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[cfg(target_os = "macos")]
+    #[error(transparent)]
+    Manifest(#[from] super::manifest::Error),
     #[error("invalid Firecrab checkout {path}: {detail}")]
     Checkout { path: PathBuf, detail: String },
     #[error("could not {action}: {source}")]

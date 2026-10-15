@@ -61,7 +61,10 @@ Source lab passes do not establish stock-release or physical-Windows compatibili
 | `firecrab service uninstall --purge` | Also unregister the distribution and delete managed data |
 
 The scheduled task `\Firecrab\microManager` holds WSL open with `wslg.exe -- sleep infinity`.
-It starts at logon and retries every minute without creating duplicate holders.
+It starts at logon and, by default, retries every minute without creating duplicate holders.
+The installed `micromanager.toml` accepts `runtime.auto_restart` to disable periodic relaunch.
+See [runtime settings](../reference/micromanager-manifest.md#runtime-settings).
+The SSH settings apply only to macOS; Windows continues to use WSL.
 `stop` leaves the task disabled until the next `start`.
 Stopping the distribution stops its workload MicroVMs.
 
@@ -81,6 +84,7 @@ Use `FIRECRAB_MICROMANAGER_HOME` for an isolated checkout or test.
 
 | Path under the managed root | Content |
 | --- | --- |
+| `micromanager.toml` | Installed release inputs and editable runtime settings |
 | `downloads\` | Verified release artifacts |
 | `distro\ext4.vhdx` | Debian and Firecrab data, including `/var/lib/firecrab` |
 | `provision\` | Guest setup scripts |
