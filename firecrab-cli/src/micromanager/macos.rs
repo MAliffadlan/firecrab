@@ -104,6 +104,7 @@ impl Error {
             | Self::Dev(
                 dev::Error::GuestNotReady
                 | dev::Error::GuestSshUnavailable { .. }
+                | dev::Error::GuestFilesystemUnhealthy(_)
                 | dev::Error::GuestSshInterrupted(_)
                 | dev::Error::LocalApiUnavailable,
             ) => Some(REPAIR_HINT),
@@ -299,22 +300,37 @@ fn run_dev(source: Option<&Path>, release: bool, restore: bool, yes: bool) -> Re
         .filter(|_| status.loaded)
         .ok_or(dev::Error::GuestNotReady)?;
     dev::deploy(&layout, ip, checkout.as_ref(), release)?;
+    wait_for_dev_api(&layout)?;
+    report!("[PASS] API: http://127.0.0.1:5523/");
+    report!(
+        "  dashboard dev server: npm --prefix firecrab-frontend run dev (http://localhost:8080/)"
+    );
+    report!("  logs: firecrab service debug --logs --tail 100");
+    Ok(0)
+}
+
+fn wait_for_dev_api(layout: &lifecycle::Layout) -> Result<(), Error> {
     let started = Instant::now();
-    while !daemon::status(&layout)?.api_reachable {
+    while !daemon::status(layout)?.api_reachable {
         if started.elapsed() >= Duration::from_secs(30) {
             return Err(dev::Error::LocalApiUnavailable.into());
         }
         thread::sleep(Duration::from_secs(1));
     }
-    report!("[PASS] API: http://127.0.0.1:5523/");
-    report!("  logs: firecrab service debug --logs --tail 100");
-    Ok(0)
+    Ok(())
 }
 
 fn run_dev_control(command: DevCommand) -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
     let ip = running_guest_ip(&layout)?;
     dev::control(&layout, ip, command)?;
+    if command != DevCommand::Stop {
+        wait_for_dev_api(&layout)?;
+        report!("[PASS] API: http://127.0.0.1:5523/");
+        report!(
+            "  dashboard dev server: npm --prefix firecrab-frontend run dev (http://localhost:8080/)"
+        );
+    }
     Ok(0)
 }
 
@@ -916,6 +932,9 @@ mod tests {
                 detail: "kex_exchange_identification: read: Connection reset by peer".to_string(),
             }),
             Error::Dev(dev::Error::GuestSshInterrupted("source upload")),
+            Error::Dev(dev::Error::GuestFilesystemUnhealthy(
+                "read-only root".into(),
+            )),
             Error::Dev(dev::Error::LocalApiUnavailable),
         ] {
             assert_eq!(error.recovery_hint(), Some(REPAIR_HINT), "{error}");
