@@ -51,6 +51,7 @@ Stop and start a VM after an API upgrade to refresh its guest agent.
 
 | Screen | Main actions |
 | --- | --- |
+| [MicroService](microservices.md) | Create, inspect, edit, and delete app configurations |
 | Networks | Create IPv4-only or dual-stack networks; choose SLAAC or DHCPv6 for IPv6 |
 | Storage | Register mounted host directories for VM disks |
 | Images | Install M2Images, inspect/import OCI, and register custom images locally |

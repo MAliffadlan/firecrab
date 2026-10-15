@@ -9,6 +9,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod micro_services;
+pub use micro_services::{MicroServiceResponse, MicroServiceSpec, ServiceRuntime};
+
 /// The egress policies the API may request for a VM. New policies are added
 /// here and mirrored in `firecrab-helper`'s own (deliberately separate)
 /// `EgressPolicy`; the helper is the trust boundary and re-validates every
