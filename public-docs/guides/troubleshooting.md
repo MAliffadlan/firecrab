@@ -99,9 +99,9 @@ use `/etc/firecrab/busybox ping 1.1.1.1` or restart for PATH tools.
 
 ## Guest PID 1
 
-`readlink -f /proc/1/exe` is the running init (`/etc/firecrab/busybox`
-on an import; `ps` may say `init`). `ls -l /sbin/init` can still show
-systemd. Catalog Ubuntu/Rocky use systemd. See [API](api.md).
+Use `readlink -f /proc/1/exe` inside the guest to identify its running init.
+OCI imports preserve supported systemd/OpenRC and otherwise use BusyBox.
+Older templates retain their import-time behavior; see [Guest runtime](../reference/guest-runtime.md#init-and-boot).
 
 ## Internet access fails
 
@@ -178,8 +178,8 @@ Use the response `requestId` to find the server log.
 
 ## Related
 
-- [API](api.md)
-- [firecrab CLI](firecrab-cli.md)
+- [API](../reference/api.md)
+- [firecrab CLI](../reference/cli.md)
 - [Networking](networking.md)
 - [Storage](storage.md)
 - [Images](images.md)

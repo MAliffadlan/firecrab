@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# firecrab host installer (public-docs/installation.md).
+# firecrab host installer (public-docs/getting-started/installation.md).
 #
 # Downloads a host bundle from a GitHub Release (or installs local binaries
 # via --bin-dir), then lays out systemd units so the dashboard is served on
@@ -689,7 +689,7 @@ install_binaries() {
 # service out of init_t into unconfined_service_t only fires for bin_t
 # executables. Without this the API stays in init_t, where an outbound HTTPS
 # connect is denied — every registry read fails with EACCES while a shell on
-# the same account reaches the registry fine (public-docs/troubleshooting.md).
+# the same account reaches the registry fine (public-docs/guides/troubleshooting.md).
 label_selinux_binaries() {
     local pattern="${LIBDIR}(/.*)?"
 
