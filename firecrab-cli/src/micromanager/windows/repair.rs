@@ -31,7 +31,13 @@ pub enum Error {
 }
 
 pub fn run(layout: &Layout) -> Result<daemon::Status, Error> {
-    run_with(layout, daemon::task_definition, daemon::READY_TIMEOUT)
+    let settings =
+        super::super::runtime::Runtime::load(&layout.managed_home).map_err(daemon::Error::from)?;
+    run_with(
+        layout,
+        || daemon::task_definition(&settings),
+        daemon::READY_TIMEOUT,
+    )
 }
 
 fn run_with(

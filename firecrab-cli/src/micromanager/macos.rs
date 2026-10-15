@@ -6,6 +6,7 @@ mod lifecycle;
 mod processes;
 mod provision;
 mod repair;
+mod ssh;
 
 use std::ffi::OsString;
 use std::fs;
@@ -165,7 +166,7 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
         lifecycle::check_install(&cli_source, &helper_source, &layout, reinstall)?;
     }
     // Before anything changes, so declining the download leaves the host as it was.
-    let manifest = manifest::Manifest::bundled()?;
+    let manifest = manifest::Manifest::for_install(&layout.managed_home)?;
     let artifacts = provision::download_all(&layout.managed_home, &manifest, assume_yes)?;
     if reinstall {
         daemon::uninstall(&layout)?;
@@ -181,8 +182,14 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
     let prepared = provision::prepare(&layout.managed_home, &artifacts, &manifest, reinstall)?;
     let guest_result = ensure_guest_provisioned(&layout, &prepared)?;
     manifest.verify_provisioned(&guest_result, "kernel", &manifest.macos.kernel_version)?;
-    let daemon_paths = daemon::install(&layout, &layout.helper_path(), &prepared.ssh_private_key)?;
-    let daemon_status = daemon::start(&layout)?;
+    let settings = manifest.runtime.clone().unwrap_or_default();
+    let daemon_paths = daemon::install_with_runtime(
+        &layout,
+        &layout.helper_path(),
+        &prepared.ssh_private_key,
+        &settings,
+    )?;
+    let daemon_status = daemon::start_with_runtime(&layout, &settings)?;
     if !daemon_status.success() {
         return Err(daemon::Error::InvalidMarker(format!(
             "launchd loaded={}, ready={}, API reachable={}",
@@ -468,7 +475,9 @@ fn run_shell(command: &[String]) -> Result<i32, Error> {
         return Err(Error::ShellCredentials(runtime));
     }
     let tty = command.is_empty() || io::stdin().is_terminal();
+    let settings = ssh::load(&layout.managed_home)?;
     let status = ProcessCommand::new("/usr/bin/ssh")
+        .args(ssh::arguments(&runtime, &settings, ssh::Session::Command))
         .args(shell_arguments(&runtime, ip, command, tty))
         .status()
         .map_err(Error::ShellSsh)?;
@@ -522,7 +531,6 @@ fn shell_arguments(
     let mut arguments: Vec<OsString> = vec!["-i".into(), runtime.join("manager_ed25519").into()];
     for option in [
         "BatchMode=yes",
-        "ConnectTimeout=10",
         // The daemon trusts the guest's key the same way on first connect and
         // keeps it in the same file; a changed key is refused.
         "StrictHostKeyChecking=accept-new",
@@ -587,10 +595,12 @@ fn guest_command(
     if !key.is_file() || !known_hosts.is_file() {
         return Err("management SSH credentials are not ready".to_string());
     }
+    let settings = ssh::load(&layout.managed_home).map_err(|error| error.to_string())?;
     let output = ProcessCommand::new("/usr/bin/ssh")
+        .args(ssh::arguments(&runtime, &settings, ssh::Session::Command))
         .arg("-i")
         .arg(&key)
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"])
+        .args(["-o", "BatchMode=yes"])
         .args(["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"])
         .args(["-o", "LogLevel=ERROR"])
         .arg("-o")

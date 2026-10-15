@@ -52,7 +52,10 @@ Stopping or repairing the management VM stops its workload MicroVMs.
 ## Networking and data
 
 The launchd agent `io.firecrab.micromanager` keeps the management VM and key-only SSH API tunnel running.
-A dropped tunnel reconnects; five failed reconnects restart the management VM.
+A dropped tunnel reconnects; by default, five failed reconnects restart the management VM.
+Edit `[runtime]` and `[runtime.ssh]` in the installed `micromanager.toml` to configure automatic relaunch, SSH reuse, keepalives, and retries.
+Set `runtime.ssh.restart_vm_on_failure = false` to keep the VM running while SSH reconnects.
+See [runtime settings](../reference/micromanager-manifest.md#runtime-settings).
 
 | Traffic | Address on the Mac |
 | --- | --- |
@@ -68,6 +71,7 @@ Override with `FIRECRAB_MICROMANAGER_HOME` for an isolated checkout or test.
 
 | Path under the managed root | Content |
 | --- | --- |
+| `micromanager.toml` | Installed release inputs and editable runtime settings |
 | `downloads/` | Verified release artifacts |
 | `system/` | Kernel, initrd, and replaceable 3 GiB Debian OS disk |
 | `data/firecrab-data.raw` | Persistent 16 GiB sparse disk for databases, images, and VMs |

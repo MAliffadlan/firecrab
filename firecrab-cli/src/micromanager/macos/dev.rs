@@ -28,7 +28,7 @@ pub fn deploy(
 ) -> Result<(), Error> {
     // A guest marker is written before the host tunnel succeeds and can survive
     // a failed boot. Verify the live SSH connection before uploading the snapshot.
-    let output = ssh_command(layout, ip, "true")
+    let output = ssh_command(layout, ip, "true")?
         .stdin(Stdio::null())
         .output()
         .map_err(|source| io_error("probe management SSH", source))?;
@@ -82,7 +82,7 @@ fn run_ssh(
     stdin: File,
     action: &'static str,
 ) -> Result<(), Error> {
-    let status = ssh_command(layout, ip, command)
+    let status = ssh_command(layout, ip, command)?
         .stdin(Stdio::from(stdin))
         .status()
         .map_err(|source| io_error(action, source))?;
@@ -96,22 +96,22 @@ fn run_ssh(
     Ok(())
 }
 
-fn ssh_command(layout: &Layout, ip: IpAddr, command: &str) -> Command {
+fn ssh_command(layout: &Layout, ip: IpAddr, command: &str) -> Result<Command, Error> {
     let runtime = layout.managed_home.join("runtime");
+    let settings = super::ssh::load(&layout.managed_home)?;
     let mut ssh = Command::new("/usr/bin/ssh");
     ssh.arg("-i")
         .arg(runtime.join("manager_ed25519"))
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"])
+        .args(["-o", "BatchMode=yes"])
+        .args(super::ssh::arguments(
+            &runtime,
+            &settings,
+            super::ssh::Session::Command,
+        ))
         .args(["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"])
-        .args([
-            "-o",
-            "ServerAliveInterval=15",
-            "-o",
-            "ServerAliveCountMax=3",
-        ])
         .arg("-o")
         .arg(super::known_hosts_option(&runtime.join("known_hosts")))
         .arg(format!("root@{ip}"))
         .arg(command);
-    ssh
+    Ok(ssh)
 }
