@@ -56,6 +56,48 @@ pub enum Error {
     Busy,
 }
 
+/// Native host operations, separated so state tests never touch a host VM.
+#[derive(Clone, Copy)]
+pub(super) struct Platform {
+    pub os: HostOs,
+    pub capacity: fn(&Path) -> Result<ManagerHostCapacity, Error>,
+    pub defaults: fn(&Path, &ManagerHostCapacity) -> Result<ManagerResources, Error>,
+    pub validate: fn(&Path, &ManagerResources) -> Result<(), Error>,
+    pub apply: fn(&Path, &ManagerResources) -> Result<(), Error>,
+}
+
+impl Platform {
+    pub fn native() -> Self {
+        Self {
+            os: os(),
+            capacity: host_capacity,
+            defaults,
+            validate: |_home, settings| {
+                #[cfg(target_os = "macos")]
+                return super::macos::resource::validate_configuration(_home, settings);
+                #[cfg(target_os = "windows")]
+                return super::windows::resource::validate_configuration(settings);
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                {
+                    let _ = (_home, settings);
+                    Err(Error::Invalid("unsupported platform".into()))
+                }
+            },
+            apply: |home, settings| {
+                #[cfg(target_os = "macos")]
+                return super::macos::resource::apply(home, settings);
+                #[cfg(target_os = "windows")]
+                return super::windows::resource::apply(home, settings);
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                {
+                    let _ = (home, settings);
+                    Err(Error::Invalid("unsupported platform".into()))
+                }
+            },
+        }
+    }
+}
+
 pub fn home() -> Result<PathBuf, Error> {
     #[cfg(target_os = "macos")]
     return super::macos::lifecycle::Layout::from_process_env()
@@ -174,38 +216,40 @@ pub fn lock(home: &Path) -> Result<File, Error> {
     Ok(file)
 }
 
-pub fn status(home: &Path) -> Result<ManagerResourceStatus, Error> {
-    let host = host_capacity(home)?;
-    let settings = read(&home.join("resources.json"))?.unwrap_or(defaults(home, &host)?);
-    let current = read(&home.join("runtime/resources-active.json"))?;
-    let operation_path = home.join("runtime/resource-operation.json");
-    let mut operation: Option<ManagerResourceOperation> = read(&operation_path)?;
-    if let Some(active) = operation.as_mut()
-        && active.state == "applying"
-        && fs::metadata(&operation_path)?
-            .modified()?
-            .elapsed()
-            .is_ok_and(|age| age.as_secs() > 30)
-        && let Ok(_lock) = lock(home)
-    {
-        active.state = "failed".into();
-        active.error = Some("the resource apply worker stopped before completion; inspect runtime/resource-apply.log and retry".into());
-        write(&operation_path, active)?;
+impl Platform {
+    pub fn status(&self, home: &Path) -> Result<ManagerResourceStatus, Error> {
+        let host = (self.capacity)(home)?;
+        let settings = read(&home.join("resources.json"))?.unwrap_or((self.defaults)(home, &host)?);
+        let current = read(&home.join("runtime/resources-active.json"))?;
+        let operation_path = home.join("runtime/resource-operation.json");
+        let mut operation: Option<ManagerResourceOperation> = read(&operation_path)?;
+        if let Some(active) = operation.as_mut()
+            && active.state == "applying"
+            && fs::metadata(&operation_path)?
+                .modified()?
+                .elapsed()
+                .is_ok_and(|age| age.as_secs() > 30)
+            && let Ok(_lock) = lock(home)
+        {
+            active.state = "failed".into();
+            active.error = Some("the resource apply worker stopped before completion; inspect runtime/resource-apply.log and retry".into());
+            write(&operation_path, active)?;
+        }
+        let pending = current.as_ref().is_none_or(|current| current != &settings)
+            || operation
+                .as_ref()
+                .is_some_and(|operation| operation.state == "failed");
+        Ok(ManagerResourceStatus {
+            controller_id: controller_id(home)?,
+            os: self.os,
+            settings,
+            current,
+            host,
+            pending,
+            shared_wsl: self.os == HostOs::Windows,
+            operation,
+        })
     }
-    let pending = current.as_ref().is_none_or(|current| current != &settings)
-        || operation
-            .as_ref()
-            .is_some_and(|operation| operation.state == "failed");
-    Ok(ManagerResourceStatus {
-        controller_id: controller_id(home)?,
-        os: os(),
-        settings,
-        current,
-        host,
-        pending,
-        shared_wsl: os() == HostOs::Windows,
-        operation,
-    })
 }
 
 pub fn validate(
@@ -265,50 +309,49 @@ pub fn validate(
     Ok(())
 }
 
-pub fn save(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
-    let _lock = lock(home)?;
-    let status = status(home)?;
-    if status
-        .operation
-        .as_ref()
-        .is_some_and(|operation| operation.state == "applying")
-    {
-        return Err(Error::Busy);
+impl Platform {
+    pub fn save(&self, home: &Path, settings: &ManagerResources) -> Result<(), Error> {
+        let _lock = lock(home)?;
+        let status = self.status(home)?;
+        if status
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.state == "applying")
+        {
+            return Err(Error::Busy);
+        }
+        let minimum_disk = status
+            .current
+            .as_ref()
+            .map(|current| current.disk_gib)
+            .unwrap_or((self.defaults)(home, &status.host)?.disk_gib);
+        validate(settings, &status.host, status.os, minimum_disk)?;
+        (self.validate)(home, settings)?;
+        write(&home.join("resources.json"), settings)
     }
-    let minimum_disk = status
-        .current
-        .as_ref()
-        .map(|current| current.disk_gib)
-        .unwrap_or(defaults(home, &status.host)?.disk_gib);
-    validate(settings, &status.host, status.os, minimum_disk)?;
-    #[cfg(target_os = "macos")]
-    super::macos::resource::validate_configuration(home, settings)?;
-    #[cfg(target_os = "windows")]
-    super::windows::resource::validate_configuration(settings)?;
-    write(&home.join("resources.json"), settings)
-}
 
-fn apply_saved(home: &Path) -> Result<(), Error> {
-    let status = status(home)?;
-    let minimum_disk = status
-        .current
-        .as_ref()
-        .map(|current| current.disk_gib)
-        .unwrap_or(defaults(home, &status.host)?.disk_gib);
-    validate(&status.settings, &status.host, status.os, minimum_disk)?;
-    #[cfg(target_os = "macos")]
-    super::macos::resource::apply(home, &status.settings)?;
-    #[cfg(target_os = "windows")]
-    super::windows::resource::apply(home, &status.settings)?;
-    write(
-        &home.join("runtime/resources-active.json"),
-        &status.settings,
-    )
+    fn apply_saved(&self, home: &Path) -> Result<(), Error> {
+        let status = self.status(home)?;
+        let minimum_disk = status
+            .current
+            .as_ref()
+            .map(|current| current.disk_gib)
+            .unwrap_or((self.defaults)(home, &status.host)?.disk_gib);
+        validate(&status.settings, &status.host, status.os, minimum_disk)?;
+        (self.apply)(home, &status.settings)?;
+        write(
+            &home.join("runtime/resources-active.json"),
+            &status.settings,
+        )
+    }
 }
 
 pub fn run(options: Options) -> Result<i32, Error> {
-    let home = home()?;
-    let mut settings = status(&home)?.settings;
+    run_in(&home()?, options, Platform::native())
+}
+
+fn run_in(home: &Path, options: Options, platform: Platform) -> Result<i32, Error> {
+    let mut settings = platform.status(home)?.settings;
     let changed = options.cpu.is_some()
         || options.ram.is_some()
         || options.disk.is_some()
@@ -337,14 +380,14 @@ pub fn run(options: Options) -> Result<i32, Error> {
         settings.network_interface = Some(interface);
     }
     if changed {
-        save(&home, &settings)?;
+        platform.save(home, &settings)?;
     }
     if options.apply {
         let id = uuid::Uuid::new_v4().to_string();
         if options.json {
             let output = std::process::Command::new(std::env::current_exe()?)
                 .args(["service", "resource-apply", &id])
-                .env("FIRECRAB_MICROMANAGER_HOME", &home)
+                .env("FIRECRAB_MICROMANAGER_HOME", home)
                 .output()?;
             if !output.status.success() {
                 return Err(Error::Invalid(
@@ -352,10 +395,10 @@ pub fn run(options: Options) -> Result<i32, Error> {
                 ));
             }
         } else {
-            run_apply(&id)?;
+            run_apply_in(home, &id, platform)?;
         }
     }
-    let status = status(&home)?;
+    let status = platform.status(home)?;
     if options.json {
         super::report!("{}", serde_json::to_string_pretty(&status)?);
     } else {
@@ -389,9 +432,12 @@ pub fn run(options: Options) -> Result<i32, Error> {
 }
 
 pub fn run_apply(id: &str) -> Result<i32, Error> {
-    let home = home()?;
-    let _lock = lock(&home)?;
-    let result = apply_saved(&home);
+    run_apply_in(&home()?, id, Platform::native())
+}
+
+fn run_apply_in(home: &Path, id: &str, platform: Platform) -> Result<i32, Error> {
+    let _lock = lock(home)?;
+    let result = platform.apply_saved(home);
     let operation = ManagerResourceOperation {
         id: id.to_owned(),
         state: if result.is_ok() { "complete" } else { "failed" }.into(),
@@ -402,124 +448,4 @@ pub fn run_apply(id: &str) -> Result<i32, Error> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[derive(Parser)]
-    struct Cli {
-        #[command(subcommand)]
-        command: super::super::Command,
-    }
-
-    #[test]
-    fn resource_and_requested_resorce_spelling_use_the_same_options() {
-        for name in ["resource", "resorce"] {
-            let cli = Cli::try_parse_from([
-                "firecrab",
-                name,
-                "--cpu",
-                "4",
-                "--ram",
-                "8192",
-                "--disk",
-                "32",
-                "--network",
-                "nat",
-                "--apply",
-                "--json",
-            ])
-            .unwrap();
-            let super::super::Command::Resource { options } = cli.command else {
-                panic!("resource command");
-            };
-            assert_eq!(options.cpu, Some(4));
-            assert_eq!(options.ram, Some(8192));
-            assert!(options.apply && options.json);
-        }
-    }
-
-    fn host() -> ManagerHostCapacity {
-        ManagerHostCapacity {
-            cpu: 8,
-            memory_mib: 16384,
-            disk_available_gib: 100,
-            network_interfaces: vec!["en0".into()],
-            network_modes: vec![
-                ManagerNetworkMode::Nat,
-                ManagerNetworkMode::Bridged,
-                ManagerNetworkMode::Mirrored,
-            ],
-        }
-    }
-    fn settings() -> ManagerResources {
-        ManagerResources {
-            cpu: 4,
-            memory_mib: 8192,
-            disk_gib: 32,
-            network_mode: ManagerNetworkMode::Nat,
-            network_interface: None,
-        }
-    }
-    #[test]
-    fn allocations_cannot_exceed_host_or_shrink_disk() {
-        let mut settings = settings();
-        validate(&settings, &host(), HostOs::Macos, 16).unwrap();
-        settings.cpu = 9;
-        assert!(validate(&settings, &host(), HostOs::Macos, 16).is_err());
-        settings.cpu = 4;
-        settings.memory_mib = 16385;
-        assert!(validate(&settings, &host(), HostOs::Macos, 16).is_err());
-        settings.memory_mib = 8192;
-        assert!(validate(&settings, &host(), HostOs::Macos, 64).is_err());
-    }
-    #[test]
-    fn network_validation_follows_platform_and_interface() {
-        let mut settings = settings();
-        settings.network_mode = ManagerNetworkMode::Bridged;
-        assert!(validate(&settings, &host(), HostOs::Macos, 16).is_err());
-        settings.network_interface = Some("en0".into());
-        validate(&settings, &host(), HostOs::Macos, 16).unwrap();
-        assert!(validate(&settings, &host(), HostOs::Windows, 16).is_err());
-        settings.network_mode = ManagerNetworkMode::Mirrored;
-        settings.network_interface = None;
-        validate(&settings, &host(), HostOs::Windows, 16).unwrap();
-        assert!(validate(&settings, &host(), HostOs::Macos, 16).is_err());
-    }
-    #[test]
-    fn persisted_allocations_round_trip_and_bad_json_does_not_reset_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("resources.json");
-        assert!(read::<ManagerResources>(&path).unwrap().is_none());
-        write(&path, &settings()).unwrap();
-        assert_eq!(read::<ManagerResources>(&path).unwrap(), Some(settings()));
-        fs::write(&path, b"bad json").unwrap();
-        assert!(read::<ManagerResources>(&path).is_err());
-    }
-    #[test]
-    fn resource_changes_are_serialized() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = lock(dir.path()).unwrap();
-        let blocked = lock(dir.path());
-        assert!(matches!(blocked, Err(Error::Busy)), "{blocked:?}");
-        drop(first);
-        lock(dir.path()).unwrap();
-    }
-
-    #[test]
-    fn lock_file_errors_are_not_reported_as_contention() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("runtime/resource.lock")).unwrap();
-        let result = lock(dir.path());
-        assert!(matches!(result, Err(Error::Io(_))), "{result:?}");
-    }
-
-    #[test]
-    fn controller_identity_is_persistent_and_distinguishes_managed_homes() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let id = controller_id(first.path()).unwrap();
-        assert_eq!(controller_id(first.path()).unwrap(), id);
-        assert_ne!(controller_id(second.path()).unwrap(), id);
-    }
-}
+pub(super) mod tests;

@@ -17,6 +17,11 @@ use firecrab_api_types::{ManagerResourceOperation, ManagerResourceStatus, Manage
 
 use super::resource::{self, Error};
 
+struct Controller {
+    home: PathBuf,
+    platform: resource::Platform,
+}
+
 const PORT: u16 = 5524;
 const ORIGINS: [&str; 4] = [
     "http://localhost:5523",
@@ -46,7 +51,7 @@ fn allowed(headers: &HeaderMap) -> bool {
 }
 
 async fn guard(
-    State(home): State<Arc<PathBuf>>,
+    State(controller): State<Arc<Controller>>,
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
@@ -57,7 +62,7 @@ async fn guard(
     let mutation =
         request.method() == axum::http::Method::PUT || request.method() == axum::http::Method::POST;
     let id_matches = !mutation
-        || resource::controller_id(&home).is_ok_and(|id| {
+        || resource::controller_id(&controller.home).is_ok_and(|id| {
             request
                 .headers()
                 .get("x-firecrab-controller-id")
@@ -91,7 +96,11 @@ async fn guard(
 }
 
 fn router(home: PathBuf) -> Router {
-    let home = Arc::new(home);
+    router_for(home, resource::Platform::native())
+}
+
+fn router_for(home: PathBuf, platform: resource::Platform) -> Router {
+    let controller = Arc::new(Controller { home, platform });
     Router::new()
         .route(
             "/api/service/resources",
@@ -99,26 +108,26 @@ fn router(home: PathBuf) -> Router {
         )
         .route("/api/service/resources/apply", post(apply_resources))
         .layer(DefaultBodyLimit::max(4096))
-        .layer(middleware::from_fn_with_state(home.clone(), guard))
-        .with_state(home)
+        .layer(middleware::from_fn_with_state(controller.clone(), guard))
+        .with_state(controller)
 }
 
 async fn get_resources(
-    State(home): State<Arc<PathBuf>>,
+    State(controller): State<Arc<Controller>>,
 ) -> Result<Json<ManagerResourceStatus>, Error> {
-    tokio::task::spawn_blocking(move || resource::status(&home))
+    tokio::task::spawn_blocking(move || controller.platform.status(&controller.home))
         .await
         .map_err(|error| Error::Invalid(error.to_string()))?
         .map(Json)
 }
 
 async fn save_resources(
-    State(home): State<Arc<PathBuf>>,
+    State(controller): State<Arc<Controller>>,
     Json(settings): Json<ManagerResources>,
 ) -> Result<Json<ManagerResourceStatus>, Error> {
     tokio::task::spawn_blocking(move || {
-        resource::save(&home, &settings)?;
-        resource::status(&home)
+        controller.platform.save(&controller.home, &settings)?;
+        controller.platform.status(&controller.home)
     })
     .await
     .map_err(|error| Error::Invalid(error.to_string()))?
@@ -126,21 +135,32 @@ async fn save_resources(
 }
 
 async fn apply_resources(
-    State(home): State<Arc<PathBuf>>,
+    State(controller): State<Arc<Controller>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<ManagerResourceOperation>), Error> {
     if body != serde_json::json!({}) {
         return Err(Error::Invalid("apply expects an empty JSON object".into()));
     }
-    tokio::task::spawn_blocking(move || spawn_apply(&home))
+    tokio::task::spawn_blocking(move || spawn_apply(&controller.home, controller.platform))
         .await
         .map_err(|error| Error::Invalid(error.to_string()))?
         .map(|operation| (StatusCode::ACCEPTED, Json(operation)))
 }
 
-fn spawn_apply(home: &std::path::Path) -> Result<ManagerResourceOperation, Error> {
+fn spawn_apply(
+    home: &std::path::Path,
+    platform: resource::Platform,
+) -> Result<ManagerResourceOperation, Error> {
+    spawn_worker(home, platform, Command::new(std::env::current_exe()?))
+}
+
+fn spawn_worker(
+    home: &std::path::Path,
+    platform: resource::Platform,
+    mut command: Command,
+) -> Result<ManagerResourceOperation, Error> {
     let _lock = resource::lock(home)?;
-    let status = resource::status(home)?;
+    let status = platform.status(home)?;
     if status
         .operation
         .is_some_and(|operation| operation.state == "applying")
@@ -158,7 +178,6 @@ fn spawn_apply(home: &std::path::Path) -> Result<ManagerResourceOperation, Error
         .truncate(true)
         .write(true)
         .open(home.join("runtime/resource-apply.log"))?;
-    let mut command = Command::new(std::env::current_exe()?);
     command
         .args(["service", "resource-apply", &operation.id])
         .env("FIRECRAB_MICROMANAGER_HOME", home)
@@ -295,19 +314,4 @@ fn start_windows_holder(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn only_loopback_hosts_and_trusted_browser_origins_are_accepted() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", HeaderValue::from_static("127.0.0.1:5524"));
-        assert!(allowed(&headers));
-        headers.insert("origin", HeaderValue::from_static("http://localhost:5523"));
-        assert!(allowed(&headers));
-        headers.insert("origin", HeaderValue::from_static("https://evil.example"));
-        assert!(!allowed(&headers));
-        headers.remove("origin");
-        headers.insert("host", HeaderValue::from_static("evil.example:5524"));
-        assert!(!allowed(&headers));
-    }
-}
+mod tests;

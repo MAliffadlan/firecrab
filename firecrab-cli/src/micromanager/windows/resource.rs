@@ -8,6 +8,10 @@ use super::super::resource::{self, Error};
 use super::{daemon, wsl};
 
 fn wsl_config_path() -> Result<PathBuf, Error> {
+    #[cfg(test)]
+    if let Some(path) = wsl::fake::config_path() {
+        return Ok(path);
+    }
     std::env::var_os("USERPROFILE")
         .map(|home| PathBuf::from(home).join(".wslconfig"))
         .ok_or_else(|| Error::Invalid("USERPROFILE is not set".into()))
@@ -169,7 +173,7 @@ pub fn validate_configuration(settings: &ManagerResources) -> Result<(), Error> 
     Ok(())
 }
 
-pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
+fn configure_wsl(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
     validate_configuration(settings)?;
     let running = wsl::run(&["--list", "--running", "--quiet"])
         .map_err(|error| Error::Invalid(error.to_string()))?;
@@ -238,6 +242,11 @@ pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
             "WSL disk resize failed; WSL configuration restored: {error}"
         )));
     }
+    Ok(())
+}
+
+pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
+    configure_wsl(home, settings)?;
     let layout = super::lifecycle::Layout {
         managed_home: home.to_owned(),
     };
@@ -252,61 +261,4 @@ pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn settings() -> ManagerResources {
-        ManagerResources {
-            cpu: 4,
-            memory_mib: 8192,
-            disk_gib: 1024,
-            network_mode: ManagerNetworkMode::Mirrored,
-            network_interface: None,
-        }
-    }
-    #[test]
-    fn editing_wsl_preserves_unrelated_keys_sections_and_comments() {
-        let text = "# my config\r\n[wsl2]\r\nmemory=4GB\r\nprocessors=2\r\nkernel=C:\\kernel\r\nswap=0\r\n[experimental]\r\nautoMemoryReclaim=gradual\r\n";
-        let merged = merge_config(text, &settings());
-        assert_eq!(value(&merged, "memory"), Some("8192MB"));
-        assert_eq!(value(&merged, "processors"), Some("4"));
-        assert_eq!(value(&merged, "networkingMode"), Some("mirrored"));
-        assert!(merged.contains("kernel=C:\\kernel"));
-        assert!(merged.contains("swap=0"));
-        assert!(merged.contains("[experimental]\r\nautoMemoryReclaim=gradual"));
-        assert!(merged.contains("# my config"));
-        assert_eq!(merge_config(&merged, &settings()), merged);
-    }
-    #[test]
-    fn editing_wsl_adds_missing_section_and_removes_duplicate_owned_values() {
-        let merged = merge_config("[experimental]\nfoo=bar\n", &settings());
-        assert_eq!(value(&merged, "memory"), Some("8192MB"));
-        let merged = merge_config(
-            "[wsl2]\nMemory=2GB\nmemory=4GB\n[wsl2]\nprocessors=2\n",
-            &settings(),
-        );
-        assert_eq!(merged.matches("memory=").count(), 1);
-        assert_eq!(merged.matches("processors=").count(), 1);
-    }
-    #[test]
-    fn wsl_size_units_are_converted_without_overflow() {
-        assert_eq!(size_mib("8GB"), Some(8192));
-        assert_eq!(size_mib("512MB"), Some(512));
-        assert_eq!(size_mib("1073741824"), Some(1024));
-        assert_eq!(size_mib("18446744073709551615GB"), None);
-    }
-    #[test]
-    fn global_apply_refuses_other_running_distributions_before_mutation() {
-        let calls = wsl::fake::answer(|_| Ok("Ubuntu\nfirecrab-debian\n".into()));
-        let error = apply(
-            Path::new("unused"),
-            &ManagerResources {
-                network_mode: ManagerNetworkMode::Nat,
-                ..settings()
-            },
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("Ubuntu"));
-        assert_eq!(calls.calls().len(), 1);
-        assert!(!calls.calls().iter().any(|call| call.contains("--shutdown")));
-    }
-}
+mod tests;

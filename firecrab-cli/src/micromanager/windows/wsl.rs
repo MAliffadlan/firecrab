@@ -105,6 +105,7 @@ fn execute(program: &str, args: &[&str]) -> std::io::Result<Output> {
 #[cfg(test)]
 pub mod fake {
     use std::cell::{Cell, RefCell};
+    use std::path::{Path, PathBuf};
 
     use super::Output;
 
@@ -116,6 +117,7 @@ pub mod fake {
         static HANDLER: RefCell<Option<Handler>> = const { RefCell::new(None) };
         static CALLS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
         static API_RESPONSE: Cell<Option<bool>> = const { Cell::new(None) };
+        static CONFIG_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     }
 
     /// Answers every call on this thread until the guard drops. The handler
@@ -125,12 +127,19 @@ pub mod fake {
         HANDLER.with(|slot| *slot.borrow_mut() = Some(Box::new(handler)));
         CALLS.with(|calls| calls.borrow_mut().clear());
         API_RESPONSE.with(|response| response.set(None));
+        CONFIG_PATH.with(|path| *path.borrow_mut() = None);
         Guard
     }
 
     pub struct Guard;
 
     impl Guard {
+        /// Keep WSL configuration writes inside this test's temporary home.
+        pub fn with_config(self, path: &Path) -> Self {
+            CONFIG_PATH.with(|slot| *slot.borrow_mut() = Some(path.to_owned()));
+            self
+        }
+
         /// Override the host HTTP readiness probe on this test thread only.
         pub fn with_api_response(self, reachable: bool) -> Self {
             API_RESPONSE.with(|response| response.set(Some(reachable)));
@@ -146,8 +155,13 @@ pub mod fake {
     impl Drop for Guard {
         fn drop(&mut self) {
             API_RESPONSE.with(|response| response.set(None));
+            CONFIG_PATH.with(|path| *path.borrow_mut() = None);
             HANDLER.with(|slot| *slot.borrow_mut() = None);
         }
+    }
+
+    pub fn config_path() -> Option<PathBuf> {
+        CONFIG_PATH.with(|path| path.borrow().clone())
     }
 
     pub fn api_response() -> Option<bool> {

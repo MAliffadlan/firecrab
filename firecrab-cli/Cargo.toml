@@ -32,3 +32,6 @@ uuid = { workspace = true, features = ["v4"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 firecrab-helper-protocol = { path = "../firecrab-helper-protocol" }
 nix = { version = "0.30", features = ["user"] }
+
+[dev-dependencies]
+tower = { version = "0.5.3", features = ["util"] }
