@@ -117,6 +117,8 @@ See [source development](../development/micromanager.md) and its [diagram](../..
 Resource CLI commands use the same API as the dashboard.
 Linux updates stage a verified release bundle and ask the helper to replace binaries and the dashboard.
 The helper rechecks the bundle; unit changes require an installer rerun.
+The dashboard shows release notes from `GET /api/update`, starts the run with POST, and follows `GET /api/update/progress`.
+See the [update contract](api.md#update) for progress phases.
 Running VM shims retain their previous binary until restart and are reconciled by the new API.
 See [Operations](../guides/operations.md#upgrade) and the [CLI/update diagram](../../assets/architecture/cli-updates.en.svg).
 

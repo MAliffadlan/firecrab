@@ -84,10 +84,11 @@ Runtime doctor must report `ready: true`; hosted build/unit jobs do not prove ru
   Preserve disk, binaries, provisioning, data, and dev overrides; no downloads, reimport, or global WSL shutdown.
   Missing prerequisites fail before stopping; every failed stage returns nonzero.
   Require live services and Windows API within the five-minute readiness deadline.
-- [ ] **H1 — Update status:** read-only status check succeeds.
+- [ ] **H1 — Update status:** `GET /api/update` succeeds; `GET /api/update/progress` reports `idle` or the last run.
 - [ ] **H2 — Host network:** an uplink is present; loopback and internal helper interfaces are absent from the picker.
 - [ ] **H3 — Firecrab info:** the API reports build/install info, the Firecracker version, and API/helper states. The Host panel shows and refreshes them; an API outage must not retain stale active states.
 - [ ] **U1 — Update apply (optional separate run):** apply update; host recovers and API returns 200.
+  The dashboard dialog lists release notes, then shows a gauge, percent, and stage until the new API answers.
 
 ## MicroNetwork
 

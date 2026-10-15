@@ -155,8 +155,10 @@ sudo firecrab update --apply
 With no flag, `update` performs a check without downloads or elevated privilege.
 A successful check exits `0` whether or not a newer release exists.
 Failed checks exit `1`; JSON retains an `error` and omits `latest`.
+JSON includes release notes when available.
 
 Apply stages a SHA-256-verified host bundle under `$DATADIR/updates/<uuid>`.
+`--apply` displays each stage with a gauge and overall percent.
 The helper rechecks it and replaces binaries/dashboard in the installed layout.
 Systemd unit files require an installer rerun; see [Operations](../guides/operations.md#upgrade).
 

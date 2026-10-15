@@ -11,6 +11,7 @@ This page maps those cases to scripts and records the reporting rules.
 4. Record `PASS`, `FAILED`, or `WARNING` for each applicable case.
 
 Use `WARNING` for skipped checks or leftover resources.
+For H1, read `GET /api/update` and `GET /api/update/progress`; neither starts an update.
 Apply updates only during U1; delete only images installed by the run.
 Restore any previous Docker Hub login and manual DNS/management SSH changes.
 
