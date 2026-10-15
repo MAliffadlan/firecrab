@@ -14,3 +14,5 @@ pub mod shells;
 pub mod storage;
 pub mod update;
 pub mod vms;
+
+pub mod pipe;

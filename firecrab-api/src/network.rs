@@ -56,6 +56,19 @@ impl NetworkClient {
         }
     }
 
+    pub async fn pipe(
+        &self,
+        request: firecrab_helper_protocol::pipe::Operation,
+    ) -> Result<firecrab_helper_protocol::pipe::Snapshot, NetworkError> {
+        tokio::time::timeout(
+            Duration::from_secs(240),
+            self.exchange(NetworkRequest::Pipe { request }),
+        )
+        .await
+        .map_err(|_| NetworkError::Timeout)??
+        .ok_or(NetworkError::MismatchedResponse)
+    }
+
     pub async fn call(&self, request: NetworkRequest) -> Result<(), NetworkError> {
         self.call_within(self.timeout, request).await
     }
@@ -67,6 +80,7 @@ impl NetworkClient {
     ) -> Result<(), NetworkError> {
         tokio::time::timeout(timeout, self.exchange(request))
             .await
+            .map(|result| result.map(|_| ()))
             .map_err(|_| NetworkError::Timeout)?
     }
 
@@ -228,7 +242,10 @@ impl NetworkClient {
         }
     }
 
-    async fn exchange(&self, request: NetworkRequest) -> Result<(), NetworkError> {
+    async fn exchange(
+        &self,
+        request: NetworkRequest,
+    ) -> Result<Option<firecrab_helper_protocol::pipe::Snapshot>, NetworkError> {
         let mut stream = UnixStream::connect(&self.socket_path)
             .await
             .map_err(|source| NetworkError::Unavailable {
@@ -243,7 +260,8 @@ impl NetworkClient {
         if response.request_id != envelope.request_id {
             return Err(NetworkError::MismatchedResponse);
         }
-        response.result.map_err(NetworkError::Helper)
+        response.result.map_err(NetworkError::Helper)?;
+        Ok(response.pipe)
     }
 }
 
@@ -283,6 +301,7 @@ pub(crate) mod test_support {
                 Err(_) => return,
             };
             let response = NetworkResponseEnvelope {
+                pipe: None,
                 version: PROTOCOL_VERSION,
                 request_id: envelope.request_id,
                 result: Ok(()),
@@ -297,6 +316,7 @@ pub(crate) mod test_support {
     /// sequence rather than each request's full payload.
     fn operation_name(request: &NetworkRequest) -> &'static str {
         match request {
+            NetworkRequest::Pipe { .. } => "pipe",
             NetworkRequest::EnsureBridge => "ensure_bridge",
             NetworkRequest::EnsureMicroNetworkBridge { .. } => "ensure_micro_network_bridge",
             NetworkRequest::RemoveMicroNetworkBridge { .. } => "remove_micro_network_bridge",
@@ -392,6 +412,7 @@ pub(crate) mod test_support {
                 Ok(())
             };
             let response = NetworkResponseEnvelope {
+                pipe: None,
                 version: PROTOCOL_VERSION,
                 request_id: envelope.request_id,
                 result,
@@ -424,6 +445,7 @@ pub(crate) mod test_support {
                 _ => Ok(()),
             };
             let response = NetworkResponseEnvelope {
+                pipe: None,
                 version: PROTOCOL_VERSION,
                 request_id: envelope.request_id,
                 result,
@@ -480,6 +502,7 @@ mod tests {
         let path = dir.path().join("helper.sock");
         let listener = UnixListener::bind(&path).expect("bind");
         fake_helper(listener, |envelope| NetworkResponseEnvelope {
+            pipe: None,
             version: PROTOCOL_VERSION,
             request_id: envelope.request_id,
             result: Ok(()),
@@ -497,6 +520,7 @@ mod tests {
         let path = dir.path().join("helper.sock");
         let listener = UnixListener::bind(&path).expect("bind");
         fake_helper(listener, |envelope| NetworkResponseEnvelope {
+            pipe: None,
             version: PROTOCOL_VERSION,
             request_id: envelope.request_id,
             result: Err(HelperFailure::UnsupportedOperation),
@@ -522,6 +546,7 @@ mod tests {
         let path = dir.path().join("helper.sock");
         let listener = UnixListener::bind(&path).expect("bind");
         fake_helper(listener, |_| NetworkResponseEnvelope {
+            pipe: None,
             version: PROTOCOL_VERSION,
             request_id: Uuid::new_v4(),
             result: Ok(()),

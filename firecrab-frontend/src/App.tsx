@@ -14,6 +14,7 @@ import Kernels from "./components/Kernels";
 import MicroNetworks from "./components/MicroNetworks";
 import MicroStorages from "./components/MicroStorages";
 import Shell from "./components/Shell";
+import Pipe from "./components/Pipe";
 import Shells from "./components/Shells";
 import { newVmHash, useAppRoute, viewHash } from "./navigation";
 import { useI18n } from "./i18n";
@@ -233,6 +234,7 @@ export default function App() {
         {/* Each page mounts only while selected, so its own polling stops
             the moment you navigate away. */}
         {view === "networks" && <MicroNetworks />}
+        {view === "pipe" && <Pipe />}
         {view === "storages" && <MicroStorages />}
         {view === "images" && <Images />}
         {view === "kernels" && <Kernels />}

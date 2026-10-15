@@ -2071,3 +2071,18 @@ table.image-table .image-package-url a:hover {
   .update-stage.is-active .update-stage-mark { animation: none; }
   .gauge-fill { transition: none; }
 }
+
+/* Pipe uses the existing panels, tables and field tokens. */
+.pipe-controls { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; margin-top: 1rem; }
+.pipe-controls .field { min-width: min(100%, 15rem); }
+.pipe-controls .field > span { color: var(--shell); font-family: var(--font-mono); font-size: .75rem; }
+.pipe-route-form { margin-bottom: 1rem; }
+.pipe-route-form .pipe-targets { grid-column: span 2; }
+.pipe-route-table { min-width: 38rem; }
+.pipe-status-table { min-width: 0; }
+.pipe-addresses { white-space: nowrap; }
+.pipe-row-actions { display: flex; gap: .35rem; }
+.pipe-tunnel-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 1rem; margin-top: 1rem; }
+.pipe-credentials { min-height: 7rem; resize: vertical; width: 100%; padding: .55rem .65rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 3px; font-family: var(--font-mono); }
+@media (max-width: 1000px) { .pipe-route-form .pipe-targets { grid-column: 1 / -1; } }
+@media (max-width: 560px) { .pipe-tunnel-fields { grid-template-columns: minmax(0, 1fr); } .pipe-controls .field { width: 100%; } }

@@ -53,6 +53,16 @@ jobs:
       - name: cargo test -p firecrab-cli
         run: cargo test -p firecrab-cli --locked
 
+      - name: Pipe installation, routing and systemd lifecycle
+        run: |
+          sudo apt-get install -y nginx
+          cargo build -p firecrab-cli -p firecrab-api -p firecrab-helper --locked
+          sudo env FIRECRAB_LIBDIR=/var/lib/firecrab-pipe-qa target/debug/firecrab pipe install
+          cloudflared=/var/lib/firecrab-pipe-qa/pipe/cloudflared
+          python3 scripts/test-pipe-runtime.py --firecrab target/debug/firecrab --nginx /usr/sbin/nginx
+          sudo python3 scripts/test-pipe-cli.py --firecrab target/debug/firecrab --nginx /usr/sbin/nginx --cloudflared "$cloudflared"
+          sudo python3 scripts/test-pipe-api.py --api "$PWD/target/debug/firecrab-api" --helper "$PWD/target/debug/firecrab-helper"
+
       - name: Shared source development deployment contract
         run: python3 scripts/test-micromanager-dev.py
 

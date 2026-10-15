@@ -219,6 +219,11 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
         .route("/api/network", get(handlers::network::get_network_info))
         .route("/api/host", get(handlers::network::get_host_status))
         .route("/api/info", get(handlers::info::get_info))
+        .route(
+            "/api/pipe",
+            get(handlers::pipe::inspect).put(handlers::pipe::apply),
+        )
+        .route("/api/pipe/disable", post(handlers::pipe::disable))
         // GET and POST share one path, matching this router's existing shape
         // for "read this resource / start work on it" pairs such as
         // `/api/images/{alias}/install`.

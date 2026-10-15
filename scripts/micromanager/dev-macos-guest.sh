@@ -152,13 +152,13 @@ if [ "$profile" != restore ]; then
   export CARGO_TARGET_DIR="$root/target"
   export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
   export CARGO_PROFILE_DEV_DEBUG=${CARGO_PROFILE_DEV_DEBUG:-1}
-  flags=(--locked --target "$target" -p firecrab-api -p firecrab-helper)
+  flags=(--locked --target "$target" -p firecrab-api -p firecrab-helper -p firecrab-cli)
   if [ "$profile" = release ]; then flags+=(--release); fi
   rustup run "$channel" cargo build "${flags[@]}"
 
   binaries=$(mktemp -d "$bin_root/build.XXXXXX")
   chmod 0755 "$binaries"
-  for binary in firecrab-api firecrab-helper; do
+  for binary in firecrab-api firecrab-helper firecrab; do
     install -m 0755 "$CARGO_TARGET_DIR/$target/$profile/$binary" "$binaries/$binary"
   done
   # The API resolves these runtime tools next to its executable. The source
@@ -169,7 +169,7 @@ if [ "$profile" != restore ]; then
 fi
 
 # The packaged binaries, service accounts, permissions and working directories
-# remain installed. Only ExecStart changes, with a rollback if readiness fails.
+# remain installed. Helper write access also covers pipe config and unit files.
 deploying=1
 systemctl stop firecrab-api "$helper_unit"
 if [ "$profile" = restore ]; then
@@ -188,6 +188,10 @@ else
     if [ "$unit" = "$helper_unit" ]; then binary=firecrab-helper; fi
     printf '[Service]\nExecStart=\nExecStart=%s/bin/%s\n' "$bin_root" "$binary" \
       >"$unit_root/$unit.service.d/90-firecrab-dev.conf"
+    if [ "$unit" = "$helper_unit" ]; then
+      printf 'ReadWritePaths=-/etc/firecrab -%s\n' "$unit_root" \
+        >>"$unit_root/$unit.service.d/90-firecrab-dev.conf"
+    fi
   done
 fi
 systemctl daemon-reload

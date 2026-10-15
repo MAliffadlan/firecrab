@@ -36,7 +36,7 @@ case "$name" in
     done
     [ "$target" = "${GUEST_ARCH:-aarch64}-unknown-linux-gnu" ]
     mkdir -p "$CARGO_TARGET_DIR/$target/$profile"
-    for unit in firecrab-api firecrab-helper; do
+    for unit in firecrab-api firecrab-helper firecrab; do
       printf '#!/bin/bash\necho built-from-source\n' >"$CARGO_TARGET_DIR/$target/$profile/$unit"
     done
     ;;

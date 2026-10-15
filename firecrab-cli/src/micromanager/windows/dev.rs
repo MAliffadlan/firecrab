@@ -64,7 +64,7 @@ pub fn deploy(checkout: Option<&Checkout>, release: bool) -> Result<(), Error> {
         }
         None => ("restore", "unused"),
     };
-    report!("[GUEST] {profile}: API + helper");
+    report!("[GUEST] {profile}: API + helper + CLI");
     wsl::run_with_input(
         &[
             "-d",
