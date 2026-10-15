@@ -16,7 +16,7 @@ use std::process::{Child, Command as ProcessCommand, ExitStatus};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Command, DevCommand, debug, report};
+use super::{Command, DevCommand, debug, managed_home, manifest, report};
 
 const HELPER_NAME: &str = "firecrab-micromanager-macos";
 const HELPER_ENV: &str = "FIRECRAB_MICROMANAGER_HELPER";
@@ -49,6 +49,10 @@ pub enum Error {
     Forward(#[from] forward::Error),
     #[error(transparent)]
     Dev(#[from] dev::Error),
+    #[error(transparent)]
+    Manifest(#[from] manifest::Error),
+    #[error(transparent)]
+    ManagedHome(#[from] managed_home::Error),
     #[error("could not launch EFI provisioning helper {path}: {source}")]
     ProvisionHelper {
         path: PathBuf,
@@ -167,15 +171,22 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
         lifecycle::check_install(&cli_source, &helper_source, &layout, reinstall)?;
     }
     // Before anything changes, so declining the download leaves the host as it was.
-    let artifacts = provision::download_all(&layout.managed_home, assume_yes)?;
-    daemon::stop(&layout)?;
+    let manifest = manifest::Manifest::bundled()?;
+    let artifacts = provision::download_all(&layout.managed_home, &manifest, assume_yes)?;
+    if reinstall {
+        daemon::uninstall(&layout)?;
+        managed_home::clear_installation_state(&layout.managed_home)?;
+    } else {
+        daemon::stop(&layout)?;
+    }
     if install_binaries {
         lifecycle::install_from(&cli_source, &helper_source, &layout, reinstall)?;
     } else {
         report!("[PASS] binaries: already installed");
     }
-    let prepared = provision::prepare(&layout.managed_home, &artifacts)?;
+    let prepared = provision::prepare(&layout.managed_home, &artifacts, &manifest, reinstall)?;
     let guest_result = ensure_guest_provisioned(&layout, &prepared)?;
+    manifest.verify_provisioned(&guest_result, "kernel", &manifest.macos.kernel_version)?;
     let daemon_paths = daemon::install(&layout, &layout.helper_path(), &prepared.ssh_private_key)?;
     let daemon_status = daemon::start(&layout)?;
     if !daemon_status.success() {
@@ -185,6 +196,21 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
         ))
         .into());
     }
+    let boot_marker_path = layout.managed_home.join("runtime/manager-ready");
+    let boot_marker =
+        fs::read_to_string(&boot_marker_path).map_err(|source| lifecycle::Error::Io {
+            action: "read guest boot kernel",
+            path: boot_marker_path,
+            source,
+        })?;
+    if !manifest::marker_value_matches(&boot_marker, "kernel", &manifest.macos.kernel_version) {
+        return Err(provision::Error::GuestProvision(format!(
+            "management VM did not boot TOML kernel {}",
+            manifest.macos.kernel_version
+        ))
+        .into());
+    }
+    manifest.save(&layout.managed_home)?;
     report!(
         "microManager {}\n  CLI: {}\n  helper: {}\n  managed data: {}\n  Debian {}: {}\n  Firecracker {}: {}\n  Firecrab {} host: {}\n  guest installer: {}\n  OS disk: {}\n  data disk: {}\n  cloud-init seed: {}\n  EFI variable store: {}\n  provision marker: {}\n  SSH key: {}\n  launchd: {}\n  API: http://127.0.0.1:5523/\n  guest: {}",
         if reinstall {
@@ -195,11 +221,11 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
         layout.cli_path().display(),
         layout.helper_path().display(),
         layout.managed_home.display(),
-        provision::DEBIAN_BUILD,
+        manifest.macos.image_build,
         artifacts.debian_archive.display(),
-        provision::FIRECRACKER_VERSION,
+        manifest.firecracker.version,
         artifacts.firecracker_archive.display(),
-        provision::FIRECRAB_VERSION,
+        manifest.firecrab.version,
         artifacts.firecrab_host_archive.display(),
         artifacts.firecrab_installer.display(),
         prepared.os_disk.display(),
@@ -210,6 +236,10 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
         prepared.ssh_private_key.display(),
         daemon_paths.plist.display(),
         guest_result.lines().collect::<Vec<_>>().join(", ")
+    );
+    report!(
+        "  manifest: {}",
+        layout.managed_home.join(manifest::FILE_NAME).display()
     );
     Ok(0)
 }
