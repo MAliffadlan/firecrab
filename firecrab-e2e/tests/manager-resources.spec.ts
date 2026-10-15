@@ -8,13 +8,15 @@ for (const os of ["macos", "windows"] as const) {
     const initial = { cpu: 2, memoryMib: 4096, diskGib: os === "macos" ? 16 : 1024, networkMode: "nat", networkInterface: null };
     let settings = { ...initial };
     let current = { ...initial };
-    let operation: null | { id: string; state: string; error: string | null } = null;
+    let operation: null | { id: string; state: string; error: string | null } = { id: "previous-apply", state: "failed", error: "Previous apply failed" };
+    let resourcePolls = 0;
+    let applyCount = 0;
     await page.route(/http:\/\/[^/]+\/api\//, async route => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/api/service/resources/apply") {
         expect(request.headers()["x-firecrab-controller-id"]).toBe("test-host");
-        operation = { id: "test-apply", state: "applying", error: null };
+        operation = { id: `test-apply-${++applyCount}`, state: "applying", error: null };
         if (os === "macos") await route.abort("connectionreset");
         else await route.fulfill({ status: 202, json: operation });
         return;
@@ -23,8 +25,8 @@ for (const os of ["macos", "windows"] as const) {
         if (request.method() === "PUT") {
           expect(request.headers()["x-firecrab-controller-id"]).toBe("test-host");
           settings = request.postDataJSON();
-        }
-        await route.fulfill({ json: { controllerId, os, settings, current, pending: JSON.stringify(settings) !== JSON.stringify(current), sharedWsl: os === "windows", host: { cpu: 8, memoryMib: 16384, diskAvailableGib: 200, networkInterfaces: ["en0", "en1"], networkModes: ["nat", "bridged", "mirrored"] }, operation } });
+        } else resourcePolls += 1;
+        await route.fulfill({ json: { controllerId, os, settings, current, pending: JSON.stringify(settings) !== JSON.stringify(current) || operation?.state === "failed", sharedWsl: os === "windows", host: { cpu: 8, memoryMib: 16384, diskAvailableGib: 200 + resourcePolls, networkInterfaces: ["en0", "en1"], networkModes: ["nat", "bridged", "mirrored"] }, operation } });
         return;
       }
       if (url.pathname === "/api/host") {
@@ -39,7 +41,7 @@ for (const os of ["macos", "windows"] as const) {
     });
     await page.goto("/#/host");
     await expect(page.getByLabel("CPU (vCPU)")).toHaveValue("2");
-    await expect(page.getByRole("button", { name: "Apply and restart" })).toBeDisabled();
+    await expect(page.getByText("Previous apply failed", { exact: true })).toHaveCount(0);
     await page.getByLabel("CPU (vCPU)").fill("4");
     await page.getByLabel("RAM (MiB)").fill("8192");
     await page.getByLabel("Network", { exact: true }).selectOption(os === "macos" ? "bridged" : "mirrored");
@@ -51,8 +53,18 @@ for (const os of ["macos", "windows"] as const) {
     expect(settings.memoryMib).toBe(8192);
     await page.getByRole("button", { name: "Apply and restart" }).click();
     await expect(page.getByRole("button", { name: "Applying…" })).toBeDisabled();
+    operation = { id: "test-apply-1", state: "failed", error: "Current apply failed" };
+    await expect(page.getByText("Current apply failed", { exact: true })).toBeVisible();
+    await page.getByLabel("CPU (vCPU)").fill("6");
+    await page.getByRole("button", { name: "Save settings" }).click();
+    await expect(page.getByText("Saved. Apply to restart with these resources.")).toBeVisible();
+    const nextPoll = resourcePolls + 1;
+    await expect(page.getByText(new RegExp(`${200 + nextPoll} GiB disk available`))).toBeVisible();
+    await expect(page.getByText("Current apply failed", { exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Apply and restart" }).click();
+    await expect(page.getByRole("button", { name: "Applying…" })).toBeDisabled();
     current = { ...settings };
-    operation = { id: "test-apply", state: "complete", error: null };
+    operation = { id: "test-apply-2", state: "complete", error: null };
     await expect(page.getByText("Resources applied. The management VM is ready.")).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`firecrab-resources-${os}-desktop.png`), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });

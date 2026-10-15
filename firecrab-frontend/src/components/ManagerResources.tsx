@@ -44,7 +44,6 @@ export default function ManagerResources({ controllerId }: { controllerId?: stri
           setApplying(true);
           operationId.current = next.operation.id;
         }
-        if (next.operation?.state === "failed") setError(next.operation.error ?? t("Apply failed", "적용 실패"));
         if (operationId.current && next.operation?.id === operationId.current && next.operation.state !== "applying") {
           setApplying(false);
           operationId.current = null;

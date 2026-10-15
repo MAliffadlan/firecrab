@@ -128,6 +128,46 @@ pub(crate) fn platform() -> Platform {
 }
 
 #[test]
+fn saved_resources_remain_usable_when_defaults_are_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let platform = Platform {
+        defaults: |_, _| Err(Error::Invalid("defaults unavailable".into())),
+        ..platform()
+    };
+    write(&dir.path().join("resources.json"), &settings()).unwrap();
+    write(
+        &dir.path().join("runtime/resources-active.json"),
+        &settings(),
+    )
+    .unwrap();
+    assert_eq!(platform.status(dir.path()).unwrap().settings, settings());
+    let next = ManagerResources {
+        cpu: 6,
+        ..settings()
+    };
+    platform.save(dir.path(), &next).unwrap();
+    run_apply_in(dir.path(), "saved", platform).unwrap();
+    let status = platform.status(dir.path()).unwrap();
+    assert_eq!(status.current, Some(next));
+    assert!(!status.pending);
+}
+
+#[test]
+fn missing_settings_or_disk_floor_still_require_readable_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let platform = Platform {
+        defaults: |_, _| Err(Error::Invalid("defaults unavailable".into())),
+        ..platform()
+    };
+    assert!(platform.status(dir.path()).is_err());
+    write(&dir.path().join("resources.json"), &settings()).unwrap();
+    assert!(platform.status(dir.path()).is_ok());
+    assert!(platform.save(dir.path(), &settings()).is_err());
+    assert!(platform.apply_saved(dir.path()).is_err());
+    assert!(!dir.path().join("applied.json").exists());
+}
+
+#[test]
 fn saved_and_current_allocations_determine_pending_state() {
     let dir = tempfile::tempdir().unwrap();
     let platform = platform();

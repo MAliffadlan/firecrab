@@ -59,6 +59,9 @@ const HOST: &str =
 const ORIGINAL: &str = "# retain\r\n[wsl2]\r\nprocessors=2\r\nmemory=4GB\r\nswap=0\r\n[experimental]\r\nautoMemoryReclaim=gradual\r\n";
 
 fn reply(line: &str) -> wsl::fake::Reply {
+    if line.starts_with("schtasks.exe ") {
+        return Err("recovery startup failed".into());
+    }
     if line.contains("OSVersion.Version.Build") {
         return Ok("26200".into());
     }
@@ -204,9 +207,13 @@ fn failed_disk_growth_restores_the_exact_original_configuration() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join(".wslconfig");
     fs::write(&config, ORIGINAL).unwrap();
-    let _calls = wsl::fake::answer(|line| {
+    let path = config.clone();
+    let calls = wsl::fake::answer(move |line| {
         if line.contains("--resize") {
             return Err("disk resize failed".into());
+        }
+        if line.starts_with("schtasks.exe ") {
+            assert_eq!(fs::read_to_string(&path).unwrap(), ORIGINAL);
         }
         reply(line)
     })
@@ -216,7 +223,14 @@ fn failed_disk_growth_restores_the_exact_original_configuration() {
         ..settings()
     };
     let error = configure_wsl(dir.path(), &grow).unwrap_err();
-    assert!(error.to_string().contains("configuration restored"));
+    assert!(error.to_string().contains("disk resize failed"));
+    assert!(!error.to_string().contains("recovery startup failed"));
+    assert!(
+        calls
+            .calls()
+            .iter()
+            .any(|line| line.starts_with("schtasks.exe /Query"))
+    );
     assert_eq!(fs::read_to_string(&config).unwrap(), ORIGINAL);
     assert_eq!(
         fs::read_to_string(dir.path().join("runtime/wslconfig.before-resources")).unwrap(),
@@ -263,7 +277,7 @@ fn shutdown_failures_leave_the_original_configuration_untouched() {
     let config = dir.path().join(".wslconfig");
     fs::write(&config, ORIGINAL).unwrap();
     for failed_command in ["--terminate", "--shutdown"] {
-        let _calls = wsl::fake::answer(move |line| {
+        let calls = wsl::fake::answer(move |line| {
             if line.contains(failed_command) {
                 return Err("could not stop WSL".into());
             }
@@ -278,9 +292,121 @@ fn shutdown_failures_leave_the_original_configuration_untouched() {
         );
         assert_eq!(fs::read_to_string(&config).unwrap(), ORIGINAL);
         assert!(
+            calls
+                .calls()
+                .iter()
+                .any(|line| line.starts_with("schtasks.exe /Query"))
+        );
+        assert!(
             !dir.path()
                 .join("runtime/wslconfig.before-resources")
                 .exists()
         );
     }
+}
+
+#[test]
+fn first_growth_uses_the_actual_filesystem_instead_of_the_default_vhd_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join(".wslconfig");
+    fs::write(&config, "[wsl2]\ndefaultVhdSize=1024GB\n").unwrap();
+    let calls = wsl::fake::answer(|line| {
+        if line.contains("df -BG") {
+            return Ok("256G\n".into());
+        }
+        reply(line)
+    })
+    .with_config(&config);
+    configure_wsl(
+        dir.path(),
+        &ManagerResources {
+            disk_gib: 512,
+            network_mode: ManagerNetworkMode::Nat,
+            ..settings()
+        },
+    )
+    .unwrap();
+    assert!(
+        calls
+            .calls()
+            .iter()
+            .any(|line| line == "wsl.exe --manage firecrab-debian --resize 512GB")
+    );
+    assert!(
+        !calls
+            .calls()
+            .iter()
+            .any(|line| line.starts_with("powershell.exe "))
+    );
+}
+
+#[test]
+fn backup_and_config_write_failures_restart_without_masking_the_io_error() {
+    for fail_backup in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".wslconfig");
+        fs::write(&config, ORIGINAL).unwrap();
+        if fail_backup {
+            fs::write(dir.path().join("runtime"), b"blocked").unwrap();
+        }
+        let path = config.clone();
+        let calls = wsl::fake::answer(move |line| {
+            if line == "wsl.exe --shutdown" && !fail_backup {
+                fs::remove_file(&path).unwrap();
+                fs::create_dir(&path).unwrap();
+            }
+            reply(line)
+        })
+        .with_config(&config);
+        assert!(matches!(
+            configure_wsl(dir.path(), &settings()),
+            Err(Error::Io(_))
+        ));
+        assert!(
+            calls
+                .calls()
+                .iter()
+                .any(|line| line.starts_with("schtasks.exe /Query"))
+        );
+        if fail_backup {
+            assert_eq!(fs::read_to_string(&config).unwrap(), ORIGINAL);
+        }
+    }
+}
+
+#[test]
+fn rollback_and_startup_failures_preserve_the_original_resize_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join(".wslconfig");
+    fs::write(&config, ORIGINAL).unwrap();
+    let path = config.clone();
+    let calls = wsl::fake::answer(move |line| {
+        if line.contains("--resize") {
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+            return Err("original resize failure".into());
+        }
+        reply(line)
+    })
+    .with_config(&config);
+    let error = configure_wsl(
+        dir.path(),
+        &ManagerResources {
+            disk_gib: 1536,
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("original resize failure"));
+    assert!(!error.to_string().contains("recovery startup failed"));
+    assert!(
+        calls
+            .calls()
+            .iter()
+            .any(|line| line.starts_with("schtasks.exe /Query"))
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("runtime/wslconfig.before-resources")).unwrap(),
+        ORIGINAL
+    );
 }

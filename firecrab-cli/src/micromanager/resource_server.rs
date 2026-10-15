@@ -240,9 +240,12 @@ pub fn run(home: Option<PathBuf>) -> Result<i32, Error> {
     fs2::FileExt::try_lock_exclusive(&server_lock).map_err(|_| Error::Busy)?;
     #[cfg(target_os = "windows")]
     let holder = {
-        let host = resource::host_capacity(&home)?;
-        let current = super::windows::resource::defaults(&home, &host)?;
-        resource::write(&home.join("runtime/resources-active.json"), &current)?;
+        match resource::host_capacity(&home)
+            .and_then(|host| super::windows::resource::defaults(&home, &host))
+        {
+            Ok(current) => resource::write(&home.join("runtime/resources-active.json"), &current)?,
+            Err(error) => eprintln!("[WARNING] could not record active WSL resources: {error}"),
+        }
         start_windows_holder(home.clone())
     };
     let runtime = tokio::runtime::Builder::new_current_thread()

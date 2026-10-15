@@ -219,7 +219,10 @@ pub fn lock(home: &Path) -> Result<File, Error> {
 impl Platform {
     pub fn status(&self, home: &Path) -> Result<ManagerResourceStatus, Error> {
         let host = (self.capacity)(home)?;
-        let settings = read(&home.join("resources.json"))?.unwrap_or((self.defaults)(home, &host)?);
+        let settings = match read(&home.join("resources.json"))? {
+            Some(settings) => settings,
+            None => (self.defaults)(home, &host)?,
+        };
         let current = read(&home.join("runtime/resources-active.json"))?;
         let operation_path = home.join("runtime/resource-operation.json");
         let mut operation: Option<ManagerResourceOperation> = read(&operation_path)?;
@@ -320,11 +323,10 @@ impl Platform {
         {
             return Err(Error::Busy);
         }
-        let minimum_disk = status
-            .current
-            .as_ref()
-            .map(|current| current.disk_gib)
-            .unwrap_or((self.defaults)(home, &status.host)?.disk_gib);
+        let minimum_disk = match status.current.as_ref() {
+            Some(current) => current.disk_gib,
+            None => (self.defaults)(home, &status.host)?.disk_gib,
+        };
         validate(settings, &status.host, status.os, minimum_disk)?;
         (self.validate)(home, settings)?;
         write(&home.join("resources.json"), settings)
@@ -332,11 +334,10 @@ impl Platform {
 
     fn apply_saved(&self, home: &Path) -> Result<(), Error> {
         let status = self.status(home)?;
-        let minimum_disk = status
-            .current
-            .as_ref()
-            .map(|current| current.disk_gib)
-            .unwrap_or((self.defaults)(home, &status.host)?.disk_gib);
+        let minimum_disk = match status.current.as_ref() {
+            Some(current) => current.disk_gib,
+            None => (self.defaults)(home, &status.host)?.disk_gib,
+        };
         validate(&status.settings, &status.host, status.os, minimum_disk)?;
         (self.apply)(home, &status.settings)?;
         write(

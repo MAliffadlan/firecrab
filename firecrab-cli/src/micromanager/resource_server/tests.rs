@@ -194,23 +194,60 @@ async fn accepted_apply_is_persistent_and_blocks_duplicate_requests() {
     let app = router_for(dir.path().to_owned(), resource::tests::platform());
     let id = resource::controller_id(dir.path()).unwrap();
     let path = "/api/service/resources/apply";
-    let (status, _, operation) =
-        response(app.clone(), request("POST", path, Some(&id), "{}")).await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(operation["state"], "applying");
-    assert!(uuid::Uuid::parse_str(operation["id"].as_str().unwrap()).is_ok());
+    #[cfg(unix)]
+    let mut command = Command::new("/bin/sh");
+    #[cfg(unix)]
+    command.args(["-c", "exit 0"]);
+    #[cfg(windows)]
+    let mut command = Command::new("cmd.exe");
+    #[cfg(windows)]
+    command.args(["/C", "exit /B 0"]);
+    let operation = spawn_worker(dir.path(), resource::tests::platform(), command).unwrap();
+    assert_eq!(operation.state, "applying");
+    assert!(uuid::Uuid::parse_str(&operation.id).is_ok());
     assert!(dir.path().join("runtime/resource-apply.log").exists());
     let stored: ManagerResourceOperation =
         resource::read(&dir.path().join("runtime/resource-operation.json"))
             .unwrap()
             .unwrap();
-    assert_eq!(stored.id, operation["id"]);
+    assert_eq!(stored.id, operation.id);
     assert_eq!(
         response(app, request("POST", path, Some(&id), "{}"))
             .await
             .0,
         StatusCode::CONFLICT
     );
+}
+
+#[tokio::test]
+async fn status_exposes_unsupported_wsl_networking_without_replacing_saved_resources() {
+    let dir = tempfile::tempdir().unwrap();
+    let platform = resource::Platform {
+        os: firecrab_api_types::HostOs::Windows,
+        defaults: |_, _| {
+            Err(Error::Invalid(
+                "WSL network mode virtioproxy is not supported by resource management".into(),
+            ))
+        },
+        ..resource::tests::platform()
+    };
+    let app = router_for(dir.path().to_owned(), platform);
+    let (status, _, body) = response(
+        app.clone(),
+        request("GET", "/api/service/resources", None, ""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("virtioproxy"));
+    let saved = resource::tests::platform()
+        .status(dir.path())
+        .unwrap()
+        .settings;
+    resource::write(&dir.path().join("resources.json"), &saved).unwrap();
+    let (status, _, body) = response(app, request("GET", "/api/service/resources", None, "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["settings"]["cpu"], saved.cpu);
+    assert!(body["sharedWsl"].as_bool().unwrap());
 }
 
 #[test]

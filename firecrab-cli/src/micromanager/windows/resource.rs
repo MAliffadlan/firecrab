@@ -208,39 +208,39 @@ fn configure_wsl(home: &Path, settings: &ManagerResources) -> Result<(), Error> 
         ));
     }
     let old = read_config()?;
-    let known_disk =
-        resource::read::<ManagerResources>(&home.join("runtime/resources-active.json"))?
-            .map(|current| current.disk_gib)
-            .unwrap_or(defaults(home, &host_capacity(home)?)?.disk_gib);
     let config_path = wsl_config_path()?;
     let updated = merge_config(&old, settings);
-    // Keep the native resource controller alive. Terminating its scheduled
-    // task would also kill the apply worker before it can restart WSL.
-    wsl::root_shell("helper=firecrab-helper; if [ \"$(systemctl show --property=LoadState --value firecrab-helper.service)\" = not-found ]; then helper=firecrab-net-helper; fi; systemctl stop firecrab-api \"$helper\"")
-        .map_err(|error| Error::Invalid(error.to_string()))?;
-    wsl::run(&["--terminate", wsl::DISTRO_NAME])
-        .map_err(|error| Error::Invalid(error.to_string()))?;
-    wsl::run(&["--shutdown"]).map_err(|error| Error::Invalid(error.to_string()))?;
-    resource::write_bytes(
-        &home.join("runtime/wslconfig.before-resources"),
-        old.as_bytes(),
-    )?;
-    resource::write_bytes(&config_path, updated.as_bytes())?;
-    let resized = if settings.disk_gib > known_disk {
-        wsl::run(&[
-            "--manage",
-            wsl::DISTRO_NAME,
-            "--resize",
-            &format!("{}GB", settings.disk_gib),
-        ])
-    } else {
-        Ok(String::new())
-    };
-    if let Err(error) = resized {
-        resource::write_bytes(&config_path, old.as_bytes())?;
-        return Err(Error::Invalid(format!(
-            "WSL disk resize failed; WSL configuration restored: {error}"
-        )));
+    let configured = (|| {
+        // Keep the native resource controller alive. Terminating its scheduled
+        // task would also kill the apply worker before it can restart WSL.
+        wsl::root_shell("helper=firecrab-helper; if [ \"$(systemctl show --property=LoadState --value firecrab-helper.service)\" = not-found ]; then helper=firecrab-net-helper; fi; systemctl stop firecrab-api \"$helper\"")
+            .map_err(|error| Error::Invalid(error.to_string()))?;
+        wsl::run(&["--terminate", wsl::DISTRO_NAME])
+            .map_err(|error| Error::Invalid(error.to_string()))?;
+        wsl::run(&["--shutdown"]).map_err(|error| Error::Invalid(error.to_string()))?;
+        resource::write_bytes(
+            &home.join("runtime/wslconfig.before-resources"),
+            old.as_bytes(),
+        )?;
+        resource::write_bytes(&config_path, updated.as_bytes())?;
+        if settings.disk_gib > actual_gib
+            && let Err(error) = wsl::run(&[
+                "--manage",
+                wsl::DISTRO_NAME,
+                "--resize",
+                &format!("{}GB", settings.disk_gib),
+            ])
+        {
+            if let Err(restore) = resource::write_bytes(&config_path, old.as_bytes()) {
+                eprintln!("[WARNING] could not restore WSL configuration: {restore}");
+            }
+            return Err(Error::Invalid(format!("WSL disk resize failed: {error}")));
+        }
+        Ok(())
+    })();
+    if let Err(error) = configured {
+        let _ = daemon::start();
+        return Err(error);
     }
     Ok(())
 }
@@ -250,7 +250,10 @@ pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
     let layout = super::lifecycle::Layout {
         managed_home: home.to_owned(),
     };
-    daemon::install(&layout).map_err(|error| Error::Invalid(error.to_string()))?;
+    if let Err(error) = daemon::install(&layout) {
+        let _ = daemon::start();
+        return Err(Error::Invalid(error.to_string()));
+    }
     let status = daemon::start().map_err(|error| Error::Invalid(error.to_string()))?;
     if !status.success() {
         return Err(Error::Invalid(

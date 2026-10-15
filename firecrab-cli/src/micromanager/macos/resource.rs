@@ -47,6 +47,10 @@ pub fn validate_configuration(home: &Path, settings: &ManagerResources) -> Resul
 }
 
 pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
+    let bytes = settings
+        .disk_gib
+        .checked_mul(1 << 30)
+        .ok_or_else(|| Error::Invalid("data disk size overflows the byte limit".into()))?;
     validate_configuration(home, settings)?;
     let mut layout =
         Layout::from_process_env().map_err(|error| Error::Invalid(error.to_string()))?;
@@ -58,16 +62,15 @@ pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
             "the data disk must be an unaliased regular file".into(),
         ));
     }
-    let bytes = settings.disk_gib * (1 << 30);
     if bytes < fs::metadata(&disk)?.len() {
         return Err(Error::Invalid(
             "shrinking the data disk is not supported".into(),
         ));
     }
     daemon::stop(&layout).map_err(|error| Error::Invalid(error.to_string()))?;
-    // This is the same flock the Swift VM and OS repair use. Hold it while
-    // changing the disk, then release it before booting the VM.
-    {
+    let prepared = (|| {
+        // This is the same flock the Swift VM and OS repair use. Hold it while
+        // changing the disk, then release it before booting the VM.
         let vm_lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -84,9 +87,15 @@ pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
         }
         file.set_len(bytes)?;
         file.sync_all()?;
+        drop(vm_lock);
+        daemon::install(&layout, &helper(), &home.join("runtime/manager_ed25519"))
+            .map_err(|error| Error::Invalid(error.to_string()))?;
+        Ok(())
+    })();
+    if let Err(error) = prepared {
+        let _ = daemon::start(&layout);
+        return Err(error);
     }
-    daemon::install(&layout, &helper(), &home.join("runtime/manager_ed25519"))
-        .map_err(|error| Error::Invalid(error.to_string()))?;
     let status = daemon::start(&layout).map_err(|error| Error::Invalid(error.to_string()))?;
     if !status.success() {
         return Err(Error::Invalid(
@@ -119,4 +128,24 @@ pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
         )));
     }
     resource::write(&home.join("runtime/resources-active.json"), settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overflowing_disk_size_is_rejected_before_native_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = ManagerResources {
+            cpu: 2,
+            memory_mib: 4096,
+            disk_gib: (u64::MAX >> 30) + 1,
+            network_mode: firecrab_api_types::ManagerNetworkMode::Nat,
+            network_interface: None,
+        };
+        assert!(
+            matches!(apply(dir.path(), &settings), Err(Error::Invalid(message)) if message.contains("overflows"))
+        );
+    }
 }
