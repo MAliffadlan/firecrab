@@ -67,11 +67,9 @@ The API and helper must use the same socket path.
 
 ## Backup
 
-Stop the API before a consistent offline backup.
-Back up the data directory and image directory.
-
-The data directory contains SQLite state and VM disk files.
-The image directory contains source templates.
+Stop workload VMs, then the API, before an offline backup.
+Back up SQLite, every storage root, images, and configuration together.
+See [Storage backup](storage.md#backup-and-retention).
 
 ## Upgrade
 
@@ -82,12 +80,14 @@ firecrab update --check
 sudo firecrab update --apply
 ```
 
-`--check` is read-only and needs no privilege; it is also what runs with no flag at all.
+`--check` is read-only and needs no privilege.
+It is also the default when no flag is given.
 `--apply` needs root or the `firecrab` service account, because the binary swap goes through the network helper's socket.
 The dashboard's bottom-left indicator runs the same two steps.
 
 The apply replaces binaries and the dashboard, then restarts both services.
-The helper writes only into the install layout it derives from its own units, and rejects any other; a host installed with a non-default `PREFIX` needs `install.sh` re-run once so both units carry it.
+The helper accepts only the install layout derived from its service units.
+For a non-default `PREFIX`, rerun `install.sh` once so both units record it.
 It does **not** update the systemd unit files.
 A release whose notes say a unit changed needs `install.sh` re-run once.
 
@@ -104,33 +104,17 @@ Check both services and run the doctor after an upgrade.
 
 `./install.sh --uninstall` and `firecrab service uninstall` do the same on a Linux host, in this order:
 
-1. Stop every running MicroVM (`firecrab-vm-*` unit). A VM's unit outlives the API on purpose, so nothing else would stop it.
-2. Stop and remove the services, then run the helper's teardown: bridges, TAP devices, nftables tables, iptables forward and NAT rules, and UFW rules that firecrab created.
-3. Remove the binaries, the kernel extract scripts, the dashboard, and the license files; the library directory goes with them.
-4. Put back what the installer recorded in `/etc/firecrab/host-baseline.env`: the `/dev/kvm` ACL it added, and IPv4/IPv6 forwarding on a host that had it off. Forwarding stays on, with a note, while another bridge or container network exists.
+1. Stop every running MicroVM unit (`firecrab-vm-*`).
+2. Stop/remove services and tear down Firecrab-owned bridges, TAPs, firewall, and NAT state.
+3. Remove binaries, kernel extraction scripts, dashboard, licenses, and the library directory.
+4. Restore recorded KVM ACL and forwarding changes from `/etc/firecrab/host-baseline.env`.
 
-Left alone on purpose: Firecracker, the `firecrab` account and group (and its `kvm` membership), and, without `--purge`, `/etc/firecrab` and `/var/lib/firecrab`.
+Forwarding remains enabled while another bridge or container network needs it.
+
+Firecracker and the `firecrab` account/group remain, including `kvm` membership.
+Without `--purge`, configuration and data also remain.
 A host installed before the record existed has none to restore, so it keeps the ACL and forwarding as they are until a reboot.
-The checks are [UN1–UN7](TEST.md#uninstall).
-
-## CI boot check
-
-The scheduled workflow boots each supported image on KVM hosts.
-It creates a network, starts a VM, checks connectivity, and removes the VM.
-
-Run one image check locally after installation.
-
-```sh
-scripts/ci-m2-guest-boot.sh alpine-3.24.1
-```
-
-## Related
-
-- [Architecture](architecture.md)
-- [Installation](installation.md)
-- [firecrab CLI](firecrab-cli.md)
-- [Networking](networking.md)
-- [Troubleshooting](troubleshooting.md)
+The checks are [UN1–UN7](../development/testing.md#uninstall).
 
 ## Retry VM network recovery
 
@@ -152,6 +136,27 @@ nft state, TAP attachment, bridge state/MTU/gateway, forwarding, DHCP files and
 serving-process liveness. Traffic acceptance is tested separately by lifetime QA.
 
 Helper service names and upgrade compatibility are described in
-[Helper service migration](installation.md#helper-service-migration).
+[Helper service migration](#helper-service-migration).
 `firecrab status --json` retains `netHelperService` and adds `helperUnit` to
 identify the unit actually queried.
+
+## Helper service migration
+
+`firecrab-helper.service` is the canonical unit.
+Rerunning the installer replaces a real legacy `firecrab-net-helper.service` with an alias.
+Both names then control one process, and legacy-name drop-ins remain effective.
+Database, disks, and `api.env` are preserved.
+
+The legacy executable path remains usable.
+Bundles contain both executable names for old installers/update helpers; new installers accept old bundles too.
+`firecrab update` replaces binaries without rewriting units, so legacy services work until migrated.
+
+The socket, `FIRECRAB_NET_HELPER_*` variables, protocol, and `netHelperService` JSON stay compatible.
+CLI and managed-guest service checks accept either unit name.
+`helperUnit` identifies the unit queried.
+
+## Related
+
+- [Installation](../getting-started/installation.md)
+- [CLI](../reference/cli.md)
+- [Troubleshooting](troubleshooting.md)

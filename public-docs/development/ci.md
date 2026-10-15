@@ -1,15 +1,16 @@
 # CI and runtime E2E
 
-The [CI workflow](../.github/workflows/ci.yml) defines the automated checks.
+The [CI workflow](../../.github/workflows/ci.yml) defines the automated checks.
 It runs on pull requests, pushes to `main`, manual dispatch, and daily at 17:00 UTC.
-Use the [QA work list](qa.md) and the [English](TEST.md) / [Korean](TEST.ko.md) checklists to record runtime results.
+Use [QA](qa.md) for script coverage and reporting rules.
+Use the [English](testing.md) / [Korean](testing.ko.md) checklists for cases.
 Passing build or unit checks does not establish MicroVM boot, SSH, or host port forwarding.
 
 ## Contents
 
 - [Automated jobs](#automated-jobs)
 - [Local checks](#local-checks)
-- [Clippy warning gate](#clippy-warning-gate)
+- [Installer and platform checks](#installer-and-platform-checks)
 - [Windows runtime E2E](#windows-runtime-e2e)
 - [macOS runtime E2E](#macos-runtime-e2e)
 - [Results and evidence](#results-and-evidence)
@@ -40,7 +41,7 @@ The Linux installer job runs Playwright against the installed API using a local 
 There is no ARM64 KVM runtime job; native macOS/Windows browser runs remain manual.
 Browser, nginx, and guest failures are retained without suppressing the other eligible runtime steps.
 QA logs, JSON/JUnit results, and failure traces are uploaded as `linux-runtime-qa-<attempt>` for 14 days.
-The [release workflow](../.github/workflows/release.yml) separately tests and packages release artifacts.
+The [release workflow](../../.github/workflows/release.yml) separately tests and packages release artifacts.
 
 ## Local checks
 
@@ -54,6 +55,10 @@ python3 scripts/test-micromanager-dev.py
 python3 scripts/test-ci-qa-guest.py
 python3 scripts/check-doc-links.py
 python3 scripts/check-changelog.py
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --document-private-items
+python3 -m unittest scripts/test_check_changelog.py scripts/test_write_release_notes.py scripts/test_micromanager_pr_report.py
+cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+npm run test:runner --prefix firecrab-e2e
 npm ci --prefix firecrab-frontend
 npm run lint --prefix firecrab-frontend
 npm run build --prefix firecrab-frontend
@@ -61,18 +66,54 @@ npm run build --prefix firecrab-frontend
 
 For native Windows and macOS CLI changes, run `cargo clippy -p firecrab-cli --all-targets -- -D warnings` and `cargo test -p firecrab-cli --locked` on that OS.
 Linux API/helper checks still run on Linux; Windows source deployment builds them inside managed Debian.
-The link checker alone does not cover the docs job's rustdoc build or coverage floor.
+Clippy allows zero warnings; test-only code belongs behind `#[cfg(test)]`.
+Run `npm ci --prefix firecrab-e2e` before its runner checks.
+The docs job also enforces the rustdoc coverage floor.
 
-## Clippy warning gate
+## Installer and platform checks
 
-Clippy runs with `-D warnings`, so a single warning fails the build.
-There is no baseline file; the accepted number of warnings is zero.
-`dead_code` counts, and an item only tests use belongs behind `#[cfg(test)]`.
-
-Apply the machine-applicable suggestions, then review the diff:
+A10/A15 release and installer contracts:
 
 ```sh
-cargo clippy --fix --workspace --all-targets
+shellcheck install.sh scripts/firecrab-release.sh
+bash scripts/test-firecrab-release.sh
+bash scripts/test-install-cli.sh
+bash scripts/test-install-cli-release.sh
+bash scripts/test-smoke-release-exec.sh
+bash -n install.sh
+./install.sh --help
+./install.sh --check
+./install.sh --doctor
+```
+
+For A17, run `./install.sh --deps-only` in each supported distribution container.
+Required runtime tools include `ip`, `nft`, `dnsmasq`, `mkfs.ext4`, `firecracker`, and `sha256sum`.
+
+A11 macOS helper checks:
+
+```sh
+swift test --package-path micromanager-macos --scratch-path target/swift-micromanager-tests
+scripts/build-micromanager-macos.sh target/debug/firecrab-micromanager-macos
+```
+
+A12 Windows checks, in PowerShell:
+
+```powershell
+cargo clippy -p firecrab-cli --all-targets -- -D warnings
+cargo test -p firecrab-cli --locked
+cargo build -p firecrab-cli --locked
+pwsh -File scripts/test-install-cli.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-ci-qa-windows.ps1
+.\target\debug\firecrab.exe service doctor --json
+```
+
+The [release workflow](../../.github/workflows/release.yml) defines A13's seven native targets:
+
+```text
+x86_64-unknown-linux-gnu    x86_64-unknown-linux-musl
+aarch64-unknown-linux-gnu   aarch64-unknown-linux-musl
+aarch64-apple-darwin        x86_64-pc-windows-msvc
+aarch64-pc-windows-msvc
 ```
 
 ## Windows runtime E2E
@@ -125,18 +166,18 @@ The runner stages QA under `/root/firecrab-qa/<run-id>`, normalizes shell CRLF e
 Each run retains `run.log`, `summary.json`, and any browser results in `browser-results.tar.gz` on Windows.
 The summary reports `RUNNING` until completion and records unrun phases as `WARNING` after a failed prerequisite.
 Resource cleanup does not uninstall QA dependencies or undo manual lab configuration changes.
-The [Windows guide](micromanager-windows.md#known-limitation) explains why stock pinned-release runtime results differ from source results.
+The [Windows guide](../getting-started/windows.md#known-limitation) explains why stock pinned-release runtime results differ from source results.
 
 ## macOS runtime E2E
 
 Use a native M3-or-later Mac with nested virtualization and the signed helper.
 `scripts/ci-qa-macos-e2e.sh` provides `gate`, `shell`, `repair`, `browser`, `api`, `nginx`, `guest`, `lifetime`, and `all` phases.
 The gate requires isolated `FIRECRAB_INSTALL_DIR` and `FIRECRAB_MICROMANAGER_HOME` paths.
-For source services, deploy with `service dev` and use the browser command in the [E2E guide](../firecrab-e2e/README.md).
+For source services, deploy with `service dev` and use the browser command in the [E2E guide](../../firecrab-e2e/README.md).
 Chromium runs on macOS; the registry and workload IPv6 SSH use the Debian management VM through SSH.
 Missing required management SSH configuration is a failure.
 The script defaults `FIRECRAB_QA_WAIT_FACTOR` to 3 for nginx/SSH waits.
-The [repair phase](micromanager-repair-qa.md) checks G7/G7a on an idle installed
+The [repair phase](macos-repair.md) checks G7/G7a on an idle installed
 runtime, including missing registration, SSH/API failure advice, recovery, and
 file preservation. `all` runs it after the shell phase and refreshes management
 SSH settings afterward. Python guard/restoration tests run on hosted Linux CI;
@@ -144,22 +185,16 @@ native runtime evidence remains a separate Mac check.
 
 ## Results and evidence
 
-Record the checkout revision, dirty/source-build state, OS/architecture, virtualization layers, phase/options, exit code, and logs.
-Use `PASS`, `FAILED`, or `WARNING`; record every skip and its reason.
-The complete browser suite currently expects **16 passed, 1 existing explicit skip** when guest boot is enabled.
-The skipped failed-register case has no dashboard/API failure trigger; it remains outside browser coverage.
-Save Playwright traces/screenshots on failure and guest console output before deleting failed guests.
-Runtime runners require guest boot and the existing managed API; contradictory import-only configuration fails before browser execution.
-SSH QA fails early only when both package-failure and missing-sshd terminal markers are present; a still-running package installer remains subject to the wait budget.
-Verify QA resource removal and closed forwarded ports, then restore any manually changed DNS or management SSH settings.
-
-The [Windows source validation snapshot](qa.md#windows-source-validation-2026-10-03) records the measured lab results and remaining failures.
-Local checks and manual E2E results do not establish that a GitHub Actions run or a stock release passed.
+Follow the [QA reporting rules](qa.md#prepare-and-report).
+Full browser mode expects **16 passed, 1 existing explicit skip**; B5 has no real failure trigger.
+Runtime runners reject contradictory import-only configuration.
+Windows retains `run.log`, `summary.json`, and browser archives in the selected results directory.
+See [Validation history](validation-history.md) for dated platform evidence and its limits.
 
 ## Related
 
-- [Contributing](../CONTRIBUTING.md)
-- [Browser E2E](../firecrab-e2e/README.md)
+- [Contributing](../../CONTRIBUTING.md)
+- [Browser E2E](../../firecrab-e2e/README.md)
 - [QA work list](qa.md)
-- [Operations](operations.md)
-- [Troubleshooting](troubleshooting.md)
+- [Operations](../guides/operations.md)
+- [Troubleshooting](../guides/troubleshooting.md)

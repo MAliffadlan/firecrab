@@ -317,7 +317,7 @@ pub struct UpdateVmResourcesRequest {
 
 /// A named phase of `start_vm`'s pipeline, exposed only while `state ==
 /// Starting` so the dashboard can show *why* a VM hasn't reached `running`
-/// yet instead of a bare spinner (`public-docs/api.md`).
+/// yet instead of a bare spinner (`public-docs/reference/api.md`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum StartupStep {
@@ -329,7 +329,7 @@ pub enum StartupStep {
     StartingProcess,
     /// Waiting for the guest to confirm (over its serial console) that
     /// DHCP and DNS actually came up, since there's no guest agent to ask
-    /// directly (`public-docs/networking.md`).
+    /// directly (`public-docs/guides/networking.md`).
     ConfiguringNetwork,
 }
 
@@ -351,7 +351,7 @@ pub enum StartupStepOutcome {
 /// steps take — timing them client-side would round a 2-second disk copy up
 /// to the poll interval or miss it entirely. So the server records when each
 /// step opened and closed, and the client only formats it
-/// (`public-docs/api.md`).
+/// (`public-docs/reference/api.md`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupStepRun {
@@ -422,7 +422,7 @@ pub struct VmResponse {
     /// stop/start, freed only on delete).
     pub ipv4: Option<String>,
     /// Allocated IPv6 address, when this VM's MicroNetwork is dual-stack.
-    /// `null` for an IPv4-only network (`public-docs/networking.md`).
+    /// `null` for an IPv4-only network (`public-docs/guides/networking.md`).
     pub ipv6: Option<String>,
     /// Allocated MAC address, alongside `ipv4`.
     pub mac: Option<String>,
@@ -435,7 +435,7 @@ pub struct VmResponse {
     /// kept after the start finishes so the timeline stays readable.
     pub startup_timeline: Vec<StartupStepRun>,
     /// MicroNetwork this VM belongs to. Fixed at creation — its lease comes
-    /// out of that network's subnet (`public-docs/networking.md`).
+    /// out of that network's subnet (`public-docs/guides/networking.md`).
     pub micro_network_id: Uuid,
     /// Storage root id this VM's disk lives under (`{root}/vms/{id}/`).
     /// Fixed at creation so a later config change cannot orphan the files.
@@ -464,7 +464,7 @@ pub struct VmResponse {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// SHA256 fingerprint of the guest SSH host key. `null` until first start
-    /// has generated the per-VM host key (`public-docs/oci.md`).
+    /// has generated the per-VM host key (`public-docs/guides/oci.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_host_fingerprint: Option<String>,
 }
@@ -535,7 +535,7 @@ pub struct VmUsageSample {
 }
 
 /// One selectable place a VM disk may be created — env root, default, or a
-/// MicroStorage (`public-docs/storage.md`). Clients
+/// MicroStorage (`public-docs/guides/storage.md`). Clients
 /// pick by `id` only; paths are never free-form on create.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -715,7 +715,7 @@ pub struct CreateMicroNetworkRequest {
     /// The network's IPv6 prefix, alongside — never instead of —
     /// `subnet_cidr`. Giving one turns IPv6 on for the network: a Unique
     /// Local `/64` egresses through NAT66, a global one is forwarded
-    /// untranslated (`public-docs/networking.md`). Omitted with
+    /// untranslated (`public-docs/guides/networking.md`). Omitted with
     /// `ipv6_address_mode` set, the API generates a per-host ULA `/64`.
     #[serde(default)]
     pub ipv6_cidr: Option<String>,
@@ -749,7 +749,7 @@ fn internet_enabled_default() -> bool {
 }
 
 /// A MicroNetwork — one of firecrab's own virtual networks
-/// (`public-docs/networking.md`). A named CIDR reservation backed by a real
+/// (`public-docs/guides/networking.md`). A named CIDR reservation backed by a real
 /// host bridge; routing-table separation and VM membership are follow-up work.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -765,7 +765,7 @@ pub struct MicroNetworkResponse {
     pub gateway: String,
     /// Whether its VMs may reach anything outside Firecrab. `false` is a
     /// closed network: no NAT, and nothing routed out of it
-    /// (`public-docs/networking.md`).
+    /// (`public-docs/guides/networking.md`).
     pub internet_enabled: bool,
     /// Stored host NIC for NAT, or `null` to use the host default route.
     pub uplink: Option<String>,
@@ -782,7 +782,7 @@ pub struct MicroNetworkResponse {
 }
 
 /// Response for `GET /api/network`: the host network firecrab has set up,
-/// read-only for now (see `public-docs/networking.md` — making
+/// read-only for now (see `public-docs/guides/networking.md` — making
 /// this genuinely editable needs a larger IPAM/bridge refactor).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -803,7 +803,7 @@ pub struct NetworkInfoResponse {
 /// Response for `GET /api/micro-networks/{id}`: one network broken out into
 /// the services it is actually made of, so the dashboard can show what a
 /// MicroNetwork gives a VM rather than just its name and CIDR
-/// (`public-docs/networking.md`).
+/// (`public-docs/guides/networking.md`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MicroNetworkDetailResponse {
@@ -1083,7 +1083,7 @@ pub struct UpdateStartResponse {
 
 /// One entry from `GET /api/images` — a template registry alias the create
 /// form can offer, with digests and a disk floor. Host paths are never
-/// exposed (`public-docs/images.md`).
+/// exposed (`public-docs/guides/images.md`).
 ///
 /// Uninstalled built-in templates still appear so the dashboard can offer
 /// **official package links** (`package_url`) and kick off
@@ -1381,7 +1381,7 @@ pub enum BootstrapStatus {
 /// that mean something to an operator, mirroring [`StartupStep`]'s four —
 /// with the fine-grained detail of the longest one left to the live
 /// console instead of more enum variants
-/// (`public-docs/images.md`).
+/// (`public-docs/guides/images.md`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum BootstrapStep {

@@ -163,4 +163,4 @@ cargo test -p firecrab-cli --test macos_service_recovery --locked
 
 The Rust command checks native CLI messages and JSON on macOS.
 The runtime phase needs the real installed management VM and runs separately.
-See [TEST](TEST.md), [macOS microManager](micromanager-macos.md), and [CI](ci.md).
+See [TEST](testing.md), [macOS microManager](../getting-started/macos.md), and [CI](ci.md).

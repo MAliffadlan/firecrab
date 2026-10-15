@@ -19,10 +19,10 @@ is available as a fallback with `--backend wrangler`, but its 315 MB upload
 limit makes `rclone` the normal choice for compressed rootfs packages.
 
 This path is the public catalog release.
-It does not register a host-local custom alias; see [Images](images.md).
+It does not register a host-local custom alias; see [Images](../guides/images.md).
 
 ## Related
 
-- [Images](images.md)
-- [API](api.md)
-- [Operations](operations.md)
+- [Images](../guides/images.md)
+- [API](../reference/api.md)
+- [Operations](../guides/operations.md)

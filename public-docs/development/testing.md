@@ -1,18 +1,12 @@
-# Firecrab test checklist (English)
+# Test checklist
 
-- Korean: [TEST.ko.md](TEST.ko.md)
-- Scope: every named case in the [QA work list](qa.md), the cross-platform CLI verification checklist, and every browser case in the [Playwright suite](../firecrab-e2e/README.md).
-- Record each applicable case as **PASS**, **FAILED**, or **WARNING**. Use **WARNING** for a skip or leftover; never count it as a pass.
-- For resources, follow **create → use or change → delete → confirm no leftovers**. Prefix test names with the QA prefix and use a dedicated subnet per run.
-- The shared API contract applies on Linux, macOS, and Windows.
-- Apply an update only during U1. Delete only images installed during this run. Save and restore any previous Docker Hub login.
-- API, CLI, and browser checks are separate runs. A browser guest-boot skip does not imply a successful guest boot.
+[Korean](testing.ko.md) · [QA scripts](qa.md)
 
-```text
-QA name prefix: qa-
-API base URL:   http://127.0.0.1:5523
-Update scope:   POST /api/update → U1 only
-```
+Record each applicable case as **PASS**, **FAILED**, or **WARNING**.
+A skip or leftover is WARNING.
+Use `qa-` names and a dedicated subnet; create, exercise, delete, and check leftovers.
+Apply updates only for U1; delete only images installed by this run and restore prior Docker Hub login.
+API, CLI, and browser checks are separate evidence.
 
 ## Contents
 
@@ -31,6 +25,8 @@ Update scope:   POST /api/update → U1 only
 - [Cleanup and CI coverage](#cleanup-and-ci-coverage)
 
 ## Automated checks and prerequisites
+
+Commands: [CI local checks](ci.md#local-checks) and [installer/platform checks](ci.md#installer-and-platform-checks).
 
 - [ ] **A1 — Rust formatting:** no formatting diff.
 - [ ] **A2 — Rust lint:** zero warnings across all targets.
@@ -52,81 +48,10 @@ Update scope:   POST /api/update → U1 only
 - [ ] **A18 — Development deployment contract:** run shared guest build/deploy/rollback regression checks; record live `service dev` validation separately.
 - [ ] **A19 — QA runner contracts:** verify guest failure/cleanup, native Windows phase aggregation, and browser mode/API guards without a VM.
 
-Run workspace gates on Linux from the repository root.
-The IDs show which checklist items each command covers:
-
-```sh
-# A1–A4
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --locked
-cargo test -p firecrab-cli --locked
-cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
-
-# A18 (Linux or macOS; uses stub build/service commands)
-python3 scripts/test-micromanager-dev.py
-python3 scripts/test-ci-qa-guest.py # A19
-
-# A5
-npm ci --prefix firecrab-frontend
-npm run lint --prefix firecrab-frontend
-npm run build --prefix firecrab-frontend
-
-# A9, A14
-python3 scripts/check-doc-links.py
-python3 scripts/check-changelog.py
-RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --document-private-items
-python3 -m unittest scripts/test_check_changelog.py scripts/test_write_release_notes.py scripts/test_micromanager_pr_report.py
-```
-
-Installer and platform commands:
-
-```sh
-# A10, A15
-shellcheck install.sh scripts/firecrab-release.sh
-bash scripts/test-firecrab-release.sh
-bash scripts/test-install-cli.sh
-bash scripts/test-install-cli-release.sh
-bash scripts/test-smoke-release-exec.sh
-bash -n install.sh
-./install.sh --help
-./install.sh --check
-./install.sh --doctor
-
-# A11 (macOS)
-swift test --package-path micromanager-macos --scratch-path target/swift-micromanager-tests
-
-# A17 (run inside each supported distribution container)
-./install.sh --check
-./install.sh --deps-only
-```
-
-Native Windows CLI checks (A12), from PowerShell:
-
-```powershell
-cargo clippy -p firecrab-cli --all-targets -- -D warnings
-cargo test -p firecrab-cli --locked
-cargo build -p firecrab-cli --locked
-pwsh -File scripts/test-install-cli.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-ci-qa-windows.ps1
-.\target\debug\firecrab.exe service doctor --json
-```
-
-On macOS, run the same CLI Clippy/test commands and the Swift/helper checks in the [CI guide](ci.md).
-API/helper workspace checks run on Linux; their source deployment builds inside the management guest.
-Hosted doctor checks accept exit 0 or 1 for valid JSON; runtime G2/G3 still requires `ready: true`.
-
-```text
-A13 release targets:
-x86_64-unknown-linux-gnu    x86_64-unknown-linux-musl
-aarch64-unknown-linux-gnu   aarch64-unknown-linux-musl
-aarch64-apple-darwin        x86_64-pc-windows-msvc
-aarch64-pc-windows-msvc
-
-A17 required tools: ip nft dnsmasq mkfs.ext4 firecracker sha256sum
-```
-
 ## Platform and host
+
+Use the [platform setup guides](../README.md#get-started), [repair QA](macos-repair.md), and [Windows shell tests](ci.md#windows-runtime-e2e).
+Runtime doctor must report `ready: true`; hosted build/unit jobs do not prove runtime success.
 
 - [ ] **G1 — Linux:** doctor, service install, start, and status succeed.
 - [ ] **G2 — macOS:** service doctor, install, and status succeed with nested virtualization.
@@ -142,85 +67,31 @@ A17 required tools: ip nft dnsmasq mkfs.ext4 firecracker sha256sum
 - [ ] **G6f — Windows:** command stdin preserves Unicode and lines; EOF terminates the command.
 - [ ] **G6g — Windows:** a missing command fails visibly; a subsequent shell succeeds.
 - [ ] **G6h — Windows:** shell exit leaves API/helper active and the host API responsive.
-- [ ] **G7 — macOS repair:** `service repair` restores the service and localhost API without downloads or replacing installed binaries, the data disk, SSH keys, or development overrides. It backs up the OS image, checks a detached copy, and installs only a repair that passes a second read-only check. It also recovers a missing/damaged daemon wrapper or launchd plist. Missing installation assets fail before the service stops; an invalid current-boot guest report or unreachable API fails with a nonzero exit code. Repair uses the serial console for OS recovery and the guest's virtiofs boot report for final service checks.
+- [ ] **G7 — macOS repair:** restore registration and the API without replacing binaries, data, keys, or dev overrides.
+  Back up and check a detached OS copy before verified repair commit.
+  Missing prerequisites fail before stopping; invalid boot reports/API checks fail nonzero.
+  Follow [repair QA](macos-repair.md) for preservation checks.
 - [ ] **G7a — macOS recovery advice:** service runtime failures suggest `firecrab service repair` without running it. Lost registration in a completed installation suggests repair; a new host suggests install. Source/compiler failures keep their own errors, and `debug --json` stays valid JSON with advice inside its fields.
 - [ ] **G7b — macOS repair progress:** repair prints validation, shutdown/helper cleanup, OS backup/repair, registration, startup, and guest-boot/API-check stages before each operation. Pending VM/API and shutdown waits report elapsed time and current state every ten seconds. Local VM/API readiness times out after ten seconds; shutdown keeps its forty-second deadline. Health checks and failure exit codes stay unchanged.
 - [ ] **G7c — macOS OS filesystem repair:** a tiny unattached-inode fixture is corrected and passes a second read-only check. Clean checks keep the original OS inode. Failed checks and timeouts keep the original, backup, data disk, and SSH assets. Offline checks use a separate 120-second deadline.
 - [ ] **G7d — macOS helper cleanup:** stale helpers are matched by owner, executable, and managed home. Helpers for another home survive. A per-home lock prevents simultaneous management VMs and OS commit.
-- [ ] **G7e — missing Debian OS files:** restore missing packaged OS files in binary/library trees (including service definitions) from checksum-matched `lost+found` files or the authenticated read-only cache. Restore symlinks and missing package manifests only for matching package versions. Preserve existing files, `/etc` configuration, application data, original OS/data/SSH/reference assets, and reject failed verification before commit. A second repair restores zero files. Boot a repaired OS copy and require live SSH, dbus/network services, and guest API readiness within ten seconds.
+- [ ] **G7e — Missing Debian files:** restore only verified missing packaged files and matching-version links/manifests.
+  Preserve existing files, `/etc`, app data, and OS/data/SSH/reference assets.
+  Reject failed verification; a second repair restores zero files.
+  The repaired copy must boot with SSH, dbus, networking, and API ready within ten seconds.
 - [ ] **G7f — macOS SSH paths:** default `Application Support` paths remain one OpenSSH known-hosts path. Check the real `ssh -G` parser, wrapper tunnel/reconnect, shell, dev, and port-forward arguments. Repair verifies the current-boot guest report without an SSH command; missing, inactive, duplicate, or mismatched fields fail. Retain existing host pins and reject a changed host key.
-- [ ] **G8 — Windows repair:** `service repair` recreates a missing/damaged scheduled task and its XML, restarts the installed API/helper (including the legacy helper name), and requires live guest services plus the Windows localhost API. Preserve the WSL disk, provisioning marker, binaries, data, and development overrides; perform no downloads, provisioning, reimport, or global WSL shutdown. Missing disk/provisioning/registration prerequisites fail before stopping. Failed shutdown, registration, guest restart, readiness, or final health checks return nonzero. Readiness retains the five-minute start deadline.
+- [ ] **G8 — Windows repair:** recreate the task/XML and restart installed API/helper, including legacy helper names.
+  Preserve disk, binaries, provisioning, data, and dev overrides; no downloads, reimport, or global WSL shutdown.
+  Missing prerequisites fail before stopping; every failed stage returns nonzero.
+  Require live services and Windows API within the five-minute readiness deadline.
 - [ ] **H1 — Update status:** read-only status check succeeds.
 - [ ] **H2 — Host network:** an uplink is present; loopback and internal helper interfaces are absent from the picker.
 - [ ] **H3 — Firecrab info:** the API reports build/install info, the Firecracker version, and API/helper states. The Host panel shows and refreshes them; an API outage must not retain stale active states.
 - [ ] **U1 — Update apply (optional separate run):** apply update; host recovers and API returns 200.
 
-Hosted macOS and Windows runners do build, unit, and diagnostic checks.
-Runtime E2E needs a native M3-or-later Mac or a Windows host with WSL2, and doctor must report ready.
-The QA wait factor extends nginx/SSH guest waits on slow first boots; it does not extend package-install or Playwright deadlines.
-
-```sh
-# G1: Linux
-firecrab doctor
-firecrab service install
-firecrab service start
-firecrab service status
-
-# G2/G3: native macOS or Windows host
-firecrab service doctor
-firecrab service install
-firecrab service status
-
-# G6: native macOS or Windows host
-firecrab service shell -- id -un                                     # root
-firecrab service shell -- printf '[%s]\n' "it's here" 'a b' '$HOME'   # [it's here] [a b] [$HOME]
-firecrab service shell -- sh -c 'exit 7'; echo $?                    # 7
-firecrab service shell                                               # root login; `exit` leaves
-```
-
-Windows G6a–G6h: `cargo test -p firecrab-cli --test windows_service_shell -- --ignored --test-threads=1` on an installed WSL2 microManager host. The default-shell checks use redirected stdin; terminal keyboard/resize/Ctrl-C require a separate interactive pass.
-
-For G7, run these commands on an installed Mac when no MicroVM needs to stay running:
-
-```sh
-cargo build -p firecrab-cli --locked
-./target/debug/firecrab service stop
-./target/debug/firecrab service repair
-./target/debug/firecrab service status
-./target/debug/firecrab service shell -- systemctl is-active firecrab-api
-curl -fsS http://127.0.0.1:5523/api/host
-```
-
-For repeatable G7/G7a failure injection, preservation checks, restoration, and
-retained evidence, run `scripts/ci-qa-macos-e2e.sh repair`.
-See [repair QA](micromanager-repair-qa.md) for its prerequisites and checks.
-
-Require exit 0, live guest units, and HTTP 200. Record installed binary/SSH key
-checksums and disk file identities before and after; boot changes disk contents,
-but must not replace the disk files. With a stopped VM, move the plist and wrapper
-to backup names, repeat `repair`, and require both files to be recreated. Keep
-those backups until recovery succeeds. Unit fixtures cover missing installation
-assets and preservation without touching the user's launchd service.
-
-```text
-Runtime gate: doctor → ready: true
-Slow guest:   FIRECRAB_QA_WAIT_FACTOR
-H2 excludes:  lo, fct*, mnb*
-```
-
-Check the shared API before resource tests:
-
-```sh
-API=http://127.0.0.1:5523
-curl -i "$API/api/host"             # G4: 200
-curl -i "$API/"                    # G4: HTML 200
-curl -i "$API/api/no-such-route"    # G5: JSON 404 with requestId
-curl -i "$API/api/update"           # H1: read-only check
-curl -i "$API/api/network"          # H2: uplink list
-curl -i "$API/api/info"             # H3: version and install paths
-```
-
 ## MicroNetwork
+
+Requests: [Networking](../guides/networking.md) and [API field rules](../reference/api.md#micronetwork).
 
 - [ ] **N1 — IPv4 create/delete:** creation returns 201; deletion returns 204; detail then returns 404.
 - [ ] **N2 — List/detail:** both views contain the created network.
@@ -229,66 +100,28 @@ curl -i "$API/api/info"             # H3: version and install paths
 - [ ] **N5 — Invalid uplink:** an empty uplink is rejected with 400 and leaves no row.
 - [ ] **N6 — Busy delete:** deleting a network attached to a VM returns 409; delete the VM, then the network.
 
-Example N1–N3 lifecycle on an unused test subnet (change the CIDR if it overlaps an existing network):
-
-```sh
-API=http://127.0.0.1:5523
-NET_ID=$(curl -fsS -X POST "$API/api/micro-networks" \
-  -H "Origin: $API" -H 'content-type: application/json' \
-  -d '{"name":"qa-doc-net","subnetCidr":"172.31.230.0/24","internetEnabled":true}' \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-curl -fsS "$API/api/micro-networks/$NET_ID"
-curl -fsS -X PATCH "$API/api/micro-networks/$NET_ID" \
-  -H "Origin: $API" -H 'content-type: application/json' \
-  -d '{"internetEnabled":false}'
-curl -fsS -X PATCH "$API/api/micro-networks/$NET_ID" \
-  -H "Origin: $API" -H 'content-type: application/json' \
-  -d '{"internetEnabled":true}'
-curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE "$API/api/micro-networks/$NET_ID"
-```
-
-Other network requests and expected responses:
-
-```http
-N4  POST /api/micro-networks
-    {"name":"qa-ipv6","subnetCidr":"172.31.231.0/24","internetEnabled":true,"ipv6AddressMode":"slaac"}
-    → 201; IPv6 ULA /64
-N5  POST /api/micro-networks with "uplink":"" → 400; no row
-N6  DELETE /api/micro-networks/{id} with attached VM → 409
-```
-
 ## MicroStorage
+
+Requests and placement limits: [Storage](../guides/storage.md).
 
 - [ ] **S1 — Roots:** root list includes the default pool.
 - [ ] **S2 — Devices:** host device list loads.
 - [ ] **S3 — Pool lifecycle:** register an absolute host path (201), delete it (204), and confirm detail returns 404. On macOS/Windows, use a path inside the Debian management guest.
 
-```http
-S1  GET    /api/storage                         → contains "default"
-S2  GET    /api/storage/devices
-S3  POST   /api/micro-storages                  → 201
-    DELETE /api/micro-storages/{id}             → 204
-    GET    /api/micro-storages/{id}             → 404
-```
-
 ## Shells
+
+Routes: [API](../reference/api.md#other-endpoints); guest behavior: [shell revisions](../reference/guest-runtime.md#shell-revisions).
 
 - [ ] **L1 — Create/delete:** create a named POSIX shell (201), then delete it (204).
 - [ ] **L2 — Revision:** add a new shell revision.
 - [ ] **L3 — Read:** fetch the shell and its revision body.
 - [ ] **L4 — Pin to VM:** assign a shell on VM creation or update; confirm its executable file inside the guest.
 
-```http
-L1  POST   /api/shells                           → 201; body uses /bin/sh
-    DELETE /api/shells/{id}                     → 204
-L2  POST   /api/shells/{id}/revisions
-L3  GET    /api/shells/{id} and its revision
-L4  VM create: shellIds
-    PUT    /api/vms/{id}/shells
-    Guest:  /var/lib/firecrab/shells/00.sh
-```
-
 ## Images, kernels, OCI, and registry
+
+Procedures: [Images](../guides/images.md), [Kernels](../guides/kernels.md), and [OCI](../guides/oci.md).
+I11 references: `alpine:3.21`, `ubuntu:24.04`, `fedora:42`.
+I2/I3/I4/I7/I10/U1 require separate checks outside GitHub Ubuntu CI.
 
 - [ ] **I1 — Catalogs:** image, kernel, and registry catalogs load.
 - [ ] **I2 — Kernel lifecycle:** installation succeeds; unused kernel deletes; a paired kernel returns a conflict.
@@ -302,32 +135,11 @@ L4  VM create: shellIds
 - [ ] **I10 — Bootstrap (separate slow pass):** start bootstrap, then delete its job and builder VM.
 - [ ] **I11 — OCI distro boot matrix:** inspect, import, start, stop, and delete all three references below. Preserve preinstalled aliases and mark unperformed imports **WARNING**.
 
-```http
-I1   GET    /api/images | /api/kernels | /api/microregistry
-I2   POST   /api/kernels/{version}/install       → succeeded
-     DELETE paired kernel                      → 409 in_use
-I3   POST   /api/images/{alias}/package, then /install
-I4   PUT    /api/images/{alias}/kernel           → 409 kernel_required if cache missing
-I5   GET    /api/oci/inspect?reference=…
-I6   POST   /api/oci/import; poll /import/{alias}
-     DELETE /api/images/{alias}
-I7   POST   /api/microregistry/register
-I8   Docker Hub: GET; optional PUT, then DELETE → configured=false or prior login
-I9   GET    /api/images/does-not-exist           → 404
-I10  POST   /api/images/{alias}/bootstrap
-     DELETE /api/images/bootstrap/{id}          → builder VM removed
-```
-
-```text
-I11 OCI references: alpine:3.21 | ubuntu:24.04 | fedora:42
-OCI ext4 packing: fakeroot required on the Firecrab host
-```
-
-I2, I3, I4, I7, I10, and U1 are outside GitHub Ubuntu CI.
-
 ## MicroVM and SSH
 
-Create an installed template (I3/I6) and network (N1) before the VM lifecycle.
+Install a template and create a network first.
+Use the [VM API](../reference/api.md#vm-endpoints); CPU/RAM/disk/egress edits require an inactive VM.
+SSH requires real authentication, including the management-VM proxy on macOS.
 
 - [ ] **V1 — Create:** submit name, installed template, CPU, RAM, disk, network ID, and environment.
 - [ ] **V2 — List/detail:** both views show the new VM in the created state.
@@ -347,41 +159,16 @@ Create an installed template (I3/I6) and network (N1) before the VM lifecycle.
 - [ ] **V12 — Running delete:** deletion is rejected until the VM stops.
 - [ ] **V13 — Stopped delete:** deletion returns 204, detail returns 404, and the VM leaves the list.
 - [ ] **V14 — Missing network:** creation returns 400 and leaves no row.
-
-```http
-V1   POST   /api/vms                         → name, template, cpu, ram, disk, microNetworkId, env
-V2   GET    /api/vms; GET /api/vms/{id}      → created
-V3   Create or PUT env                       → guest /etc/firecrab/vm.env
-V4   Create or PUT portForwards              → curl host port after start
-V5   Create or PUT shellIds                  → guest /var/lib/firecrab/shells/00.sh
-V6   PUT    /api/vms/{id}/storage
-V7   POST   /api/vms/{id}/start              → running; FIRECRAB_NETWORK_READY
-V8a  GET    /api/vms/{id}/ssh-key            → firecrab-<name>.pem
-V8b  GET    /api/vms/{id}/ssh-host-key       → fingerprint, publicKey
-V8c  GET    /api/vms/{id}/ssh-host-key/check → status=match
-V9   GET    /ws/vms/{id}/console             → 101
-V10  PUT    env while running                → services.d/app restarts
-V11  POST   /api/vms/{id}/stop               → stopped
-V12  DELETE /api/vms/{id} while running      → rejected
-V13  DELETE /api/vms/{id}                    → 204; later GET → 404
-V14  POST   /api/vms without microNetworkId → 400
-```
-
-```sh
-# V8d: replace the key path and guest address with values from V8a and V7
-GUEST_IP=172.31.230.2  # replace with the guest's IPv4 address
-ssh -i firecrab-qa-vm.pem -o IdentitiesOnly=yes "root@$GUEST_IP" true
-ssh -i firecrab-qa-vm.pem -o IdentitiesOnly=yes "root@$GUEST_IP" uname -s
-```
-
-CPU, RAM, disk, and egress edits apply only in created, stopped, or error. Environment edits also apply in running.
+- [ ] **V15 — Console logout:** `exit` closes the socket with `4000 session_ended`; VM stays running.
 
 ## VM lifetime
 
-Run these on a running VM (V7) with root on the API host; on macOS, run the host commands in the management VM over SSH.
-Every VM runs in its own `firecrab-vm-<simple id>.service` unit.
+Run on the API host as root with a running QA VM.
+On macOS, run host commands through management VM SSH.
 
-- [ ] **R1 — Shim in its unit:** `firecrab-api vm-shim --vm-id <id>` is Firecracker's parent and the main process of an active `firecrab-vm-<simple id>.service`; its parent is PID 1, it runs as the API user, the runtime directory has `shim.sock` and `console.log`, and the unit's `MemoryMax` is the guest RAM plus the larger of 256 MiB and an eighth of it and its `CPUQuota` is one core per vCPU plus one.
+- [ ] **R1 — Shim unit:** shim is Firecracker's parent and the unit main process, owned by PID 1 and running as the API user.
+  Require `shim.sock` and `console.log`.
+  `MemoryMax` is guest RAM plus max(256 MiB, RAM/8); `CPUQuota` is vCPUs plus one core.
 - [ ] **R2 — Stop from outside the API:** `systemctl stop` of the unit records `stopped`, `exit.json` has `"stop_requested":true`, and the TAP is gone.
 - [ ] **R3 — Quick restart:** a start right after a stop reaches `running`.
 - [ ] **R4 — API restart:** shim and Firecracker PIDs are unchanged, the VM stays `running`, the journal reports `adopted=1`, the TAP stays on its bridge, and V9 and V11 still work.
@@ -396,7 +183,7 @@ Every VM runs in its own `firecrab-vm-<simple id>.service` unit.
 
 ```sh
 # R1: the shim, its parent, and its unit
-VM=<vm id>
+VM=VM_ID
 ps -o pid,ppid,user,args -p "$(pgrep -f "[v]m-shim --vm-id $VM")"
 systemctl list-units --all --plain --no-legend 'firecrab-vm-*'
 systemctl show -p MemoryMax -p CPUQuotaPerSecUSec "firecrab-vm-$(echo "$VM" | tr -d -).service"
@@ -419,11 +206,14 @@ sudo systemctl start firecrab-api
 systemctl --failed --plain --no-legend | grep firecrab-vm- || echo none
 ```
 
-`scripts/ci-qa-lifetime.sh [OCI reference]` runs R1–R7 and X7 and imports the image when it is missing.
+Run `scripts/ci-qa-lifetime.sh [OCI reference]` for the automated lifetime pass.
 
 ## nginx combined scenario
 
-Run the nginx QA script to cover OCI, shell, VM, environment, forwarding, and SSH together.
+Run `scripts/ci-qa-nginx.sh nginx:1.27-alpine`.
+Use `QA_NGINX=ci`, a pinned POSIX shell, and TCP `18080 → 80`; update env to `QA_NGINX=two`.
+Check `/etc/firecrab/vm.env` and executable `/var/lib/firecrab/shells/00.sh` over SSH.
+On macOS, HTTP must work inside Debian and on the Mac relay; Windows must also return HTTP 200 on native localhost.
 
 - [ ] **NGX1:** inspect and import the nginx image; alias becomes installed.
 - [ ] **NGX2:** create a POSIX shell; receive 201 and a shell ID.
@@ -436,25 +226,14 @@ Run the nginx QA script to cover OCI, shell, VM, environment, forwarding, and SS
 - [ ] **NGX8:** update the environment while running; guest file changes.
 - [ ] **NGX9:** stop/delete VM, delete imported alias, shell, and network; no leftovers.
 
-```sh
-scripts/ci-qa-nginx.sh nginx:1.27-alpine
-curl -i http://127.0.0.1:18080/  # NGX5 → 200
-```
-
-```text
-NGX3:  QA_NGINX=ci; shellIds; portForwards 18080→80/tcp
-NGX4:  FIRECRAB_NETWORK_READY
-NGX6b: cat /etc/firecrab/vm.env → QA_NGINX=ci
-NGX7:  test -x /var/lib/firecrab/shells/00.sh
-NGX8:  PUT env QA_NGINX=two → guest file updates
-```
-
-On macOS, verify NGX5 both inside the management VM and on the Mac loopback relay; proxy NGX6–NGX8 SSH through that VM.
-
 ## CLI
+
+Commands, config paths, and precedence: [CLI reference](../reference/cli.md).
+C12 uses an SSH tunnel to the remote loopback API; see [host profiles](../reference/cli.md#host-profiles).
 
 - [ ] **C1 — VM:** list, create, start, stop, and delete; follow V* rules and end with no test VM.
 - [ ] **C2 — Console:** attach and detach cleanly.
+- [ ] **C2b — Console logout:** CLI prints `guest session ended`, exits 0, and leaves VM running.
 - [ ] **C3 — Network:** list, create, and delete; follow N* rules and end with no test network.
 - [ ] **C4 — Image:** list, inspect, import, check status, and delete the imported alias.
 - [ ] **C5 — Host profiles:** add, list, use, show, and remove a test profile.
@@ -466,43 +245,13 @@ On macOS, verify NGX5 both inside the management VM and on the Mac loopback rela
 - [ ] **C11 — Installer integrity:** verify release hash, safe symlink replacement, writable install, and executable search path.
 - [ ] **C12 — Remote manual flow:** confirm Linux daemons and API; forward its loopback API over SSH from any client OS; use a saved host profile and confirm the config.
 
-Linux-only commands run on Linux or inside the management guest. Mark them inapplicable on macOS/Windows host CLI.
-
-```text
-C1   firecrab vm list | create | start | stop | delete
-C2   firecrab vm console
-C3   firecrab network list | create | delete
-C4   firecrab image list | inspect | import | import-status
-C5   firecrab host add | list | use | show | remove
-C6   Unix: ~/firecrab/config.toml
-     Windows: %USERPROFILE%\firecrab\config.toml
-     Override: FIRECRAB_CONFIG_DIR
-C8   --api versus --host
-C9   macOS: service install | start | stop | status | reinstall | uninstall
-     Linux only: doctor | info | status | update --check | update --apply
-     Linux systemd: service start | stop | restart | enable | disable
-C11  SHA-256 verification; safe installer symlink replacement; user-writable install; PATH
-C12  config: current_host = "dev"
-```
-
-For C12, replace the SSH host address before running:
-
-```sh
-# On the Linux host
-sudo systemctl status firecrab-api firecrab-helper
-curl -fsS http://127.0.0.1:5523/api/host
-
-# On a Linux, macOS, or Windows client with SSH
-ssh -fN -L 15523:127.0.0.1:5523 user@firecrab-host
-firecrab host add dev http://127.0.0.1:15523 --use
-firecrab host show
-firecrab vm list
-firecrab host list
-```
-
 ## Browser E2E: every Playwright case
 
-Use a local registry fixture; Docker Hub is not required. The suite starts the API and Vite if needed.
+Commands and fixtures: [Browser E2E](../../firecrab-e2e/README.md).
+Use one worker and zero retries.
+Import/form mode: **11 passed, 6 skipped** (B2/B6/B8/B10/B13 plus product-blocked B5).
+Full runtime mode: **16 passed, 1 explicit skip** (B5).
+Save traces and guest logs on failure; cleanup must remove suite-owned registrations and resources.
 
 - [ ] **B1 — OCI inspect/import:** enter the local reference, inspect architecture compatibility, import, and confirm the registered installed alias.
 - [ ] **B2 — OCI guest boot:** create/start a VM from the imported image; verify network and guest-service markers.
@@ -522,59 +271,10 @@ Use a local registry fixture; Docker Hub is not required. The suite starts the A
 - [ ] **B16 — Reconciliation polling:** a new start clears the previous API result in the list and detail.
 - [ ] **B17 — Narrow reconciliation panel:** Korean diagnostics wrap without overflow and status tooltips remain accessible.
 
-The import/form-only mode skips B2, B6, B8, B10, and B13; B5 remains product-blocked: **11 passed, 6 skipped**.
-The full guest path expects **16 passed, 1 existing explicit skip** and needs KVM, Firecracker, a working network helper socket, and SSH tools for B10.
-Cleanup removes suite-owned VMs, networks, aliases, packages, and local catalog registrations; a remaining registration fails setup.
-Tests use one worker and zero retries; guest boot is skipped only by explicit configuration.
-
-```text
-Dashboard origin: http://localhost:8080
-API:              http://127.0.0.1:5523
-B2/B6:            FIRECRAB_NETWORK_READY
-B2:               FIRECRAB_OCI_E2E_READY
-B4:               409 alias_collision on duplicate registration
-B8:               ULA /64; SLAAC; NAT66
-B10:              80:18888/tcp
-```
-
-Run the import/form cases first:
-
-```sh
-npm ci --prefix firecrab-e2e
-npm run test:runner --prefix firecrab-e2e # A19
-npm ci --prefix firecrab-frontend
-npm run install-browsers --prefix firecrab-e2e
-FIRECRAB_E2E_SKIP_GUEST_BOOT=1 npm test --prefix firecrab-e2e
-```
-
-For guest-boot cases, start the helper in one terminal, then run the suite in another:
-
-```sh
-# Terminal 1
-./scripts/dev-net-helper.sh
-
-# Terminal 2 (with KVM and Firecracker available)
-npm test --prefix firecrab-e2e
-```
-
-On Windows, run source deployment and browser E2E from PowerShell:
-
-```powershell
-cargo build -p firecrab-cli --locked
-.\scripts\ci-qa-windows-e2e.ps1 -Phase browser -Cli .\target\debug\firecrab.exe -Source .
-.\scripts\ci-qa-windows-e2e.ps1 -Phase nginx -Cli .\target\debug\firecrab.exe -Source . -WaitFactor 3
-```
-
-The browser, Vite, and fixture run inside managed WSL with real guest boot and API reuse enabled.
-nginx separately requires HTTP 200 from the native Windows forwarded port.
-Windows `all` requires gate/setup, then collects API → nginx → guest → browser results even after test failures, and fails overall if any phase fails.
-The guest script also checks later image references after a failed reference.
-The Windows transcript, summary, and browser archive are retained under `target/qa/windows/<run-id>` or `-ResultsDir`.
-For macOS browser commands and management SSH settings, see the [E2E guide](../firecrab-e2e/README.md).
-
 ## Uninstall
 
-On a disposable Linux host with UFW active, one MicroNetwork, and one running MicroVM, compare the host after the uninstall with the host before the install.
+Use a disposable Linux host with UFW, one network, and a running VM.
+Compare ACLs, forwarding, and firewall rules with a preinstall snapshot.
 
 - [ ] **UN1:** `firecrab service uninstall` or `./install.sh --uninstall` stops the VM first; no `firecracker` or `firecrab-api` process and no `firecrab-*` unit remains.
 - [ ] **UN2:** `/usr/local/lib/firecrab` and `/usr/local/bin/firecrab` are gone.
@@ -598,6 +298,9 @@ getfacl -p /dev/kvm; sysctl net.ipv4.ip_forward net.ipv6.conf.all.forwarding # U
 
 ## Cleanup and CI coverage
 
+Inspect VM, network, storage, and shell lists after cleanup.
+Keep logs and summaries; see [QA script coverage](qa.md#script-coverage).
+
 - [ ] **X1:** no QA VM remains.
 - [ ] **X2:** no QA network remains.
 - [ ] **X3:** no QA storage pool remains.
@@ -608,40 +311,8 @@ getfacl -p /dev/kvm; sysctl net.ipv4.ip_forward net.ipv6.conf.all.forwarding # U
 - [ ] **X8:** forwarded TCP ports close after stopping/deleting QA VMs.
 - [ ] **X9:** restore manually changed QA DNS/management SSH settings and save logs and result summaries.
 
-Inspect the four resource lists after cleanup:
-
-```sh
-API=http://127.0.0.1:5523
-curl -fsS "$API/api/vms"
-curl -fsS "$API/api/micro-networks"
-curl -fsS "$API/api/micro-storages"
-curl -fsS "$API/api/shells"
-```
-
-CI script coverage:
-
-```text
-scripts/ci-qa-api.sh: G4–G5 H1–H3 N1–N5 S1–S3 L1–L3 I1 I8–I9 V14 C3 C5 X1–X4 X6
-scripts/ci-qa-nginx.sh: NGX1–NGX9, including V8a–V8d
-scripts/ci-qa-ssh.sh: V8a–V8d from guest and nginx runs
-scripts/ci-qa-guest.sh: I5–I6 V1–V2 V6–V9 V11–V13 N6 C1–C2 C4 X5
-scripts/ci-qa-lifetime.sh: R1–R7 X7, root commands on the API host (macOS: management VM SSH)
-scripts/ci-qa-macos-e2e.sh: native-Mac manual gate/shell/browser/API/nginx/guest/lifetime phases (G6 included)
-scripts/ci-qa-windows-e2e.ps1: manual Windows gate, optional source deployment, G6 shell, WSL browser/API/nginx/guest; native HTTP
-```
-
-Expanded guest checks run on the first OCI reference.
-The current CI workflow runs Linux API/nginx/public-image guest QA and complete Chromium E2E; ARM64 KVM runtime has no registered job.
-Linux CI retains logs, JSON/JUnit results, and failure traces for 14 days.
-The [Windows source validation snapshot](qa.md#windows-source-validation-2026-10-03) records 9 browser passes, the existing B5 skip, and separate Ubuntu/Fedora SSH failures.
-That result does not establish a passing Windows `all` run or stock pinned-release runtime.
-
 ## Related
 
-- [QA source list](qa.md)
-- [CI and runtime E2E](ci.md)
-- [Browser E2E setup](../firecrab-e2e/README.md)
-- [Contributing](../CONTRIBUTING.md)
-
-`FIRECRAB_QA_HELPER_UPGRADE=1` enables the R4f installer migration in the
-Linux CI lifetime job; it requires a disposable GitHub Actions host.
+- [CI](ci.md)
+- [Validation history](validation-history.md)
+- [Contributing](../../CONTRIBUTING.md)

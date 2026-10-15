@@ -3,14 +3,6 @@
 firecrab manages digest-pinned guest kernels independently from M2Image rootfs files.
 The same cache is used by the dashboard, OCI import, and image kernel updates.
 
-## Contents
-
-- [Catalog](#catalog)
-- [Install](#install)
-- [Update an image](#update-an-image)
-- [Delete](#delete)
-- [Related](#related)
-
 ## Catalog
 
 `GET /api/kernels` lists the host architecture's supported releases and local cache state.
@@ -60,6 +52,6 @@ Deleting an image does not remove its independently managed kernel cache.
 
 - [Images](images.md)
 - [OCI images](oci.md)
-- [API](api.md)
+- [API](../reference/api.md)
 - [Storage](storage.md)
 - [Operations](operations.md)
