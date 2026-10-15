@@ -55,7 +55,7 @@ Source lab passes do not establish stock-release or physical-Windows compatibili
 | `firecrab service validate` | Recheck downloads, distribution, provisioning, and task state |
 | `firecrab service shell` | Open a root guest shell; `run` is an alias |
 | `firecrab service shell -- COMMAND` | Run one guest command |
-| `firecrab service repair` | Rebuild the task and restart installed guest services |
+| `firecrab service repair` | Back up and repair the WSL filesystem, rebuild the task, and restart guest services |
 | `firecrab service reinstall` | Clear installation state and reprovision from TOML; retain data |
 | `firecrab service uninstall` | Remove the task; retain distribution and data |
 | `firecrab service uninstall --purge` | Also unregister the distribution and delete managed data |
@@ -95,6 +95,7 @@ Use `FIRECRAB_MICROMANAGER_HOME` for an isolated checkout or test.
 ```powershell
 firecrab service debug --logs --tail 100
 firecrab service debug --json
+# Run repair from PowerShell as Administrator.
 firecrab service repair
 ```
 
@@ -104,13 +105,65 @@ Guest checks are unverified while WSL is stopped.
 `--tail` requires `--logs` and accepts 1–1000 lines.
 Inspect redacted log excerpts before sharing them.
 
-Repair checks the disk, provisioning marker, distribution registration, and task prerequisites before stopping.
-It recreates the task/XML, reloads systemd, clears failed units, and restarts the installed helper and API.
-It preserves the WSL disk, binaries, data, and development overrides.
-It downloads nothing and restarts only `firecrab-debian`.
-Windows repair does not perform offline OS filesystem recovery.
+Repair checks the disk, provisioning marker, distribution registration, task prerequisites,
+administrator privileges, and WSL rescue tools before stopping the managed distribution.
+Offline checking uses a separate registered WSL2 Linux distribution, such as Debian
+or Ubuntu, with `e2fsprogs` and `util-linux`. It may start that rescue distribution.
+It never uses `firecrab-debian` or Docker Desktop's distributions as the rescue system.
+If no rescue distribution exists, install one with `wsl --install -d Debian` and retry.
+It backs up the complete `ext4.vhdx`, including OS and user data, under
+`runtime\repairs\vhd-*\ext4.before.vhdx`. It checks a detached copy with `e2fsck -f -n`.
+Attempt directories include the host's local date/time and numeric UTC offset,
+for example `vhd-2026-10-15_23-45-12+0900-Ab12Cd`. The random suffix prevents
+collisions within one second; names contain no Windows-invalid characters.
+Backup and working files use CoW block clones when the host filesystem supports
+them, such as ReFS. NTFS and other unsupported filesystems use full copies.
+`[SNAPSHOT]` reports the selected method; `snapshots.json` records it with the
+source and logical byte size. Logical size does not measure unique disk usage.
+Each snapshot is independent and has no parent-file dependency.
+Check exits 1–7 and 12 (an aborted check with uncorrected errors) trigger `e2fsck -f -y`.
+Only repair exits 0–3 followed by a read-only check returning zero can replace the disk.
+An unchanged clean disk keeps its original file. Failures preserve the installed disk
+and backup. Diagnostics (`result.json`, `console.log`, and `error.log` when available)
+are stored separately in `runtime\logs\repairs\<attempt-name>\`.
+The date-based attempt name matches the backup directory. `[LOGS]` prints this path;
+errors report backup and log paths separately. Backup directories retain only
+disks and the `snapshots.json`/`retention.json` metadata needed for retention.
+Retention keeps one rollback backup and one failed attempt's backup/working VHDX
+set. The previous rollback is retired only after the final task, guest-service,
+and API checks succeed. Failed or partial snapshot copies cannot displace the
+last complete failure backup. A clean unchanged attempt removes its disk copies
+and keeps its diagnostic logs. Log history keeps the latest ten attempts
+independently of backup retention. Expiring logs never removes a retained backup;
+unneeded backup directories are deleted instead of holding log history.
+`retention.json` records completion state; `[CLEANUP]` reports deletion.
+The next repair also prunes recognized `vhd-*` directories with dated or legacy
+random names. Inline diagnostics from recognized older backups move to the matching
+log directory before cleanup; existing logs are never overwritten. Unknown files,
+symlinks, and unrecognized layouts are preserved. Cleanup warnings do not hide the
+repair result.
+The repair copy must be the only newly attached disk and must be unmounted before checking.
+It must detach successfully before the verified copy can replace the installed disk.
+Repair then recreates the task/XML, reloads systemd, clears failed units, and restarts
+the installed helper and API. Binaries and development overrides stay in place.
+It downloads nothing, restarts only `firecrab-debian`, and never runs `wsl --shutdown`.
+Use current Store WSL with `--mount --vhd --bare` support.
+Microsoft documents the administrator requirement for [WSL disk attachment](https://learn.microsoft.com/windows/wsl/wsl2-mount-disk).
+Windows filesystem recovery does not restore missing packaged OS files from a cached image.
+Offline checking has a 120-second deadline.
 Readiness has a five-minute deadline; any failed stage returns nonzero.
 An incomplete installation requires `service reinstall`.
+
+Run the command and disk-preservation tests without an installed distribution:
+
+```powershell
+cargo test -p firecrab-cli --locked micromanager::windows
+cargo test -p firecrab-cli --locked --test windows_service_repair
+```
+
+On a Windows host with a provisioned installation, run `service repair` from an
+elevated PowerShell, then require `service status` and the localhost API to pass.
+Tests on other operating systems use command stand-ins; they do not validate a live WSL mount.
 
 Inspect `runtime\guest-provision.log`, `runtime\provision.phase`, and `runtime\provision.failed` for installation failures.
 

@@ -15,6 +15,7 @@ use super::lifecycle::Layout;
 const LABEL: &str = "io.firecrab.micromanager";
 const API_URL: &str = "http://127.0.0.1:5523/api/host";
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
+const READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug)]
 pub struct DaemonPaths {
@@ -169,7 +170,7 @@ pub fn start_with_runtime(layout: &Layout, settings: &Runtime) -> Result<Status,
         ],
         false,
     )?;
-    let timeout = Duration::from_secs(10);
+    let timeout = READY_TIMEOUT;
     report!(
         "[WAIT] VM/API readiness (up to {}s); console: {}",
         timeout.as_secs(),

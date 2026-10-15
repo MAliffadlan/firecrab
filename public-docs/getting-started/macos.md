@@ -31,6 +31,14 @@ It verifies checksums, provisions the manifest-selected kernel, and checks neste
 Existing installations migrate only on an explicit install or reinstall.
 Interactive installs show pending downloads and ask first; `--yes` skips that prompt.
 Interrupted downloads resume on the next run.
+Installation streams actual guest output, including package downloads, unpacking,
+and setup. `[LOGS]` identifies the complete `guest-provision.log`, which also keeps
+the shell trace for debugging. Output from earlier installations is not replayed.
+Keep installation running until it reports success; the provisioning VM shuts down
+before launchd registration and the resident management VM are started.
+`Ctrl-C` before completion leaves the service unregistered. For an interrupted
+first install whose binaries already exist, rerun `~/.local/bin/firecrab service install`
+(or the CLI in the configured install directory). Verified downloads are reused.
 
 ## Service commands
 
@@ -119,8 +127,9 @@ A clean check keeps the original OS image.
 
 Repair recreates the wrapper and plist, starts the VM, and verifies the live API and current-boot guest report.
 It prints six stages and reports pending waits every ten seconds.
-Local VM/API readiness has a ten-second deadline; offline filesystem checks have 120 seconds.
-Failures return nonzero and retain backups/logs under `runtime/repairs/os-*/`.
+Local VM/API readiness has a 120-second deadline; offline filesystem checks have 120 seconds.
+Failures return nonzero. Disk backups remain under `runtime/repairs/os-*/`;
+diagnostic logs are stored separately under `runtime/logs/repairs/os-*/`.
 The CLI suggests repair for runtime failures; it does not run repair automatically.
 
 | Log | Use |
