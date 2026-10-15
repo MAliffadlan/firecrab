@@ -43,6 +43,7 @@ export * from "./MicroStorageResponse";
 export * from "./MicroStorageVm";
 export * from "./MicroServiceSpec";
 export * from "./MicroServiceResponse";
+export * from "./MicroServiceDeployment";
 export * from "./NetworkInfoResponse";
 export * from "./ShellDetailResponse";
 export * from "./ShellRef";

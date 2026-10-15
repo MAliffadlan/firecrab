@@ -758,6 +758,9 @@ a.btn {
 .service-full { grid-column: 1 / -1; }
 .service-wide { grid-column: span 2; }
 .service-image { max-width: 24rem; overflow-wrap: anywhere; }
+.service-runtime-header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.service-digest { font-family: var(--font-mono); font-size: 0.75rem; overflow-wrap: anywhere; color: var(--shell); }
+.service-deploy-log { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.8rem; padding: 0.85rem; border: 1px solid var(--line); }
 table.service-table { min-width: 48rem; }
 .service-variables { min-width: 0; margin: 0; padding: 0.85rem; border: 1px solid var(--line); border-radius: 3px; }
 .service-variables legend { font-family: var(--font-mono); font-size: 0.8rem; color: var(--shell); }

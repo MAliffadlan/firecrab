@@ -63,6 +63,8 @@ pub async fn update(
 ) -> Result<Json<MicroServiceResponse>, AppError> {
     let id = parse_id(&id, request_id.0)?;
     validate(&spec, request_id.0)?;
+    let _claim = state.service_mutations.lock().await;
+    crate::service_runtime::ensure_editable(&state, id, request_id.0).await?;
     let service = MicroServiceResponse { id, spec };
     let record = service.clone();
     let changed = database(request_id.0, move || {
@@ -81,6 +83,8 @@ pub async fn delete(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let id = parse_id(&id, request_id.0)?;
+    let _claim = state.service_mutations.lock().await;
+    crate::service_runtime::ensure_editable(&state, id, request_id.0).await?;
     if !database(request_id.0, move || state.store.delete_micro_service(id)).await? {
         return Err(AppError::not_found(request_id.0));
     }
@@ -88,7 +92,7 @@ pub async fn delete(
 }
 
 /// Keep SQLite work off the async executor and never expose DB details or env values.
-async fn database<T: Send + 'static>(
+pub(crate) async fn database<T: Send + 'static>(
     request_id: Uuid,
     operation: impl FnOnce() -> Result<T, PersistenceError> + Send + 'static,
 ) -> Result<T, AppError> {

@@ -202,6 +202,14 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
                 .delete(handlers::micro_services::delete),
         )
         .route(
+            "/api/micro-services/{id}/deployment",
+            get(crate::service_runtime::get).post(crate::service_runtime::deploy),
+        )
+        .route(
+            "/api/micro-services/{id}/stop",
+            post(crate::service_runtime::stop),
+        )
+        .route(
             "/api/vms",
             get(handlers::vms::list_vms).post(handlers::vms::create_vm_route),
         )

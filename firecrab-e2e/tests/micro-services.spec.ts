@@ -16,7 +16,9 @@ async function openServices(page: Page, rows: object[] = [], failSave = false) {
     const path = new URL(route.request().url()).pathname;
     const method = route.request().method();
     if (path === "/api/vms") return route.fulfill({ json: [] });
+    if (path === "/api/micro-networks") return route.fulfill({ json: [] });
     if (path === "/api/update") return route.fulfill({ json: { current: "0.3.1", latest: "0.3.1", updateAvailable: false } });
+    if (path === "/api/update/progress") return route.fulfill({ json: { phase: "idle", percent: 0, updatedAtMs: 0 } });
     if (path.startsWith("/api/micro-services")) {
       if (method === "POST" || method === "PUT") {
         const body = route.request().postDataJSON();
@@ -36,6 +38,41 @@ async function openServices(page: Page, rows: object[] = [], failSave = false) {
 }
 
 test.describe("MicroService configuration @dashboard", () => {
+  test("deploys from the runtime panel, reports health, and stops the service", async ({ page }, testInfo) => {
+    const service = { ...INITIAL, domain: null, secrets: {}, replicas: 1 };
+    await openServices(page, [service]);
+    let deployment: Record<string, unknown> | null = null;
+    let read = 0;
+    const instances = [{ vmId: SECRET, ipv4: "172.30.0.2", hostPort: 30100, state: "running", healthy: true }];
+    await page.route(`**/api/micro-services/${ID}/deployment`, async (route) => {
+      if (route.request().method() === "POST") {
+        expect(route.request().postDataJSON()).toEqual({ hostPort: 30100, microNetworkId: null });
+        deployment = { id: SECRET, serviceId: ID, spec: service, phase: "queued", request: { hostPort: 30100 }, digest: `sha256:${"a".repeat(64)}`, instances: [], log: ["Deployment queued"], error: null };
+        read = 0;
+        return route.fulfill({ status: 202, json: deployment });
+      }
+      if (deployment?.phase === "queued" && ++read >= 1) deployment = { ...deployment, phase: "running", instances, log: ["All replicas answered the app health check"] };
+      return route.fulfill({ json: deployment });
+    });
+    await page.route(`**/api/micro-services/${ID}/stop`, async (route) => {
+      expect(route.request().method()).toBe("POST");
+      deployment = { ...deployment, phase: "stopped", instances: [], log: ["Service instances removed"] };
+      return route.fulfill({ status: 202, json: deployment });
+    });
+    await page.getByRole("button", { name: "Run orders", exact: true }).click();
+    await expect(page.getByRole("status")).toHaveText("Not deployed");
+    await page.getByRole("button", { name: "Deploy and run", exact: true }).click();
+    await expect(page.getByRole("status")).toHaveText("Running");
+    await expect(page.getByRole("cell", { name: "Healthy", exact: true })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("service-running-desktop.png"), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("service-running-mobile.png"), fullPage: true });
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Stop service", exact: true }).click();
+    await expect(page.getByRole("status")).toHaveText("Stopped");
+    await expect(page.getByRole("button", { name: "Deploy and run", exact: true })).toBeEnabled();
+  });
   const browserErrors = new WeakMap<Page, string[]>();
   test.beforeEach(({ page }) => {
     const errors: string[] = [];
@@ -48,6 +85,18 @@ test.describe("MicroService configuration @dashboard", () => {
     });
   });
   test.afterEach(({ page }) => expect(browserErrors.get(page)).toEqual([]));
+  test("shows a failed deployment and allows a retry without claiming success", async ({ page }) => {
+    await openServices(page, [{ ...INITIAL, domain: null, secrets: {} }]);
+    await page.route(`**/api/micro-services/${ID}/deployment`, (route) => route.fulfill({ json: {
+      id: SECRET, serviceId: ID, spec: INITIAL, request: { hostPort: 30200 },
+      phase: "failed", digest: null, instances: [], log: ["App health check failed"], error: "App health check failed",
+    } }));
+    await page.getByRole("button", { name: "Run orders", exact: true }).click();
+    await expect(page.getByRole("status")).toHaveText("Deployment failed");
+    await expect(page.getByRole("alert")).toHaveText("App health check failed");
+    await expect(page.getByRole("button", { name: "Deploy and run", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Stop service", exact: true })).toHaveCount(0);
+  });
   test("creates, reads, edits and deletes configurations", async ({ page }, testInfo) => {
     const writes = await openServices(page);
     await expect(page.getByText("No service configurations yet.")).toBeVisible();

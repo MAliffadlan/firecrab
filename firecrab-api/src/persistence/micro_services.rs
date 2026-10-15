@@ -1,4 +1,4 @@
-use firecrab_api_types::{MicroServiceResponse, MicroServiceSpec};
+use firecrab_api_types::{MicroServiceDeployment, MicroServiceResponse, MicroServiceSpec};
 use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
@@ -8,6 +8,12 @@ pub(super) const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS micro_serv
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     spec TEXT NOT NULL
+) STRICT";
+
+pub(super) const CREATE_DEPLOYMENTS_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS micro_service_deployments (
+    service_id TEXT PRIMARY KEY,
+    deployment TEXT NOT NULL
 ) STRICT";
 
 impl Store {
@@ -69,10 +75,53 @@ impl Store {
     }
 
     pub fn delete_micro_service(&self, id: Uuid) -> Result<bool, PersistenceError> {
-        Ok(self
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM micro_service_deployments WHERE service_id = ?1",
+            [id.to_string()],
+        )?;
+        let changed = tx.execute("DELETE FROM micro_services WHERE id = ?1", [id.to_string()])?;
+        tx.commit()?;
+        Ok(changed != 0)
+    }
+
+    pub fn service_deployment(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<MicroServiceDeployment>, PersistenceError> {
+        let text: Option<String> = self
             .lock()
-            .execute("DELETE FROM micro_services WHERE id = ?1", [id.to_string()])?
-            != 0)
+            .query_row(
+                "SELECT deployment FROM micro_service_deployments WHERE service_id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        text.map(|text| {
+            serde_json::from_str(&text).map_err(|error| PersistenceError::CorruptRecord {
+                id: id.to_string(),
+                reason: error.to_string(),
+            })
+        })
+        .transpose()
+    }
+
+    pub fn save_service_deployment(
+        &self,
+        deployment: &MicroServiceDeployment,
+    ) -> Result<(), PersistenceError> {
+        let text =
+            serde_json::to_string(deployment).map_err(|error| PersistenceError::CorruptRecord {
+                id: deployment.id.to_string(),
+                reason: error.to_string(),
+            })?;
+        self.lock().execute(
+            "INSERT INTO micro_service_deployments (service_id, deployment) VALUES (?1, ?2)
+             ON CONFLICT(service_id) DO UPDATE SET deployment = excluded.deployment",
+            params![deployment.service_id.to_string(), text],
+        )?;
+        Ok(())
     }
 }
 

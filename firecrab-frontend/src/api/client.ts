@@ -23,6 +23,8 @@ import type {
   MicroStorageResponse,
   MicroServiceSpec,
   MicroServiceResponse,
+  MicroServiceDeployment,
+  DeployMicroServiceRequest,
   NetworkInfoResponse,
   SshHostKeyResponse,
   ShellDetailResponse,
@@ -111,6 +113,20 @@ export function listVms(): Promise<VmResponse[]> {
 
 export function listMicroServices(): Promise<MicroServiceResponse[]> {
   return fetchJson("/api/micro-services");
+}
+
+export function getServiceDeployment(id: string): Promise<MicroServiceDeployment | null> {
+  return fetchJson(`/api/micro-services/${encodeURIComponent(id)}/deployment`);
+}
+
+export function deployMicroService(id: string, request: DeployMicroServiceRequest): Promise<MicroServiceDeployment> {
+  return fetchJson(`/api/micro-services/${encodeURIComponent(id)}/deployment`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request),
+  });
+}
+
+export function stopMicroService(id: string): Promise<MicroServiceDeployment> {
+  return fetchJson(`/api/micro-services/${encodeURIComponent(id)}/stop`, { method: "POST" });
 }
 
 export function getMicroService(id: string): Promise<MicroServiceResponse> {

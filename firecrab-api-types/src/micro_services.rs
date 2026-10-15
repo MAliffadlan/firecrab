@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::VmState;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -51,6 +52,63 @@ pub struct MicroServiceResponse {
     pub id: Uuid,
     #[serde(flatten)]
     pub spec: MicroServiceSpec,
+}
+
+/// The first replica uses host_port; the others use consecutive host ports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DeployMicroServiceRequest {
+    #[serde(default)]
+    pub micro_network_id: Option<Uuid>,
+    pub host_port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServicePhase {
+    Queued,
+    Importing,
+    Starting,
+    CheckingHealth,
+    Running,
+    Degraded,
+    Stopping,
+    Stopped,
+    Failed,
+}
+
+impl ServicePhase {
+    pub fn is_busy(self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Importing | Self::Starting | Self::CheckingHealth | Self::Stopping
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceInstance {
+    pub vm_id: Uuid,
+    pub ipv4: String,
+    pub host_port: u16,
+    pub state: VmState,
+    pub healthy: bool,
+}
+
+/// Durable deployment snapshot. Live reads refresh instance states and health.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicroServiceDeployment {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub phase: ServicePhase,
+    pub spec: MicroServiceSpec,
+    pub request: DeployMicroServiceRequest,
+    pub digest: Option<String>,
+    pub instances: Vec<ServiceInstance>,
+    pub log: Vec<String>,
+    pub error: Option<String>,
 }
 
 fn default_health_path() -> String {

@@ -10,6 +10,69 @@ use super::{Cli, run};
 const VM_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const NETWORK_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
+fn service_deployment_response(phase: &str) -> Value {
+    json!({
+        "id": NETWORK_ID, "serviceId": VM_ID, "phase": phase,
+        "spec": { "name": "web", "image": "busybox:latest", "port": 8080, "ram": 128, "cpu": 1 },
+        "request": { "hostPort": 30100, "microNetworkId": null },
+        "digest": null, "instances": [], "log": [], "error": null,
+    })
+}
+
+#[test]
+fn micro_services_deploy_status_and_stop_use_the_runtime_api() {
+    let response = service_deployment_response("queued").to_string();
+    let (code, request) = run_once(
+        &[
+            "microservice",
+            "deploy",
+            VM_ID,
+            "--host-port",
+            "30100",
+            "--no-wait",
+        ],
+        "202 Accepted",
+        &response,
+    );
+    assert_eq!(code, 0);
+    assert_eq!(request.method, "POST");
+    assert_eq!(
+        request.path,
+        format!("/api/micro-services/{VM_ID}/deployment")
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&request.body).unwrap(),
+        json!({"hostPort": 30100, "microNetworkId": null})
+    );
+    let (code, request) = run_once(&["microservice", "status", VM_ID], "200 OK", &response);
+    assert_eq!(code, 0);
+    assert_eq!(request.method, "GET");
+    assert_eq!(
+        request.path,
+        format!("/api/micro-services/{VM_ID}/deployment")
+    );
+    let (code, request) = run_once(
+        &["microservice", "stop", VM_ID, "--no-wait"],
+        "202 Accepted",
+        &service_deployment_response("stopping").to_string(),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(request.path, format!("/api/micro-services/{VM_ID}/stop"));
+    assert!(request.body.is_empty());
+}
+
+#[test]
+fn micro_services_waiting_deploy_returns_failure_to_the_caller() {
+    let mut failed = service_deployment_response("failed");
+    failed["error"] = json!("App health check failed");
+    let (code, _) = run_once(
+        &["microservice", "deploy", VM_ID, "--host-port", "30100"],
+        "202 Accepted",
+        &failed.to_string(),
+    );
+    assert_eq!(code, 1);
+}
+
 #[test]
 fn micro_services_commands_send_configuration_and_secret_references() {
     let directory = tempfile::tempdir().unwrap();

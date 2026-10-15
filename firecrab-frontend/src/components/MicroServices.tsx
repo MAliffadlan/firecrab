@@ -6,6 +6,7 @@ import {
   listMicroServices, updateMicroService,
 } from "../api/client";
 import { useI18n } from "../i18n";
+import ServiceDeployment from "./ServiceDeployment";
 
 const DEFAULT_SPEC: MicroServiceSpec = {
   name: "", image: "", runtime: "vm", port: 8080, healthPath: "/health", domain: null,
@@ -19,6 +20,7 @@ export default function MicroServices() {
   const [busy, setBusy] = useState(false);
   // undefined closes the editor; null creates a new configuration.
   const [editor, setEditor] = useState<MicroServiceResponse | null | undefined>(undefined);
+  const [runtime, setRuntime] = useState<MicroServiceResponse | null>(null);
 
   const refresh = async () => {
     try {
@@ -66,7 +68,7 @@ export default function MicroServices() {
     <>
       <section className="panel" aria-labelledby="microservice-heading">
         <h2 className="panel-title" id="microservice-heading">MicroService</h2>
-        <p className="poll-note">{t("Save service configurations here. Deployment will be available in a later step.", "서비스 설정을 저장한다. 실제 배포 기능은 다음 단계에서 제공한다.")}</p>
+        <p className="poll-note">{t("Save a configuration, then deploy its image to MicroVMs and check app health.", "설정을 저장한 뒤 이미지를 MicroVM에 배포한다. 앱의 상태 검사 결과를 확인한다.")}</p>
         <div className="service-actions">
           <button className="btn primary" disabled={busy || editor !== undefined} onClick={() => setEditor(null)}>{t("New MicroService", "MicroService 추가")}</button>
           <button className="btn" disabled={busy} onClick={async () => { setBusy(true); await refresh(); setBusy(false); }}>{t("Refresh", "새로 고침")}</button>
@@ -86,6 +88,7 @@ export default function MicroServices() {
                   <td data-label={t("Port", "포트")}>{service.port}</td><td data-label={t("Replicas", "복제 수")}>{service.replicas}</td><td data-label="RAM / CPU">{service.ram} MiB / {service.cpu}</td>
                   <td className="mono" data-label={t("Domain", "도메인")}>{service.domain ?? "—"}</td>
                   <td className="actions">
+                    <button className="btn primary" disabled={busy || editor !== undefined} onClick={() => setRuntime(service)} aria-label={t(`Run ${service.name}`, `${service.name} 실행 관리`)}>{t("Run", "실행 관리")}</button>
                     <button className="btn" disabled={busy || editor !== undefined} onClick={() => edit(service.id)} aria-label={t(`Edit ${service.name}`, `${service.name} 수정`)}>{t("Edit", "수정")}</button>
                     <button className="btn danger" disabled={busy || editor !== undefined} onClick={() => remove(service)} aria-label={t(`Delete ${service.name}`, `${service.name} 삭제`)}>{t("Delete", "삭제")}</button>
                   </td>
@@ -95,6 +98,7 @@ export default function MicroServices() {
           </div>
         )}
       </section>
+      {runtime && <ServiceDeployment key={runtime.id} service={runtime} onClose={() => setRuntime(null)} />}
       {editor !== undefined && <ServiceForm key={editor?.id ?? "new"} service={editor} onCancel={() => setEditor(undefined)} onSaved={async () => { setEditor(undefined); await refresh(); }} />}
     </>
   );
