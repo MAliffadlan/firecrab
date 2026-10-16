@@ -580,3 +580,7 @@ pub(crate) fn wait_generation(expected: &str) -> io::Result<()> {
         "Nginx did not accept the candidate configuration",
     ))
 }
+
+#[cfg(test)]
+#[path = "host_tests.rs"]
+mod tests;

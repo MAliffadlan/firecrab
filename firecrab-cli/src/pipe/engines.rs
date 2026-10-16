@@ -203,6 +203,48 @@ mod install {
         }
 
         #[test]
+        fn verified_download_installs_an_executable_and_a_matching_digest_record() {
+            let directory = tempfile::tempdir().unwrap();
+            let bytes = b"verified fixture executable".to_vec();
+            let expected = format!("{:x}", Sha256::digest(&bytes));
+            let (url, server) = response(bytes.clone());
+            let asset = Asset {
+                url,
+                sha256: expected.clone(),
+            };
+            let engine = Engine {
+                version: "fixture-version".into(),
+                assets: BTreeMap::new(),
+            };
+            install_one(
+                &reqwest::blocking::Client::new(),
+                directory.path(),
+                "cloudflared",
+                &engine,
+                &asset,
+            )
+            .unwrap();
+            server.join().unwrap();
+            let binary = directory.path().join("cloudflared");
+            let record_path = directory.path().join("cloudflared.json");
+            let record: Installed =
+                serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+            assert_eq!(fs::read(&binary).unwrap(), bytes);
+            assert_eq!(
+                fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            assert_eq!(record.version, engine.version);
+            assert_eq!(record.asset_sha256, expected);
+            assert_eq!(record.binary_sha256, expected);
+            if nix::unistd::geteuid().is_root() {
+                assert!(current(&binary, &record_path, &engine, &asset));
+            }
+            fs::write(&binary, b"tampered").unwrap();
+            assert!(!current(&binary, &record_path, &engine, &asset));
+        }
+
+        #[test]
         fn a_wrong_digest_keeps_the_existing_executable() {
             let directory = tempfile::tempdir().unwrap();
             fs::write(directory.path().join("cloudflared"), b"previous").unwrap();

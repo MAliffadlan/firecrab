@@ -52,6 +52,10 @@ def main(args):
         for key, value in {"@FIRECRAB_GROUP@": "nogroup", "@FIRECRAB_UID@": "65534", "@PREFIX@": str(root), "@LIBDIR@": str(binaries), "@SHAREDIR@": str(shared), "@DATADIR@": str(working), "@CONFDIR@": str(config_dir), "@UNITDIR@": "/run/systemd/system"}.items(): template = template.replace(key, value)
         template = template.replace("RuntimeDirectory=firecrab", "RuntimeDirectory=" + root.name).replace("/run/firecrab ", "/run/" + root.name + " ")
         template = template.replace("[Install]", "Environment=FIRECRAB_NET_HELPER_SOCK=" + str(socket_path) + "\n\n[Install]")
+        if profile := os.environ.get("LLVM_PROFILE_FILE"):
+            # systemd expands % specifiers; LLVM must receive them literally.
+            profile = profile.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+            template = template.replace("[Install]", 'Environment="LLVM_PROFILE_FILE=' + profile + '"\n\n[Install]')
         helper_path = Path("/run/systemd/system", helper_unit); helper_path.write_text(template)
         subprocess.run(["systemctl", "daemon-reload"], check=True)
         subprocess.run(["systemctl", "start", helper_unit], check=True)

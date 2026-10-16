@@ -190,6 +190,20 @@ fn rejected_token_has_actionable_permissions_and_no_provider_secrets() {
 }
 
 #[test]
+fn provider_rate_limit_and_server_errors_are_sanitized_before_any_mutation() {
+    for (status, message) in [(429, "rate limit"), (503, "HTTP 503")] {
+        let (client, server, _) = server(vec![("GET", format!("zones/{ZONE}"), status, json!({}))]);
+        let error = client
+            .provision(&request(), |_, _, _, _| panic!("must not apply"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(message), "{error}");
+        assert!(!error.contains("provider-secret"));
+        server.join().unwrap();
+    }
+}
+
+#[test]
 fn local_apply_failure_removes_only_new_dns_and_tunnel() {
     let mut steps = creates();
     steps.push((
