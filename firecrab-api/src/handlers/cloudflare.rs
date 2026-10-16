@@ -11,6 +11,7 @@ use firecrab_helper_protocol::pipe::{Operation, Snapshot};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+/// Attach a sanitized setup error to the Cloudflare form and current request ID.
 fn invalid(message: impl Into<String>, request_id: RequestId) -> AppError {
     AppError::validation(
         BTreeMap::from([("cloudflare".into(), message.into())]),
@@ -18,6 +19,7 @@ fn invalid(message: impl Into<String>, request_id: RequestId) -> AppError {
     )
 }
 
+/// List at most 500 accessible active domains without following redirects or saving tokens.
 async fn read_zones(token: &str, base: &str) -> Result<Vec<Zone>, &'static str> {
     let mut authorization = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
         .map_err(|_| "Invalid Cloudflare API token")?;
@@ -88,6 +90,7 @@ async fn read_zones(token: &str, base: &str) -> Result<Vec<Zone>, &'static str> 
     Ok(zones)
 }
 
+/// Validate a transient API token and return active domains for the setup selector.
 pub async fn zones(
     Extension(request_id): Extension<RequestId>,
     Json(request): Json<AccessRequest>,
@@ -105,6 +108,7 @@ pub async fn zones(
     .map_err(|error| invalid(error, request_id))
 }
 
+/// Validate onboarding input and delegate the full setup transaction to the root helper.
 pub async fn connect(
     Extension(request_id): Extension<RequestId>,
     Json(request): Json<ConnectRequest>,

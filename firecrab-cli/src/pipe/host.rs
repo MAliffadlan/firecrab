@@ -1,3 +1,5 @@
+//! Privileged Pipe file transactions, systemd controls and generation checks.
+
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -12,10 +14,14 @@ use super::config::Config;
 use super::{INGRESS_UNIT, TUNNEL_UNIT};
 use firecrab_helper_protocol::pipe::{ApplyRequest, Snapshot, UnitStatus};
 
+/// Host IO, engine validation and systemd transaction failures.
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+/// Standalone Nginx unit template, with executable and config path placeholders.
 const INGRESS_TEMPLATE: &str = include_str!("../../../packaging/systemd/firecrab-ingress.service");
+/// Connector unit template that loads its secret through systemd credentials.
 const TUNNEL_TEMPLATE: &str = include_str!("../../../packaging/systemd/firecrab-tunnel.service");
 
+/// Reject mutations unless the caller is root on a running systemd host.
 pub(super) fn require_root() -> Result<()> {
     if !nix::unistd::geteuid().is_root() {
         return Err("pipe apply/disable requires root; run this command with sudo".into());
@@ -26,6 +32,7 @@ pub(super) fn require_root() -> Result<()> {
     Ok(())
 }
 
+/// Hold an exclusive nonblocking lock for the entire apply or disable transaction.
 pub(super) fn lock() -> Result<fs::File> {
     let file = OpenOptions::new()
         .write(true)
@@ -38,6 +45,7 @@ pub(super) fn lock() -> Result<fs::File> {
     Ok(file)
 }
 
+/// Accept absolute paths that can be inserted into unit and engine configs literally.
 fn unit_path(path: &Path) -> Result<&str> {
     let text = path.to_str().ok_or("pipe paths must be UTF-8")?;
     if !path.is_absolute()
@@ -52,6 +60,7 @@ fn unit_path(path: &Path) -> Result<&str> {
     Ok(text)
 }
 
+/// Resolve an engine path and require a regular executable with safe config syntax.
 fn executable(path: &Path) -> Result<PathBuf> {
     let path = fs::canonicalize(path)?;
     unit_path(&path)?;
@@ -62,6 +71,7 @@ fn executable(path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Run a fixed engine or systemd command and preserve failure stderr for recovery.
 fn command(runner: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<()> {
     let output = runner.run(program, args)?;
     if !output.status.success() {
@@ -75,6 +85,7 @@ fn command(runner: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<(
     Ok(())
 }
 
+/// Read a boolean systemd state such as active or enabled before applying changes.
 fn unit_state(runner: &dyn CommandRunner, verb: &str, unit: &str) -> bool {
     runner
         .run("systemctl", &[verb, "--quiet", unit])
@@ -102,14 +113,20 @@ fn write_atomic(path: &Path, data: Option<&[u8]>, mode: u32) -> Result<()> {
     Ok(())
 }
 
+/// Previous and desired bytes needed to commit or roll back one managed file.
 struct FileChange {
+    /// Destination within the managed configuration or unit directory.
     path: PathBuf,
+    /// Original contents, or none when rollback must remove a newly created file.
     previous: Option<Vec<u8>>,
+    /// Replacement contents, or none when this apply removes the file.
     next: Option<Vec<u8>>,
+    /// Required permissions for both replacement and restored contents.
     mode: u32,
 }
 
 impl FileChange {
+    /// Capture the previous contents and reject symlinks or non-regular destinations.
     fn new(path: PathBuf, next: Option<Vec<u8>>, mode: u32) -> Result<Self> {
         if let Ok(metadata) = fs::symlink_metadata(&path)
             && !metadata.file_type().is_file()
@@ -133,11 +150,13 @@ impl FileChange {
         })
     }
 
+    /// Compare bytes so unchanged credentials do not restart the connector.
     fn changed(&self) -> bool {
         self.previous != self.next
     }
 }
 
+/// Read validated tunnel credentials and encode them for the protected managed file.
 fn credentials(config: &Config) -> Result<Option<Vec<u8>>> {
     config
         .credentials()?
@@ -146,6 +165,7 @@ fn credentials(config: &Config) -> Result<Option<Vec<u8>>> {
         .map_err(Into::into)
 }
 
+/// Receive a bounded desktop-to-guest manifest/credential bundle through stdin.
 pub(super) fn apply_bundle(nginx: Option<&Path>, cloudflared: Option<&Path>) -> Result<()> {
     use std::io::Read;
     require_root()?;
@@ -172,6 +192,7 @@ pub(super) fn apply_bundle(nginx: Option<&Path>, cloudflared: Option<&Path>) -> 
     apply(&manifest, nginx, cloudflared)
 }
 
+/// Lock host mutations and apply a manifest with optional engine path overrides.
 pub(super) fn apply(
     config_file: &Path,
     nginx: Option<&Path>,
@@ -182,6 +203,8 @@ pub(super) fn apply(
     apply_locked(config_file, nginx, cloudflared, || Ok(()))
 }
 
+/// Resolve engines and apply while the caller holds the Pipe transaction lock.
+/// A failed final verifier rolls back local files and service state.
 pub(super) fn apply_locked(
     config_file: &Path,
     nginx: Option<&Path>,
@@ -233,6 +256,8 @@ pub(super) fn apply_locked(
     Ok(())
 }
 
+/// Validate staged engine configs, install files, reload units and verify traffic.
+/// Restore previous files, enablement and running state if any step fails.
 fn apply_with(
     runner: &dyn CommandRunner,
     confdir: &Path,
@@ -422,6 +447,7 @@ fn apply_with(
     Ok(())
 }
 
+/// Inspect engine availability and live units, optionally including the saved manifest.
 pub(super) fn snapshot(include_config: bool) -> Result<Snapshot> {
     let env = ServiceEnv::from_process_env();
     let path = env.confdir.join("pipe/manifest.json");
@@ -463,16 +489,19 @@ pub(super) fn snapshot(include_config: bool) -> Result<Snapshot> {
     })
 }
 
+/// Print live unit state as JSON without reading the saved manifest.
 pub(super) fn status() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&snapshot(false)?)?);
     Ok(())
 }
 
+/// Print a complete dashboard snapshot as JSON for the privileged helper.
 pub(super) fn inspect() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&snapshot(true)?)?);
     Ok(())
 }
 
+/// Apply a bounded helper request, retaining existing credentials when omitted.
 pub(super) fn apply_managed() -> Result<()> {
     use std::io::Read;
     require_root()?;
@@ -506,6 +535,7 @@ pub(super) fn apply_managed() -> Result<()> {
     apply(&path, None, None)
 }
 
+/// Stop and disable installed Pipe units under the transaction lock.
 pub(super) fn disable() -> Result<()> {
     require_root()?;
     let _lock = lock()?;
@@ -522,6 +552,7 @@ pub(super) fn disable() -> Result<()> {
     Ok(())
 }
 
+/// Wait up to eight seconds for Nginx to serve the requested route-generation hash.
 pub(crate) fn wait_generation(expected: &str) -> io::Result<()> {
     use std::io::Read;
     use std::os::unix::net::UnixStream;

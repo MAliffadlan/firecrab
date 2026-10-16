@@ -1,3 +1,5 @@
+//! Shared Pipe manifests, engine configuration and privileged helper operations.
+
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -7,46 +9,61 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+/// Nginx Unix socket used to confirm that a route generation is serving requests.
 pub const STATUS_SOCKET: &str = "/run/firecrab-ingress/status.sock";
+/// Independent systemd unit that owns the Cloudflare connector.
 pub const TUNNEL_UNIT: &str = "firecrab-tunnel.service";
 
+/// Validation and manifest IO errors shared by CLI and helper callers.
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// First data-plane slice: HTTP on loopback, with public TLS at Cloudflare.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    /// Unprivileged loopback listener reached by the tunnel connector.
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
+    /// Host and path rules served by the independent Nginx process.
     pub routes: Vec<Route>,
+    /// Optional public connector; local routing also works without it.
     pub tunnel: Option<Tunnel>,
 }
 
+/// A literal host/path match and the app addresses that share its requests.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Route {
+    /// Lowercase DNS hostname, without a wildcard or port.
     pub host: String,
+    /// Absolute path matched exactly and as a slash-delimited subtree.
     #[serde(default = "default_path")]
     pub path_prefix: String,
+    /// Distinct IP:port targets used by Nginx round-robin balancing.
     pub upstreams: Vec<SocketAddr>,
 }
 
+/// A locally managed Cloudflare tunnel and its source credential file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Tunnel {
+    /// Non-nil Cloudflare tunnel UUID, also required in the credentials.
     pub id: Uuid,
     /// Source credentials, copied into a root-only systemd credential file.
     pub credentials_file: PathBuf,
 }
 
+/// Default private HTTP endpoint for the public tunnel's origin traffic.
 fn default_listen() -> SocketAddr {
     "127.0.0.1:8080".parse().unwrap()
 }
 
+/// Match every path when a route omits its path prefix.
 fn default_path() -> String {
     "/".into()
 }
 
+/// Accept only literal lowercase DNS names safe for native engine configs.
 fn hostname(host: &str) -> bool {
     !host.is_empty()
         && host.len() <= 253
@@ -61,6 +78,7 @@ fn hostname(host: &str) -> bool {
         })
 }
 
+/// Reject wildcard, interpolation and directive syntax in literal paths.
 fn path(path: &str) -> bool {
     path.starts_with('/')
         && path.bytes().all(|c| {
@@ -73,6 +91,7 @@ fn path(path: &str) -> bool {
 }
 
 impl Config {
+    /// Read and validate this tunnel's credentials, or return none for local ingress.
     pub fn credentials(&self) -> Result<Option<Value>> {
         let Some(tunnel) = &self.tunnel else {
             return Ok(None);
@@ -82,6 +101,7 @@ impl Config {
         Ok(Some(value))
     }
 
+    /// Require a matching tunnel UUID and nonempty account tag and tunnel secret.
     pub fn validate_credentials(&self, value: &Value) -> Result<()> {
         let tunnel = self
             .tunnel
@@ -104,6 +124,7 @@ impl Config {
         Ok(())
     }
 
+    /// Load a validated manifest and resolve credentials relative to its directory.
     pub fn read(file: &Path) -> Result<Self> {
         let mut config: Self = serde_json::from_slice(&std::fs::read(file)?)?;
         if let Some(tunnel) = &mut config.tunnel
@@ -118,6 +139,7 @@ impl Config {
         Ok(config)
     }
 
+    /// Reject unsafe engine syntax, public listeners and ambiguous or invalid routes.
     pub fn validate(&self) -> Result<()> {
         if serde_json::to_vec(self)?.len() > 48 * 1024 {
             return Err("pipe manifest exceeds 48 KiB".into());
@@ -167,6 +189,7 @@ impl Config {
         Ok(())
     }
 
+    /// Hash only listener and routes so Nginx can acknowledge a graceful reload.
     pub fn generation(&self) -> String {
         let bytes =
             serde_json::to_vec(&(self.listen, &self.routes)).expect("serializable pipe routes");
@@ -222,6 +245,7 @@ impl Config {
         text
     }
 
+    /// Render cloudflared ingress with systemd credentials and a final 404 rule.
     pub fn tunnel_config(&self) -> Option<Value> {
         self.tunnel.as_ref().map(|tunnel| {
             let hosts: BTreeSet<_> = self.routes.iter().map(|route| &route.host).collect();
@@ -239,43 +263,63 @@ impl Config {
     }
 }
 
+/// Desired Pipe state plus an optional replacement credential document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApplyRequest {
+    /// Complete manifest validated before privileged changes begin.
     pub config: Config,
     /// A supplied credential replaces the previous one; None retains it.
     pub credentials: Option<Value>,
 }
 
+/// Fixed privileged operations accepted by the helper; no arbitrary commands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Operation {
+    /// Read persisted configuration, engine availability and systemd state.
     Inspect,
+    /// Apply a complete configuration with rollback on verification failure.
     Apply {
+        /// Manifest and optional replacement tunnel credentials.
         request: ApplyRequest,
     },
+    /// Create Cloudflare resources and verify the independent connector.
     ConnectCloudflare {
+        /// Transient API token, selected zone and desired public route.
         request: crate::cloudflare::ConnectRequest,
     },
+    /// Stop and disable both units while retaining their configuration.
     Disable,
 }
 
+/// Unmodified systemd state for one independent data-plane unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnitStatus {
+    /// Full systemd unit name.
     pub unit: String,
+    /// Whether systemd found and loaded the unit definition.
     pub load_state: String,
+    /// High-level runtime state, such as active, inactive or failed.
     pub active_state: String,
+    /// Detailed runtime state, such as running or dead.
     pub sub_state: String,
+    /// Main process identifier, or zero when no main process is running.
     pub main_pid: u32,
 }
 
+/// Persisted Pipe configuration and live unit state returned to the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    /// Last installed manifest, absent before the first successful apply.
     pub config: Option<Config>,
+    /// Ingress and tunnel unit states, independent of API process lifetime.
     pub units: Vec<UnitStatus>,
+    /// Whether a usable Nginx executable exists on the managed host.
     pub nginx_available: bool,
+    /// Whether the managed cloudflared executable exists on the host.
     pub cloudflared_available: bool,
 }
 

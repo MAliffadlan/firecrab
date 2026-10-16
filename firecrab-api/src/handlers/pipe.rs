@@ -8,6 +8,7 @@ use crate::error::AppError;
 use crate::network::NetworkClient;
 use crate::server::RequestId;
 
+/// Send a fixed Pipe operation to the helper and hide internal errors from clients.
 async fn call(operation: Operation, request_id: RequestId) -> Result<Json<Snapshot>, AppError> {
     NetworkClient::from_env()
         .pipe(operation)
@@ -24,12 +25,14 @@ async fn call(operation: Operation, request_id: RequestId) -> Result<Json<Snapsh
         })
 }
 
+/// Return the persisted manifest and live independent-unit states.
 pub async fn inspect(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<Snapshot>, AppError> {
     call(Operation::Inspect, request_id).await
 }
 
+/// Validate manifest and replacement credentials before requesting a privileged apply.
 pub async fn apply(
     Extension(request_id): Extension<RequestId>,
     Json(request): Json<ApplyRequest>,
@@ -63,6 +66,7 @@ pub async fn apply(
     call(Operation::Apply { request }, request_id).await
 }
 
+/// Stop both data-plane units through the helper while retaining configuration.
 pub async fn disable(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<Snapshot>, AppError> {

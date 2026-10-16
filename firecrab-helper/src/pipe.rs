@@ -9,6 +9,7 @@ use firecrab_helper_protocol::pipe::{Operation, Snapshot};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+/// Locate the matching root-owned CLI through protected sibling or install-prefix paths.
 fn cli() -> Result<PathBuf, HelperFailure> {
     use std::os::unix::fs::MetadataExt;
     let executable = std::env::current_exe().map_err(failure)?;
@@ -36,12 +37,14 @@ fn cli() -> Result<PathBuf, HelperFailure> {
     })
 }
 
+/// Preserve CLI and IO error context in the helper's structured failure response.
 fn failure(error: impl std::fmt::Display) -> HelperFailure {
     HelperFailure::Internal {
         detail: error.to_string(),
     }
 }
 
+/// Run a fixed Pipe action with bounded execution time and optional secret stdin.
 async fn execute(
     cli: &Path,
     action: &str,
@@ -85,6 +88,7 @@ async fn execute(
         .map_err(|_| failure("pipe command timed out"))?
 }
 
+/// Validate a helper operation, execute its fixed CLI action and inspect the result.
 pub(super) async fn run(request: Operation) -> Result<Snapshot, HelperFailure> {
     let cli = cli()?;
     match request {
