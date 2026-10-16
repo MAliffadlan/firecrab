@@ -346,7 +346,15 @@ enum ManagementVMConfiguration {
         // on every start can leave the Mac routing that IP to the previous VM NIC.
         let network = VZVirtioNetworkDeviceConfiguration()
         network.macAddress = address
-        network.attachment = VZNATNetworkDeviceAttachment()
+        if let allocation = try ManagerAllocation.read(home: managedHomeURL), allocation.networkMode == "bridged" {
+            try allocation.validate()
+            guard let interface = VZBridgedNetworkInterface.networkInterfaces.first(where: {
+                $0.identifier == allocation.networkInterface
+            }) else { throw MicroManagerError.argument("bridged interface is unavailable") }
+            network.attachment = VZBridgedNetworkDeviceAttachment(interface: interface)
+        } else {
+            network.attachment = VZNATNetworkDeviceAttachment()
+        }
         return network
     }
 }

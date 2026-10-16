@@ -1967,6 +1967,18 @@ table.image-table .image-package-url a:hover {
 .host-platform-name { font-size: 1.05rem; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
 .host-platform-version { font-weight: 400; color: var(--shell); }
 .host-platform-details { font-size: 0.78rem; color: var(--shell); overflow-wrap: anywhere; }
+.manager-resources { border-top: 1px solid var(--line); margin-top: 1.5rem; padding-top: 1.2rem; }
+.manager-resources-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; }
+.manager-resources-heading h3 { margin: 0; font-size: 1rem; }
+.manager-resource-state { color: var(--shell); font-size: 0.75rem; }
+.manager-resource-note { color: var(--shell); font-size: 0.8rem; line-height: 1.6; overflow-wrap: anywhere; }
+.manager-resource-scope { color: var(--ink); border-left: 2px solid var(--ember); padding-left: 0.8rem; }
+.manager-resource-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.85rem; }
+.manager-resource-actions { display: flex; flex-wrap: wrap; gap: 0.65rem; grid-column: 1 / -1; }
+@media (max-width: 560px) {
+  .manager-resource-grid { grid-template-columns: minmax(0, 1fr); }
+  .manager-resource-actions .btn { flex: 1 1 auto; }
+}
 
 .detail-edit-input {
   font-family: var(--font-mono);

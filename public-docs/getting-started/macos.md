@@ -3,6 +3,8 @@
 microManager runs Firecrab in a managed Debian VM using Apple's `Virtualization.framework`.
 The dashboard and API are available at `http://127.0.0.1:5523/`.
 
+Change the management VM's CPU, RAM, disk, or network through the [resource CLI or Host screen](../guides/micromanager-resources.md).
+
 ## Requirements
 
 - Apple silicon, macOS 15 or later, and nested virtualization support.

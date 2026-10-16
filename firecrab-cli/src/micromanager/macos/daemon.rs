@@ -262,11 +262,17 @@ fn write_host_platform(paths: &DaemonPaths) -> Result<(), Error> {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_default();
-    let descriptor = host_platform::descriptor_json(
+    let controller_id = paths
+        .platform
+        .parent()
+        .and_then(Path::parent)
+        .and_then(|home| super::super::resource::controller_id(home).ok());
+    let descriptor = host_platform::descriptor_with_controller(
         HostOs::Macos,
         "macOS",
         &version,
         "Virtualization.framework",
+        controller_id,
     );
     write_atomic(&paths.platform, format!("{descriptor}\n").as_bytes(), 0o600)
 }
@@ -499,10 +505,15 @@ vm_process="$root/runtime/vm-process"
 vm_pid=
 tunnel_pid=
 relay_pid=
+resource_pid=
 cleanup() {{
   trap - EXIT INT TERM
   set +e
   rm -f "$ready"
+  if [ -n "$resource_pid" ] && kill -0 "$resource_pid" 2>/dev/null; then
+    kill -TERM "$resource_pid" 2>/dev/null
+    wait "$resource_pid" 2>/dev/null
+  fi
   if [ -n "$relay_pid" ] && kill -0 "$relay_pid" 2>/dev/null; then
     kill -TERM "$relay_pid" 2>/dev/null
     wait "$relay_pid" 2>/dev/null
@@ -532,6 +543,9 @@ cleanup() {{
 }}
 trap cleanup EXIT INT TERM
 rm -f "$ready" "$manager_ready"
+FIRECRAB_MICROMANAGER_HOME="$root" FIRECRAB_MICROMANAGER_HELPER="$helper" \
+  "$cli" service resource-server --home "$root" &
+resource_pid=$!
 FIRECRAB_MICROMANAGER_HOME="$root" "$helper" run >>"$console" 2>&1 &
 vm_pid=$!
 printf 'vm_pid=%s\n' "$vm_pid" >"$vm_process.tmp"
@@ -620,6 +634,13 @@ while :; do
     sleep 5
     "$cli" service forward-ports --key "$key" --known-hosts "$known_hosts" "$ip" &
     relay_pid=$!
+  fi
+  if ! kill -0 "$resource_pid" 2>/dev/null; then
+    wait "$resource_pid" 2>/dev/null
+    sleep 5
+    FIRECRAB_MICROMANAGER_HOME="$root" FIRECRAB_MICROMANAGER_HELPER="$helper" \
+      "$cli" service resource-server --home "$root" &
+    resource_pid=$!
   fi
   sleep 1
 done

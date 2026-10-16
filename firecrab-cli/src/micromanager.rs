@@ -12,6 +12,8 @@ mod managed_home;
 mod manifest;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod os_repair;
+mod resource;
+mod resource_server;
 mod runtime;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod snapshot;
@@ -76,6 +78,21 @@ fn write_retrying_transient_errors(writer: &mut impl Write, mut bytes: &[u8]) {
 /// VM. Common lifecycle verbs share one definition; platform tools are gated.
 #[derive(Subcommand)]
 pub enum Command {
+    /// Show or change management VM CPU, RAM, disk, and networking.
+    #[command(name = "resorce", visible_alias = "resource")]
+    Resource {
+        #[command(flatten)]
+        options: resource::Options,
+    },
+    /// Native, loopback-only resource control used by the Host screen.
+    #[command(hide = true)]
+    ResourceServer {
+        #[arg(long)]
+        home: Option<std::path::PathBuf>,
+    },
+    /// Detached apply worker; survives the managed service restart.
+    #[command(hide = true)]
+    ResourceApply { id: String },
     /// Install microManager and provision the managed Debian VM.
     Install {
         /// Skip the download confirmation prompt (implied when not attached to a TTY).

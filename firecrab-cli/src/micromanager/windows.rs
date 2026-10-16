@@ -7,17 +7,20 @@ mod daemon;
 mod dev;
 mod doctor;
 mod filesystem;
-mod lifecycle;
+pub(super) mod lifecycle;
 mod provision;
 mod repair;
+pub(super) mod resource;
 mod wsl;
 
 use super::{Command, DevCommand, debug, managed_home, manifest};
 use doctor::Status;
-use wsl::DISTRO_NAME;
+pub(super) use wsl::DISTRO_NAME;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Resource(#[from] super::resource::Error),
     #[error("the host is not ready; run `firecrab service doctor` and fix the FAILED checks")]
     NotReady,
     #[error("could not render the capability report: {0}")]
@@ -52,6 +55,9 @@ pub enum Error {
 
 pub fn run(command: Command) -> Result<i32, Error> {
     match command {
+        Command::Resource { options } => Ok(super::resource::run(options)?),
+        Command::ResourceServer { home } => Ok(super::resource_server::run(home)?),
+        Command::ResourceApply { id } => Ok(super::resource::run_apply(&id)?),
         Command::Install { yes } => run_install(false, yes),
         Command::Reinstall { yes } => run_install(true, yes),
         #[cfg(any(target_os = "macos", target_os = "windows", test))]
