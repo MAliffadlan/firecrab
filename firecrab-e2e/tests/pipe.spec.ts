@@ -9,12 +9,25 @@ const initial = {
   nginxAvailable: true, cloudflaredAvailable: true,
 };
 
-async function open(page: Page, options: { unavailable?: boolean; locale?: string; reject?: boolean } = {}) {
+async function open(page: Page, options: { unavailable?: boolean; locale?: string; reject?: boolean; cloudflareFailure?: string; missingConnector?: boolean; holdConnection?: boolean } = {}) {
   let snapshot = structuredClone(initial);
   const writes: { config: typeof initial.config; credentials: unknown }[] = [];
   let unavailable = options.unavailable ?? false;
+  snapshot.cloudflaredAvailable = !options.missingConnector;
+  const connections: { apiToken: string; zoneId: string; hostname: string; config: typeof initial.config }[] = [];
+  let finishConnection: () => void = () => {};
+  const connectionGate = new Promise<void>(resolve => { finishConnection = resolve; });
   await page.route(/^https?:\/\/[^/]+\/api\//, async route => {
     const path = new URL(route.request().url()).pathname;
+    if (path === "/api/pipe/cloudflare/zones") return route.fulfill({ json: [{ id: "a".repeat(32), name: "example.com", status: "active", account: { id: "b".repeat(32), name: "Example" } }] });
+    if (path === "/api/pipe/cloudflare/connect") {
+      const body = route.request().postDataJSON(); connections.push(body);
+      if (options.cloudflareFailure) return route.fulfill({ status: 400, json: { error: { message: "request validation failed", fields: { cloudflare: options.cloudflareFailure } } } });
+      snapshot = { ...snapshot, cloudflaredAvailable: true, config: { ...body.config, tunnel: { id: "11111111-1111-4111-8111-111111111111", credentialsFile: "/etc/firecrab/pipe/secrets/tunnel-credentials.json" } } };
+      snapshot.units[1] = { ...snapshot.units[1], loadState: "loaded", activeState: "active", subState: "running", mainPid: 202 };
+      if (options.holdConnection) await connectionGate;
+      return route.fulfill({ json: snapshot });
+    }
     if (path === "/api/vms") return route.fulfill({ json: [] });
     if (path === "/api/update") return route.fulfill({ json: { current: "0.3.1", latest: "0.3.1", updateAvailable: false } });
     if (path === "/api/pipe/disable") { snapshot.units.forEach(unit => { unit.activeState = "inactive"; unit.mainPid = 0; }); return route.fulfill({ json: snapshot }); }
@@ -32,7 +45,7 @@ async function open(page: Page, options: { unavailable?: boolean; locale?: strin
   });
   await page.addInitScript(locale => localStorage.setItem("firecrab.locale", locale), options.locale ?? "en");
   await page.goto("/#/pipe");
-  return { writes, unavailable: () => { unavailable = true; } };
+  return { writes, connections, finishConnection, unavailable: () => { unavailable = true; } };
 }
 
 test.describe("Pipe dashboard @dashboard", () => {
@@ -74,6 +87,7 @@ test.describe("Pipe dashboard @dashboard", () => {
   test("uses the existing responsive shell and clears credentials after saving", async ({ page }, info) => {
     await page.setViewportSize({ width: 390, height: 844 });
     const mock = await open(page, { locale: "ko" });
+    await page.getByText("기존 터널 설정 열기", { exact: true }).click();
     await page.getByRole("checkbox").check();
     await page.getByLabel("Tunnel UUID").fill("11111111-1111-4111-8111-111111111111");
     const credentials = { AccountTag: "fixture", TunnelID: "11111111-1111-4111-8111-111111111111", TunnelSecret: "private-fixture" };
@@ -87,5 +101,72 @@ test.describe("Pipe dashboard @dashboard", () => {
     await page.getByRole("button", { name: "중지", exact: true }).click();
     await expect(page.getByText("Pipe를 중지했다.", { exact: false })).toBeVisible();
     await expect(page.locator(".state-badge.running")).toHaveCount(0);
+  });
+
+  test("guides token creation and connects without UUID, JSON or a preinstalled connector", async ({ page }, info) => {
+    const mock = await open(page, { missingConnector: true });
+    const panel = page.getByRole("region", { name: "Connect Cloudflare", exact: true });
+    await panel.getByText("How to create an API token", { exact: true }).click();
+    await expect(panel.getByRole("cell", { name: "Cloudflare Tunnel", exact: true })).toBeVisible();
+    await expect(panel.getByRole("link", { name: "Open Cloudflare API Tokens" })).toHaveAttribute("href", "https://dash.cloudflare.com/profile/api-tokens");
+    const token = "scoped-cloudflare-token-01234567890123456789";
+    await panel.getByLabel("Cloudflare API token", { exact: true }).fill(token);
+    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toHaveAttribute("type", "password");
+    await panel.getByRole("button", { name: "Load domains", exact: true }).click();
+    await expect(panel.getByLabel("Cloudflare domain", { exact: true })).toHaveValue("a".repeat(32));
+    await panel.getByLabel("Subdomain", { exact: true }).fill("demo");
+    await panel.getByLabel("Public app addresses", { exact: true }).fill("127.0.0.1:18081, 127.0.0.1:18082");
+    await page.screenshot({ path: info.outputPath("cloudflare-guided-desktop.png"), fullPage: true });
+    await panel.getByRole("button", { name: "Connect and publish", exact: true }).click();
+    await expect(panel.getByRole("link", { name: "https://demo.example.com" })).toBeVisible();
+    expect(mock.connections).toHaveLength(1);
+    expect(mock.connections[0]).toMatchObject({ apiToken: token, hostname: "demo.example.com", zoneId: "a".repeat(32) });
+    expect(mock.connections[0].config.routes.at(-1)).toEqual({ host: "demo.example.com", pathPrefix: "/", upstreams: ["127.0.0.1:18081", "127.0.0.1:18082"] });
+    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toHaveCount(0);
+    expect(await page.evaluate(token => JSON.stringify(localStorage).includes(token), token)).toBe(false);
+    expect(mock.writes).toHaveLength(0);
+  });
+
+  test("keeps connection inputs and existing routes when DNS setup is rejected", async ({ page }) => {
+    const mock = await open(page, { cloudflareFailure: "A DNS record already uses this hostname; choose an unused subdomain" });
+    const panel = page.getByRole("region", { name: "Connect Cloudflare", exact: true });
+    await panel.getByLabel("Cloudflare API token", { exact: true }).fill("scoped-cloudflare-token-01234567890123456789");
+    await panel.getByRole("button", { name: "Load domains", exact: true }).click();
+    await panel.getByLabel("Public app addresses", { exact: true }).fill("127.0.0.1:18081");
+    await panel.getByRole("button", { name: "Connect and publish", exact: true }).click();
+    await expect(panel.getByRole("alert")).toContainText("choose an unused subdomain");
+    await expect(panel.getByLabel("Subdomain", { exact: true })).toHaveValue("app");
+    await expect(page.getByRole("region", { name: "Routes", exact: true })).toContainText("app.example.com");
+    await expect(panel.getByRole("link", { name: "https://app.example.com" })).toHaveCount(0);
+    expect(mock.writes).toHaveLength(0);
+  });
+
+  test("shows Korean token instructions and domain setup without mobile overflow", async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open(page, { locale: "ko" });
+    const panel = page.getByRole("region", { name: "Cloudflare 연결", exact: true });
+    await panel.getByText("API 토큰 발급 방법", { exact: true }).click();
+    await panel.getByLabel("Cloudflare API token", { exact: true }).fill("scoped-cloudflare-token-01234567890123456789");
+    await panel.getByRole("button", { name: "도메인 불러오기", exact: true }).click();
+    await expect(panel.getByLabel("Cloudflare 도메인", { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath("cloudflare-guided-mobile-ko.png"), fullPage: true });
+  });
+
+  test("keeps setup visible while connection verification is pending across a status poll", async ({ page }) => {
+    await page.clock.install();
+    const mock = await open(page, { holdConnection: true });
+    const panel = page.getByRole("region", { name: "Connect Cloudflare", exact: true });
+    await panel.getByLabel("Cloudflare API token", { exact: true }).fill("scoped-cloudflare-token-01234567890123456789");
+    await panel.getByRole("button", { name: "Load domains", exact: true }).click();
+    await panel.getByLabel("Public app addresses", { exact: true }).fill("127.0.0.1:18081");
+    await panel.getByRole("button", { name: "Connect and publish", exact: true }).click();
+    await expect.poll(() => mock.connections.length).toBe(1);
+    await page.clock.runFor(8_100);
+    await expect(panel.getByRole("button", { name: "Connecting…", exact: true })).toBeDisabled();
+    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toBeVisible();
+    await expect(panel.getByRole("link", { name: "https://app.example.com" })).toHaveCount(0);
+    mock.finishConnection();
+    await expect(panel.getByRole("link", { name: "https://app.example.com" })).toBeVisible();
   });
 });

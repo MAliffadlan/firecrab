@@ -75,7 +75,12 @@ async fn execute(
         }
         Ok(output.stdout)
     };
-    tokio::time::timeout(Duration::from_secs(220), task)
+    let timeout = if action == "cloudflare-connect" {
+        420
+    } else {
+        220
+    };
+    tokio::time::timeout(Duration::from_secs(timeout), task)
         .await
         .map_err(|_| failure("pipe command timed out"))?
 }
@@ -86,6 +91,17 @@ pub(super) async fn run(request: Operation) -> Result<Snapshot, HelperFailure> {
         Operation::Inspect => {}
         Operation::Disable => {
             execute(&cli, "disable", None).await?;
+        }
+        Operation::ConnectCloudflare { request } => {
+            request
+                .validate()
+                .map_err(|detail| HelperFailure::InvalidRequest { detail })?;
+            execute(
+                &cli,
+                "cloudflare-connect",
+                Some(serde_json::to_vec(&request).map_err(failure)?),
+            )
+            .await?;
         }
         Operation::Apply { request } => {
             request

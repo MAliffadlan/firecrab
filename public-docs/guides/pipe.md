@@ -18,8 +18,8 @@ reconciliation stops incompatible shims. This does not guarantee traffic across
 incompatible VM protocol upgrades.
 
 This slice routes to existing reachable app addresses. The MicroService model,
-app deployment automation, secret store, automatic VM replacement, and Cloudflare
-DNS automation are separate #335 work.
+app deployment automation, secret store, and automatic VM replacement are separate
+#335 work. Guided Cloudflare setup creates DNS for one chosen public hostname.
 
 ## Requirements
 
@@ -29,7 +29,7 @@ DNS automation are separate #335 work.
   `/usr/bin/nginx`, then PATH. `apply --nginx` accepts an external executable.
 - Reachable app ports. Existing VM port forwards can provide loopback upstreams
   such as `127.0.0.1:18081`.
-- For public access, a locally managed named Cloudflare Tunnel and its JSON
+- For advanced manual public access, a locally managed named Cloudflare Tunnel and its JSON
   credentials. Omit `tunnel` for ingress-only operation.
 
 The listener is HTTP on loopback, on port >= 1024. Public TLS terminates at
@@ -90,10 +90,16 @@ Removing the last route and saving produces HTTP 404 for all external requests.
 Editing routes does not apply them until Save and apply. Polling preserves local
 edits. API connection failure clears stale service badges.
 
-Cloudflare Tunnel is optional. Supply its UUID and credential JSON when creating
-or replacing it. Leave credentials blank to retain the saved credential. The
-input clears after a successful save. GET responses never include credential
-contents. Cloudflare DNS records must be configured separately.
+Cloudflare Tunnel is optional. Use **Connect Cloudflare Tunnel** for guided setup:
+follow the token issuance instructions, load domains, choose a hostname and app
+addresses, then select **Connect and publish**. Firecrab creates the tunnel and
+DNS and installs the connector if missing. The setup API token is not saved.
+See [Cloudflare token setup and connection](cloudflare-tunnel.md).
+
+**Advanced tunnel configuration** retains the UUID and credential JSON flow.
+Leave credentials blank to retain the saved credential. The input clears after
+saving. GET responses never include credentials. Manual tunnels and additional
+hostnames require their own Cloudflare DNS records.
 
 The API uses the authenticated helper socket for apply, inspect, and disable.
 It does not accept executable paths or arbitrary commands from dashboard requests.

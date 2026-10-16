@@ -1,5 +1,7 @@
 //! The service traffic path is owned by systemd, never by the API process.
 
+#[cfg(any(target_os = "linux", test))]
+mod cloudflare;
 mod config;
 #[cfg(any(target_os = "linux", test))]
 mod engines;
@@ -46,6 +48,9 @@ pub enum Command {
     Inspect,
     #[cfg(target_os = "linux")]
     #[command(hide = true)]
+    CloudflareConnect,
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
     ApplyManaged,
     #[cfg(target_os = "linux")]
     #[command(hide = true)]
@@ -59,6 +64,8 @@ pub enum Command {
 
 pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        #[cfg(target_os = "linux")]
+        Command::CloudflareConnect => cloudflare::connect(),
         #[cfg(target_os = "linux")]
         Command::Inspect => host::inspect(),
         #[cfg(target_os = "linux")]

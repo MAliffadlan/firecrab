@@ -60,8 +60,16 @@ impl NetworkClient {
         &self,
         request: firecrab_helper_protocol::pipe::Operation,
     ) -> Result<firecrab_helper_protocol::pipe::Snapshot, NetworkError> {
+        let timeout = if matches!(
+            &request,
+            firecrab_helper_protocol::pipe::Operation::ConnectCloudflare { .. }
+        ) {
+            450
+        } else {
+            240
+        };
         tokio::time::timeout(
-            Duration::from_secs(240),
+            Duration::from_secs(timeout),
             self.exchange(NetworkRequest::Pipe { request }),
         )
         .await

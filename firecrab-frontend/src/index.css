@@ -2074,6 +2074,11 @@ table.image-table .image-package-url a:hover {
 
 /* Pipe uses the existing panels, tables and field tokens. */
 .pipe-controls { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; margin-top: 1rem; }
+.cloudflare-help { margin-top: 1rem; }
+.cloudflare-help summary { cursor: pointer; padding-block: .4rem; }
+.cloudflare-help ol { padding-left: 1.4rem; line-height: 1.7; }
+.cloudflare-help p { line-height: 1.6; overflow-wrap: anywhere; }
+.cloudflare-connect .field > span:first-child { color: var(--shell); font-family: var(--font-mono); font-size: .75rem; }
 .pipe-controls .field { min-width: min(100%, 15rem); }
 .pipe-controls .field > span { color: var(--shell); font-family: var(--font-mono); font-size: .75rem; }
 .pipe-route-form { margin-bottom: 1rem; }

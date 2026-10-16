@@ -251,7 +251,12 @@ pub struct ApplyRequest {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Operation {
     Inspect,
-    Apply { request: ApplyRequest },
+    Apply {
+        request: ApplyRequest,
+    },
+    ConnectCloudflare {
+        request: crate::cloudflare::ConnectRequest,
+    },
     Disable,
 }
 

@@ -16,7 +16,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const INGRESS_TEMPLATE: &str = include_str!("../../../packaging/systemd/firecrab-ingress.service");
 const TUNNEL_TEMPLATE: &str = include_str!("../../../packaging/systemd/firecrab-tunnel.service");
 
-fn require_root() -> Result<()> {
+pub(super) fn require_root() -> Result<()> {
     if !nix::unistd::geteuid().is_root() {
         return Err("pipe apply/disable requires root; run this command with sudo".into());
     }
@@ -26,7 +26,7 @@ fn require_root() -> Result<()> {
     Ok(())
 }
 
-fn lock() -> Result<fs::File> {
+pub(super) fn lock() -> Result<fs::File> {
     let file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -177,9 +177,18 @@ pub(super) fn apply(
     nginx: Option<&Path>,
     cloudflared: Option<&Path>,
 ) -> Result<()> {
-    let config = Config::read(config_file)?;
     require_root()?;
     let _lock = lock()?;
+    apply_locked(config_file, nginx, cloudflared, || Ok(()))
+}
+
+pub(super) fn apply_locked(
+    config_file: &Path,
+    nginx: Option<&Path>,
+    cloudflared: Option<&Path>,
+    verify: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let config = Config::read(config_file)?;
     let env = ServiceEnv::from_process_env();
     let nginx_path = nginx.map(Path::to_path_buf).unwrap_or_else(|| {
         super::engines::nginx_binary().unwrap_or_else(|| PathBuf::from("/usr/sbin/nginx"))
@@ -210,13 +219,16 @@ pub(super) fn apply(
         &config,
         &nginx,
         &cloudflared,
+        verify,
     )?;
     println!(
         "PipeIngress configured at {}; routes are owned by {INGRESS_UNIT}",
         config.listen
     );
     if config.tunnel.is_some() {
-        println!("PipeTunnel connected; configure each public DNS name to point at the tunnel");
+        println!(
+            "PipeTunnel service started; configure each public DNS name to point at the tunnel"
+        );
     }
     Ok(())
 }
@@ -228,6 +240,7 @@ fn apply_with(
     config: &Config,
     nginx: &Path,
     cloudflared: &Path,
+    verify: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let confdir_text = unit_path(confdir)?;
     unit_path(unitdir)?;
@@ -356,7 +369,7 @@ fn apply_with(
                 command(runner, "systemctl", &[verb, TUNNEL_UNIT])?;
             }
         }
-        Ok(())
+        verify()
     };
     if let Err(error) = apply() {
         let rollback = || -> Result<()> {
@@ -409,7 +422,7 @@ fn apply_with(
     Ok(())
 }
 
-fn snapshot(include_config: bool) -> Result<Snapshot> {
+pub(super) fn snapshot(include_config: bool) -> Result<Snapshot> {
     let env = ServiceEnv::from_process_env();
     let path = env.confdir.join("pipe/manifest.json");
     let config = if include_config && path.exists() {

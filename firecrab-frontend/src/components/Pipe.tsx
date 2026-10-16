@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { applyPipe, disablePipe, getPipe, type PipeConfig, type PipeRoute, type PipeSnapshot } from "../api/pipe";
 import { useI18n } from "../i18n";
+import CloudflareConnect from "./CloudflareConnect";
 
 const EMPTY: PipeConfig = { listen: "127.0.0.1:8080", routes: [], tunnel: null };
 
@@ -19,12 +20,14 @@ export default function Pipe() {
   const [busy, setBusy] = useState(false);
   const initialized = useRef(false);
   const revision = useRef(0);
+  const mutating = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let controller: AbortController | undefined;
     const refresh = async () => {
+      if (mutating.current) { timer = setTimeout(refresh, 8_000); return; }
       const current = revision.current;
       controller = new AbortController();
       const deadline = setTimeout(() => controller?.abort(), 10_000);
@@ -64,20 +67,20 @@ export default function Pipe() {
     let secret: unknown = null;
     try { if (draft.tunnel && credentials.trim()) secret = JSON.parse(credentials); }
     catch { setError(t("Tunnel credentials must be valid JSON.", "터널 인증 정보는 올바른 JSON이어야 한다.")); return; }
-    setBusy(true); revision.current++; setError(null); setNotice(null);
+    mutating.current = true; setBusy(true); revision.current++; setError(null); setNotice(null);
     try {
       const next = await applyPipe(draft, secret);
       setSnapshot(next); setDraft(next.config ?? draft); setDirty(false); setCredentials("");
       setNotice(t("Routes applied. Existing requests continue during reload.", "라우트를 적용했다. 설정 전환 중 기존 요청을 계속 처리한다."));
     } catch (failure) { setError((failure as Error).message); }
-    finally { setBusy(false); revision.current++; }
+    finally { mutating.current = false; setBusy(false); revision.current++; }
   }
   async function stop() {
     if (busy || !window.confirm(t("Stop Pipe? Requests through these routes will stop.", "Pipe를 중지할까요? 이 경로의 요청 전달이 중지된다."))) return;
-    setBusy(true); revision.current++; setError(null); setNotice(null);
+    mutating.current = true; setBusy(true); revision.current++; setError(null); setNotice(null);
     try { setSnapshot(await disablePipe()); setNotice(t("Pipe stopped. Saved routes are retained.", "Pipe를 중지했다. 저장한 라우트는 유지한다.")); }
     catch (failure) { setError((failure as Error).message); }
-    finally { setBusy(false); revision.current++; }
+    finally { mutating.current = false; setBusy(false); revision.current++; }
   }
 
   return <div className="stack">
@@ -101,6 +104,10 @@ export default function Pipe() {
       </div>
     </section>
 
+    <CloudflareConnect config={draft} snapshot={snapshot} busy={busy}
+      onBusy={value => { mutating.current = value; setBusy(value); revision.current++; }}
+      onConnected={next => { setSnapshot(next); setDraft(next.config ?? draft); setDirty(false); setCredentials(""); setError(null); }} />
+
     <section className="panel" aria-label={t("Routes", "라우트")}>
       <h2 className="panel-title">{t("Routes", "라우트")}</h2>
       <form className="create-grid pipe-route-form" onSubmit={addRoute}>
@@ -115,13 +122,16 @@ export default function Pipe() {
     </section>
 
     <section className="panel" aria-label="Cloudflare Tunnel">
-      <h2 className="panel-title">{t("Cloudflare Tunnel (optional)", "Cloudflare Tunnel (선택)")}</h2>
+      <h2 className="panel-title">{t("Advanced tunnel configuration", "고급 터널 설정")}</h2>
+      <details className="cloudflare-help"><summary>{t("Open existing tunnel settings", "기존 터널 설정 열기")}</summary>
+      <p className="poll-note">{t("Use this only for an existing locally-managed tunnel. New connections can use the guided setup above.", "기존 로컬 관리 터널을 연결할 때 사용한다. 새 연결은 위의 간편 연결을 사용한다.")}</p>
       <label className="checkbox-line"><input type="checkbox" checked={draft.tunnel !== null} disabled={busy} onChange={event => { setCredentials(""); change({ ...draft, tunnel: event.target.checked ? { id: "", credentialsFile: "credentials.json" } : null }); }} />{t("Enable public access through Cloudflare", "Cloudflare로 외부 접속 사용")}</label>
       {draft.tunnel && <div className="pipe-tunnel-fields">
         <div className="field"><label htmlFor="pipe-tunnel-id">Tunnel UUID</label><input id="pipe-tunnel-id" value={draft.tunnel.id} disabled={busy} onChange={event => change({ ...draft, tunnel: { ...draft.tunnel!, id: event.target.value.trim() } })} /></div>
         <div className="field"><label htmlFor="pipe-credentials">{t("Credentials JSON", "인증 정보 JSON")}</label><textarea id="pipe-credentials" className="pipe-credentials" autoComplete="off" spellCheck={false} value={credentials} disabled={busy} onChange={event => { setCredentials(event.target.value); setDirty(true); }} placeholder={t("Paste the tunnel credentials. Leave blank to keep saved credentials.", "터널 인증 정보를 입력한다. 비워 두면 저장한 인증 정보를 유지한다.")} /><span className="poll-note">{t("Credentials are cleared after saving and are never returned to the dashboard.", "저장 후 입력을 지운다. 저장한 인증 정보는 화면으로 반환하지 않는다.")}</span></div>
         {!snapshot?.cloudflaredAvailable && <p className="field-error">{t("Install the connector with firecrab pipe install.", "firecrab pipe install로 연결 프로그램을 설치한다.")}</p>}
       </div>}
+      </details>
     </section>
   </div>;
 }
