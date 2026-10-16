@@ -1,15 +1,19 @@
+//! SQLite storage for service configuration and the latest deployment snapshot.
+
 use firecrab_api_types::{MicroServiceDeployment, MicroServiceResponse, MicroServiceSpec};
 use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use super::{PersistenceError, Store};
 
+/// Store configuration as JSON while enforcing unique service names in SQLite.
 pub(super) const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS micro_services (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     spec TEXT NOT NULL
 ) STRICT";
 
+/// Keep one durable deployment snapshot per service.
 pub(super) const CREATE_DEPLOYMENTS_SQL: &str =
     "CREATE TABLE IF NOT EXISTS micro_service_deployments (
     service_id TEXT PRIMARY KEY,
@@ -17,6 +21,7 @@ pub(super) const CREATE_DEPLOYMENTS_SQL: &str =
 ) STRICT";
 
 impl Store {
+    /// List saved configurations in stable name and identifier order.
     pub fn list_micro_services(&self) -> Result<Vec<MicroServiceResponse>, PersistenceError> {
         let conn = self.lock();
         let mut statement =
@@ -29,6 +34,7 @@ impl Store {
         .collect()
     }
 
+    /// Read one configuration, returning `None` if the identifier is unknown.
     pub fn micro_service(
         &self,
         id: Uuid,
@@ -44,6 +50,7 @@ impl Store {
         row.map(|(id, spec)| decode(id, spec)).transpose()
     }
 
+    /// Insert a configuration, rejecting names already assigned to another service.
     pub fn insert_micro_service(
         &self,
         service: &MicroServiceResponse,
@@ -74,6 +81,8 @@ impl Store {
         Ok(changed != 0)
     }
 
+    /// Delete a configuration and its deployment record in one transaction.
+    /// Return whether the service existed; the caller must clean up its VMs first.
     pub fn delete_micro_service(&self, id: Uuid) -> Result<bool, PersistenceError> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
@@ -86,6 +95,7 @@ impl Store {
         Ok(changed != 0)
     }
 
+    /// Read the latest saved deployment, reporting malformed JSON as a corrupt record.
     pub fn service_deployment(
         &self,
         id: Uuid,
@@ -107,6 +117,7 @@ impl Store {
         .transpose()
     }
 
+    /// Insert or replace the latest deployment snapshot for its service.
     pub fn save_service_deployment(
         &self,
         deployment: &MicroServiceDeployment,
@@ -125,6 +136,7 @@ impl Store {
     }
 }
 
+/// Serialize configuration with its service identifier attached to any error.
 fn encode(service: &MicroServiceResponse) -> Result<String, PersistenceError> {
     serde_json::to_string(&service.spec).map_err(|error| PersistenceError::CorruptRecord {
         id: service.id.to_string(),
@@ -132,6 +144,7 @@ fn encode(service: &MicroServiceResponse) -> Result<String, PersistenceError> {
     })
 }
 
+/// Validate a stored UUID and deserialize its configuration JSON.
 fn decode(id: String, spec: String) -> Result<MicroServiceResponse, PersistenceError> {
     let parsed = Uuid::parse_str(&id).map_err(|error| PersistenceError::CorruptRecord {
         id: id.clone(),
@@ -145,6 +158,7 @@ fn decode(id: String, spec: String) -> Result<MicroServiceResponse, PersistenceE
     Ok(MicroServiceResponse { id: parsed, spec })
 }
 
+/// Map the unique-name constraint to a service error; preserve other database errors.
 fn write_error(error: rusqlite::Error, name: &str) -> PersistenceError {
     if let rusqlite::Error::SqliteFailure(code, _) = &error
         && code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE

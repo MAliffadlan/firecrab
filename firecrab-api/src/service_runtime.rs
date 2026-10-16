@@ -24,6 +24,7 @@ use crate::oci::{self, ImageReference, ImageVersion, Sha256Digest};
 use crate::server::RequestId;
 use crate::state::AppState;
 
+/// Validate deployment settings, persist a queued snapshot and start background work.
 pub async fn deploy(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
@@ -75,6 +76,7 @@ pub async fn deploy(
     Ok((StatusCode::ACCEPTED, Json(deployment)))
 }
 
+/// Read the latest deployment with live VM states and application health checks.
 pub async fn get(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
@@ -96,6 +98,7 @@ pub async fn get(
     Ok(Json(Some(deployment)))
 }
 
+/// Queue cleanup of the deployment's owned VMs, rejecting concurrent operations.
 pub async fn stop(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
@@ -140,6 +143,7 @@ pub async fn stop(
     Ok((StatusCode::ACCEPTED, Json(deployment)))
 }
 
+/// Reject mutations while a deployment is busy or still owns any VM identifiers.
 pub(crate) async fn ensure_editable(
     state: &AppState,
     id: Uuid,
@@ -158,6 +162,7 @@ pub(crate) async fn ensure_editable(
     Ok(())
 }
 
+/// Reject unsupported routing and secret settings or invalid host-port ranges.
 fn deployment_fields(
     spec: &MicroServiceSpec,
     request: &DeployMicroServiceRequest,
@@ -192,6 +197,7 @@ fn deployment_fields(
     fields
 }
 
+/// Persist a snapshot without blocking the async executor on SQLite work.
 async fn save(state: &AppState, deployment: &MicroServiceDeployment) -> Result<(), String> {
     let store = state.store.clone();
     let record = deployment.clone();
@@ -202,6 +208,7 @@ async fn save(state: &AppState, deployment: &MicroServiceDeployment) -> Result<(
     .map_err(|_| "Could not save deployment state".to_owned())
 }
 
+/// Record a phase transition and progress message, retaining the latest 128 entries.
 async fn phase(
     state: &AppState,
     deployment: &mut MicroServiceDeployment,
@@ -216,6 +223,7 @@ async fn phase(
     save(state, deployment).await
 }
 
+/// Run under the deployment permit and clean up owned VMs if deployment fails.
 async fn run_deploy(state: AppState, mut deployment: MicroServiceDeployment) {
     let Ok(_permit) = state.service_deploy_permits.acquire().await else {
         return;
@@ -233,6 +241,7 @@ async fn run_deploy(state: AppState, mut deployment: MicroServiceDeployment) {
     }
 }
 
+/// Check capacity, import a pinned image and boot each replica until HTTP health passes.
 async fn execute(state: &AppState, deployment: &mut MicroServiceDeployment) -> Result<(), String> {
     check_capacity(state, &deployment.spec).await?;
     let store = state.store.clone();
@@ -443,6 +452,7 @@ async fn execute(state: &AppState, deployment: &mut MicroServiceDeployment) -> R
     .await
 }
 
+/// Reuse the `services` network or create it on a free subnet in `172.30.0.0/16`.
 async fn default_network(state: &AppState, request_id: Uuid) -> Result<Uuid, String> {
     let store = state.store.clone();
     let networks = database(request_id, move || store.list_micro_networks())
@@ -483,6 +493,7 @@ async fn default_network(state: &AppState, request_id: Uuid) -> Result<Uuid, Str
     Ok(network.id)
 }
 
+/// Require memory for every replica's VM overhead and a 256 MiB host reserve.
 async fn check_capacity(state: &AppState, spec: &MicroServiceSpec) -> Result<(), String> {
     let Json(host) = crate::handlers::network::get_host_status(State(state.clone())).await;
     let required = u64::from(
@@ -496,6 +507,7 @@ async fn check_capacity(state: &AppState, spec: &MicroServiceSpec) -> Result<(),
     Ok(())
 }
 
+/// Build a direct HTTP probe client with no proxy, no redirects and a two-second timeout.
 fn health_client() -> reqwest::Client {
     reqwest::Client::builder()
         .no_proxy()
@@ -505,6 +517,7 @@ fn health_client() -> reqwest::Client {
         .expect("health HTTP client")
 }
 
+/// Check for an HTTP success response at the guest's application health endpoint.
 async fn healthy(
     client: &reqwest::Client,
     spec: &MicroServiceSpec,
@@ -520,6 +533,7 @@ async fn healthy(
         .is_ok_and(|response| response.status().is_success())
 }
 
+/// Retry health probes with one-second pauses until the post-boot startup timeout.
 async fn wait_healthy(spec: &MicroServiceSpec, instance: &ServiceInstance) -> Result<(), String> {
     let client = health_client();
     tokio::time::timeout(
@@ -542,6 +556,7 @@ async fn wait_healthy(spec: &MicroServiceSpec, instance: &ServiceInstance) -> Re
     })
 }
 
+/// Refresh the response snapshot and mark missing or unhealthy running replicas degraded.
 async fn refresh_instances(state: &AppState, deployment: &mut MicroServiceDeployment) {
     {
         let vms = state
@@ -578,6 +593,8 @@ async fn refresh_instances(state: &AppState, deployment: &mut MicroServiceDeploy
     }
 }
 
+/// Drain on Stop, then delete only owned VMs, persisting each successful removal.
+/// Retain unremoved identifiers if cleanup fails so a later Stop can retry.
 async fn cleanup(state: &AppState, deployment: &mut MicroServiceDeployment) -> Result<(), String> {
     if deployment.phase == ServicePhase::Stopping && deployment.spec.drain_timeout > 0 {
         let mut draining = false;

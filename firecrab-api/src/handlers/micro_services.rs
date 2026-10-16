@@ -16,6 +16,7 @@ use crate::persistence::PersistenceError;
 use crate::server::RequestId;
 use crate::state::AppState;
 
+/// List saved service configurations in name order.
 pub async fn list(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
@@ -25,6 +26,7 @@ pub async fn list(
         .map(Json)
 }
 
+/// Read a configuration by UUID, returning 404 if it does not exist.
 pub async fn get(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
@@ -37,6 +39,7 @@ pub async fn get(
         .ok_or_else(|| AppError::not_found(request_id.0))
 }
 
+/// Validate and save a new configuration without starting any VMs.
 pub async fn create(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
@@ -55,6 +58,7 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(service)))
 }
 
+/// Replace all configuration fields after confirming that no deployment owns VMs.
 pub async fn update(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
@@ -77,6 +81,7 @@ pub async fn update(
     Ok(Json(service))
 }
 
+/// Remove a service and its deployment record after all owned VMs are cleaned up.
 pub async fn delete(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
@@ -111,6 +116,7 @@ pub(crate) async fn database<T: Send + 'static>(
         })
 }
 
+/// Collect configuration errors, including resource bounds and environment conflicts.
 fn validate(spec: &MicroServiceSpec, request_id: Uuid) -> Result<(), AppError> {
     let mut fields = BTreeMap::new();
     if !dns_label(&spec.name) {
@@ -212,6 +218,7 @@ fn validate(spec: &MicroServiceSpec, request_id: Uuid) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Accept a lowercase DNS label with alphanumeric ends and at most 63 bytes.
 fn dns_label(label: &str) -> bool {
     let bytes = label.as_bytes();
     !bytes.is_empty()
@@ -223,6 +230,7 @@ fn dns_label(label: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
+/// Validate a bounded OCI reference and the permitted tag or digest syntax.
 fn valid_image(image: &str) -> bool {
     if image.len() > 2048
         || image
