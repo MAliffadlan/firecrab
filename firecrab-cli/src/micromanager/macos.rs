@@ -5,8 +5,10 @@ mod forward;
 pub(super) mod lifecycle;
 mod processes;
 mod provision;
+mod provision_log;
 mod repair;
 pub(super) mod resource;
+mod ssh;
 
 use std::ffi::OsString;
 use std::fs;
@@ -105,6 +107,7 @@ impl Error {
             | Self::Dev(
                 dev::Error::GuestNotReady
                 | dev::Error::GuestSshUnavailable { .. }
+                | dev::Error::GuestFilesystemUnhealthy(_)
                 | dev::Error::GuestSshInterrupted(_)
                 | dev::Error::LocalApiUnavailable,
             ) => Some(REPAIR_HINT),
@@ -171,7 +174,7 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
         lifecycle::check_install(&cli_source, &helper_source, &layout, reinstall)?;
     }
     // Before anything changes, so declining the download leaves the host as it was.
-    let manifest = manifest::Manifest::bundled()?;
+    let manifest = manifest::Manifest::for_install(&layout.managed_home)?;
     let artifacts = provision::download_all(&layout.managed_home, &manifest, assume_yes)?;
     if reinstall {
         daemon::uninstall(&layout)?;
@@ -187,8 +190,14 @@ fn run_install(reinstall: bool, assume_yes: bool) -> Result<i32, Error> {
     let prepared = provision::prepare(&layout.managed_home, &artifacts, &manifest, reinstall)?;
     let guest_result = ensure_guest_provisioned(&layout, &prepared)?;
     manifest.verify_provisioned(&guest_result, "kernel", &manifest.macos.kernel_version)?;
-    let daemon_paths = daemon::install(&layout, &layout.helper_path(), &prepared.ssh_private_key)?;
-    let daemon_status = daemon::start(&layout)?;
+    let settings = manifest.runtime.clone().unwrap_or_default();
+    let daemon_paths = daemon::install_with_runtime(
+        &layout,
+        &layout.helper_path(),
+        &prepared.ssh_private_key,
+        &settings,
+    )?;
+    let daemon_status = daemon::start_with_runtime(&layout, &settings)?;
     if !daemon_status.success() {
         return Err(daemon::Error::InvalidMarker(format!(
             "launchd loaded={}, ready={}, API reachable={}",
@@ -302,22 +311,37 @@ fn run_dev(source: Option<&Path>, release: bool, restore: bool, yes: bool) -> Re
         .filter(|_| status.loaded)
         .ok_or(dev::Error::GuestNotReady)?;
     dev::deploy(&layout, ip, checkout.as_ref(), release)?;
+    wait_for_dev_api(&layout)?;
+    report!("[PASS] API: http://127.0.0.1:5523/");
+    report!(
+        "  dashboard dev server: npm --prefix firecrab-frontend run dev (http://localhost:8080/)"
+    );
+    report!("  logs: firecrab service debug --logs --tail 100");
+    Ok(0)
+}
+
+fn wait_for_dev_api(layout: &lifecycle::Layout) -> Result<(), Error> {
     let started = Instant::now();
-    while !daemon::status(&layout)?.api_reachable {
+    while !daemon::status(layout)?.api_reachable {
         if started.elapsed() >= Duration::from_secs(30) {
             return Err(dev::Error::LocalApiUnavailable.into());
         }
         thread::sleep(Duration::from_secs(1));
     }
-    report!("[PASS] API: http://127.0.0.1:5523/");
-    report!("  logs: firecrab service debug --logs --tail 100");
-    Ok(0)
+    Ok(())
 }
 
 fn run_dev_control(command: DevCommand) -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
     let ip = running_guest_ip(&layout)?;
     dev::control(&layout, ip, command)?;
+    if command != DevCommand::Stop {
+        wait_for_dev_api(&layout)?;
+        report!("[PASS] API: http://127.0.0.1:5523/");
+        report!(
+            "  dashboard dev server: npm --prefix firecrab-frontend run dev (http://localhost:8080/)"
+        );
+    }
     Ok(0)
 }
 
@@ -479,7 +503,9 @@ fn run_shell(command: &[String]) -> Result<i32, Error> {
         return Err(Error::ShellCredentials(runtime));
     }
     let tty = command.is_empty() || io::stdin().is_terminal();
+    let settings = ssh::load(&layout.managed_home)?;
     let status = ProcessCommand::new("/usr/bin/ssh")
+        .args(ssh::arguments(&runtime, &settings, ssh::Session::Command))
         .args(shell_arguments(&runtime, ip, command, tty))
         .status()
         .map_err(Error::ShellSsh)?;
@@ -533,7 +559,6 @@ fn shell_arguments(
     let mut arguments: Vec<OsString> = vec!["-i".into(), runtime.join("manager_ed25519").into()];
     for option in [
         "BatchMode=yes",
-        "ConnectTimeout=10",
         // The daemon trusts the guest's key the same way on first connect and
         // keeps it in the same file; a changed key is refused.
         "StrictHostKeyChecking=accept-new",
@@ -598,10 +623,12 @@ fn guest_command(
     if !key.is_file() || !known_hosts.is_file() {
         return Err("management SSH credentials are not ready".to_string());
     }
+    let settings = ssh::load(&layout.managed_home).map_err(|error| error.to_string())?;
     let output = ProcessCommand::new("/usr/bin/ssh")
+        .args(ssh::arguments(&runtime, &settings, ssh::Session::Command))
         .arg("-i")
         .arg(&key)
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"])
+        .args(["-o", "BatchMode=yes"])
         .args(["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"])
         .args(["-o", "LogLevel=ERROR"])
         .arg("-o")
@@ -704,6 +731,17 @@ fn ensure_guest_provisioned(
     }
 
     report!("[BOOT] Debian EFI provisioning VM");
+    let log = prepared
+        .provision_marker
+        .with_file_name("guest-provision.log");
+    managed_home::reject_symlink_components(&log)?;
+    let mut output =
+        provision_log::Output::new(log.clone()).map_err(|source| lifecycle::Error::Io {
+            action: "read provisioning log",
+            path: log.clone(),
+            source,
+        })?;
+    report!("[LOGS] provisioning: {}", log.display());
     let helper = layout.helper_path();
     let mut child = ProcessCommand::new(&helper)
         .arg("provision")
@@ -715,11 +753,16 @@ fn ensure_guest_provisioned(
         })?;
     let run = wait_for_provisioning(
         &mut child,
-        || provision::guest_finished(prepared),
+        || {
+            output.print_new(false);
+            provision::guest_finished(prepared)
+        },
         PROVISION_POWEROFF_GRACE,
         PROVISION_STOP_GRACE,
-    )
-    .map_err(|source| Error::ProvisionHelper {
+    );
+    // The final output can arrive between the last poll and helper exit.
+    output.print_new(true);
+    let run = run.map_err(|source| Error::ProvisionHelper {
         path: helper,
         source,
     })?;
@@ -748,7 +791,7 @@ enum ProvisionRun {
 
 fn wait_for_provisioning(
     child: &mut Child,
-    guest_finished: impl Fn() -> bool,
+    mut guest_finished: impl FnMut() -> bool,
     poweroff_grace: Duration,
     stop_grace: Duration,
 ) -> io::Result<ProvisionRun> {
@@ -757,8 +800,9 @@ fn wait_for_provisioning(
         if let Some(status) = child.try_wait()? {
             return Ok(ProvisionRun::Exited(status));
         }
+        let finished = guest_finished();
         match finished_at {
-            None if guest_finished() => finished_at = Some(Instant::now()),
+            None if finished => finished_at = Some(Instant::now()),
             Some(at) if Instant::now().duration_since(at) >= poweroff_grace => break,
             _ => {}
         }
@@ -902,6 +946,9 @@ mod tests {
                 detail: "kex_exchange_identification: read: Connection reset by peer".to_string(),
             }),
             Error::Dev(dev::Error::GuestSshInterrupted("source upload")),
+            Error::Dev(dev::Error::GuestFilesystemUnhealthy(
+                "read-only root".into(),
+            )),
             Error::Dev(dev::Error::LocalApiUnavailable),
         ] {
             assert_eq!(error.recovery_hint(), Some(REPAIR_HINT), "{error}");
@@ -1061,8 +1108,22 @@ mod tests {
     fn a_running_guest_is_never_stopped_before_it_finishes() {
         // Stands in for a guest that is still provisioning: it exits on its own.
         let mut child = provisioning("sleep 1; exit 0");
-        let run = wait_for_provisioning(&mut child, || false, SHORT, SHORT).unwrap();
+        let mut reports = 0;
+        let run = wait_for_provisioning(
+            &mut child,
+            || {
+                reports += 1;
+                false
+            },
+            SHORT,
+            SHORT,
+        )
+        .unwrap();
         assert!(matches!(run, ProvisionRun::Exited(status) if status.success()));
+        assert!(
+            reports > 1,
+            "pending provisioning must keep reporting progress"
+        );
     }
 
     #[test]

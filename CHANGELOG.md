@@ -33,6 +33,12 @@ Entries land here as work merges, and move under the next version heading when t
   `$DATADIR/updates/progress.json` so it survives the restart that ends an
   update.
 
+- The installed MicroManager `micromanager.toml` accepts runtime policy settings.
+  macOS and Windows can disable automatic host-job relaunch. macOS also supports
+  SSH connection reuse, keepalives, configurable tunnel retries, and retaining
+  the VM while SSH reconnects. Runtime edits preserve installation fingerprints
+  and survive explicit install/reinstall; existing TOML files keep working.
+
 - The dashboard's Host tab has a Firecrab panel with the version and what
   `firecrab info` prints: the install prefix, data, config and unit
   directories, and the address the API listens on. `GET /api/info` serves the

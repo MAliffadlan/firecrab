@@ -19,6 +19,12 @@ pub enum Error {
     Failed { command: String, detail: String },
     #[error("{0} is not on a drive WSL can reach through /mnt")]
     UnmappablePath(PathBuf),
+    #[error("cannot write repair log {path}: {source}")]
+    Log {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Runs `wsl.exe` and returns its stdout, failing on a non-zero exit.
@@ -64,6 +70,27 @@ pub fn run_program(program: &str, args: &[&str]) -> Result<String, Error> {
     if !output.success {
         return Err(Error::Failed {
             command: format!("{program} {}", args.join(" ")),
+            detail: failure_detail(&output.stderr, &output.stdout),
+        });
+    }
+    Ok(decode_console(&output.stdout))
+}
+
+/// Keep both fsck streams even when the rescue command fails or times out.
+pub(super) fn run_logged(args: &[&str], stdout: &Path, stderr: &Path) -> Result<String, Error> {
+    let output = execute("wsl.exe", args).map_err(|source| Error::Spawn {
+        program: "wsl.exe".into(),
+        source,
+    })?;
+    for (path, bytes) in [(stdout, &output.stdout), (stderr, &output.stderr)] {
+        std::fs::write(path, bytes).map_err(|source| Error::Log {
+            path: path.into(),
+            source,
+        })?;
+    }
+    if !output.success {
+        return Err(Error::Failed {
+            command: "WSL offline filesystem check".into(),
             detail: failure_detail(&output.stderr, &output.stdout),
         });
     }

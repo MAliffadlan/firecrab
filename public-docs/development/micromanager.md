@@ -47,7 +47,13 @@ Sources and compiler caches persist under `/var/lib/firecrab/dev`.
 Local configuration, `.env` files, nested checkouts, and build output are excluded.
 
 After a successful build, deployment switches the two systemd executable overrides and checks guest and host API readiness.
-A build failure leaves services running; a deployment failure restores previous executables.
+A build failure leaves services running; an ordinary deployment failure restores previous executables.
+Before uploading, starting, or deploying, macOS checks the guest's writable OS/data mounts and critical OS executables.
+The shared macOS/WSL deployment script repeats these checks after compilation and before reporting success.
+An HTTP response from `/api/host` alone does not establish that the guest filesystem is healthy.
+If the filesystem becomes unhealthy, deployment stops and preserves its archive and rollback files for recovery.
+Inspect `service debug --logs`, then run `service repair` before retrying.
+`service dev stop` skips the filesystem health check so services can still be stopped.
 Run `service dev` again after each edit; it does not watch files.
 Guest service restarts interrupt API/helper requests, so stop workloads before changing their runtime.
 
@@ -79,6 +85,32 @@ npm run dev --prefix firecrab-frontend
 Open `http://localhost:8080`.
 Vite proxies `/api` and `/ws` to `127.0.0.1:5523` through the macOS SSH tunnel or WSL localhost forwarding.
 Use `localhost` for the configured browser origin.
+`service dev` and `service dev start` print the API URL and the separate frontend command.
+They do not start Vite; port 8080 is available only while the frontend command runs.
+
+## macOS disk I/O
+
+The signed helper attaches writable Linux disks with host caching enabled and full synchronization for guest flush requests.
+This applies to provisioning, normal boots, and offline OS repair.
+It follows the filesystem corruption workaround adopted by [Lima](https://github.com/lima-vm/lima/pull/2026) and [UTM](https://github.com/utmapp/UTM/pull/5919).
+Matching symptoms do not establish that every guest I/O error has the same cause.
+After updating the helper, stop and start the management VM to apply the attachment policy.
+Repair an already damaged OS filesystem before resuming development.
+
+Run the deployment transaction regression tests without a VM:
+
+```sh
+python3 scripts/test-micromanager-dev.py
+```
+
+On a healthy installed macOS VM, verify that read-only OS, data, and executable mounts reject both start and build operations:
+
+```sh
+python3 scripts/ci-qa-macos-dev.py --cli ./target/debug/firecrab
+```
+
+The QA script injects failures in private mount namespaces.
+It requires the host mounts, API response, and running service PIDs to remain unchanged.
 
 ## Related
 

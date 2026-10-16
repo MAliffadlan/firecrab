@@ -33,6 +33,14 @@ It verifies checksums, provisions the manifest-selected kernel, and checks neste
 Existing installations migrate only on an explicit install or reinstall.
 Interactive installs show pending downloads and ask first; `--yes` skips that prompt.
 Interrupted downloads resume on the next run.
+Installation streams actual guest output, including package downloads, unpacking,
+and setup. `[LOGS]` identifies the complete `guest-provision.log`, which also keeps
+the shell trace for debugging. Output from earlier installations is not replayed.
+Keep installation running until it reports success; the provisioning VM shuts down
+before launchd registration and the resident management VM are started.
+`Ctrl-C` before completion leaves the service unregistered. For an interrupted
+first install whose binaries already exist, rerun `~/.local/bin/firecrab service install`
+(or the CLI in the configured install directory). Verified downloads are reused.
 
 ## Service commands
 
@@ -54,7 +62,10 @@ Stopping or repairing the management VM stops its workload MicroVMs.
 ## Networking and data
 
 The launchd agent `io.firecrab.micromanager` keeps the management VM and key-only SSH API tunnel running.
-A dropped tunnel reconnects; five failed reconnects restart the management VM.
+A dropped tunnel reconnects; by default, five failed reconnects restart the management VM.
+Edit `[runtime]` and `[runtime.ssh]` in the installed `micromanager.toml` to configure automatic relaunch, SSH reuse, keepalives, and retries.
+Set `runtime.ssh.restart_vm_on_failure = false` to keep the VM running while SSH reconnects.
+See [runtime settings](../reference/micromanager-manifest.md#runtime-settings).
 
 | Traffic | Address on the Mac |
 | --- | --- |
@@ -70,6 +81,7 @@ Override with `FIRECRAB_MICROMANAGER_HOME` for an isolated checkout or test.
 
 | Path under the managed root | Content |
 | --- | --- |
+| `micromanager.toml` | Installed release inputs and editable runtime settings |
 | `downloads/` | Verified release artifacts |
 | `system/` | Kernel, initrd, and replaceable 3 GiB Debian OS disk |
 | `data/firecrab-data.raw` | Persistent 16 GiB sparse disk for databases, images, and VMs |
@@ -117,8 +129,9 @@ A clean check keeps the original OS image.
 
 Repair recreates the wrapper and plist, starts the VM, and verifies the live API and current-boot guest report.
 It prints six stages and reports pending waits every ten seconds.
-Local VM/API readiness has a ten-second deadline; offline filesystem checks have 120 seconds.
-Failures return nonzero and retain backups/logs under `runtime/repairs/os-*/`.
+Local VM/API readiness has a 120-second deadline; offline filesystem checks have 120 seconds.
+Failures return nonzero. Disk backups remain under `runtime/repairs/os-*/`;
+diagnostic logs are stored separately under `runtime/logs/repairs/os-*/`.
 The CLI suggests repair for runtime failures; it does not run repair automatically.
 
 | Log | Use |

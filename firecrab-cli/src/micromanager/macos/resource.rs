@@ -55,6 +55,7 @@ pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
     let mut layout =
         Layout::from_process_env().map_err(|error| Error::Invalid(error.to_string()))?;
     layout.managed_home = home.to_owned();
+    let ssh_settings = super::ssh::load(home).map_err(|error| Error::Invalid(error.to_string()))?;
     let disk = home.join("data/firecrab-data.raw");
     let original = fs::symlink_metadata(&disk)?;
     if !original.file_type().is_file() || original.nlink() != 1 {
@@ -108,14 +109,12 @@ pub fn apply(home: &Path, settings: &ManagerResources) -> Result<(), Error> {
     let output = Command::new("/usr/bin/ssh")
         .arg("-i")
         .arg(home.join("runtime/manager_ed25519"))
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "-o",
-            "StrictHostKeyChecking=yes",
-        ])
+        .args(super::ssh::arguments(
+            &home.join("runtime"),
+            &ssh_settings,
+            super::ssh::Session::Command,
+        ))
+        .args(["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"])
         .arg("-o")
         .arg(super::known_hosts_option(&home.join("runtime/known_hosts")))
         .arg(format!("root@{ip}"))

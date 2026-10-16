@@ -10,8 +10,13 @@ mod host_platform;
 mod macos;
 mod managed_home;
 mod manifest;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+mod os_repair;
 mod resource;
 mod resource_server;
+mod runtime;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+mod snapshot;
 // Everything but the `wsl.exe` and `schtasks.exe` calls is plain Rust, so the
 // Windows backend also builds and runs its tests on the Linux CI runner.
 #[cfg(any(target_os = "windows", test))]
@@ -101,6 +106,8 @@ pub enum Command {
         yes: bool,
     },
     /// Repair the resident service using the existing managed VM and installed binaries.
+    ///
+    /// Windows requires PowerShell running as Administrator for offline disk repair.
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
     Repair,
     /// Remove microManager and optionally all managed VM data.

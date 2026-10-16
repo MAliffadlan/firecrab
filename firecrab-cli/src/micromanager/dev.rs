@@ -28,6 +28,9 @@ const OPTIONAL_SOURCE_INPUTS: &[&str] = &["packaging/micromanager.toml"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[cfg(target_os = "macos")]
+    #[error(transparent)]
+    Manifest(#[from] super::manifest::Error),
     #[error("invalid Firecrab checkout {path}: {detail}")]
     Checkout { path: PathBuf, detail: String },
     #[error("could not {action}: {source}")]
@@ -46,6 +49,9 @@ pub enum Error {
         "management VM SSH at {ip} is not ready: {detail}; inspect `firecrab service debug --logs` before retrying (source upload was not attempted)"
     )]
     GuestSshUnavailable { ip: IpAddr, detail: String },
+    #[cfg(target_os = "macos")]
+    #[error("management VM filesystem is unhealthy: {0}; inspect `firecrab service debug --logs`")]
+    GuestFilesystemUnhealthy(String),
     #[cfg(target_os = "macos")]
     #[error("management SSH failed during {0}; inspect `firecrab service debug --logs`")]
     GuestSshInterrupted(&'static str),
