@@ -67,6 +67,35 @@ async fn provider_errors_do_not_leak_their_body_and_explain_permissions() {
 }
 
 #[tokio::test]
+async fn rejects_provider_limits_invalid_payloads_and_excessively_broad_tokens() {
+    for (status, payload, message) in [
+        (429, json!({"secret":"provider-secret"}), "rate limit"),
+        (503, json!({"secret":"provider-secret"}), "try again later"),
+        (
+            200,
+            json!({"success":false,"secret":"provider-secret"}),
+            "permissions",
+        ),
+        (
+            200,
+            json!({"success":true,"result":{}}),
+            "Invalid Cloudflare domain response",
+        ),
+        (
+            200,
+            json!({"success":true,"result":[],"result_info":{"total_pages":11}}),
+            "at most 500",
+        ),
+    ] {
+        let (base, task) = provider(vec![(status, payload)]).await;
+        let error = read_zones("private-token", &base).await.unwrap_err();
+        assert!(error.contains(message), "{error}");
+        assert!(!error.contains("provider-secret"));
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn no_active_domain_explains_the_required_domain_setup() {
     let (base, task) = provider(vec![(
         200,

@@ -72,3 +72,7 @@ pub async fn disable(
 ) -> Result<Json<Snapshot>, AppError> {
     call(Operation::Disable, request_id).await
 }
+
+#[cfg(test)]
+#[path = "pipe_tests.rs"]
+mod tests;
