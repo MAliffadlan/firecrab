@@ -14,6 +14,21 @@ STUB = r'''#!/bin/bash
 set -eu
 name=${0##*/}
 case "$name" in
+  chmod|rm|install)
+    if [ "$1" = --version ]; then exit 0; fi
+    if [ "$name" = install ]; then exec /usr/bin/install "$@"; fi
+    exec "/bin/$name" "$@"
+    ;;
+  findmnt)
+    path=${!#}
+    selected= flags=
+    while read -r device mount type options rest; do
+      if [[ "$mount" = / || "$path" = "$mount" || "$path" = "$mount/"* ]]; then
+        if [ "${#mount}" -gt "${#selected}" ]; then selected=$mount; flags=$options; fi
+      fi
+    done < "$TEST_ROOT/mounts"
+    echo "$flags"
+    ;;
   uname) echo "${GUEST_ARCH:-aarch64}" ;;
   cc|pkg-config|cmake|journalctl|sleep) exit 0 ;;
   flock) [ "${LOCK_FAIL:-0}" = 0 ] ;;
@@ -39,6 +54,9 @@ case "$name" in
     for unit in firecrab-api firecrab-helper; do
       printf '#!/bin/bash\necho built-from-source\n' >"$CARGO_TARGET_DIR/$target/$profile/$unit"
     done
+    if [ "${DISK_FAIL_AFTER_BUILD:-0}" = 1 ]; then
+      printf '/dev/os / ext4 ro,relatime 0 0\n' >"$TEST_ROOT/mounts"
+    fi
     ;;
   systemctl)
     if [ "$*" = 'show --property=LoadState --value firecrab-helper.service' ]; then
@@ -66,10 +84,12 @@ class GuestDevelopmentTest(unittest.TestCase):
         self.units = self.root / "units"
         self.commands = self.root / "commands"
         self.commands.mkdir()
+        self.mounts = self.root / "mounts"
+        self.mounts.write_text("/dev/os / ext4 rw,relatime 0 0\n")
         stub = self.commands / "stub"
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ["uname", "cc", "pkg-config", "cmake", "journalctl", "sleep", "flock", "curl", "rustup", "systemctl"]:
+        for name in ["findmnt", "chmod", "rm", "install", "uname", "cc", "pkg-config", "cmake", "journalctl", "sleep", "flock", "curl", "rustup", "systemctl"]:
             (self.commands / name).symlink_to(stub)
         # Linux mv -T replaces a symlink rather than following its directory.
         mv = self.commands / "mv"
@@ -86,6 +106,7 @@ class GuestDevelopmentTest(unittest.TestCase):
             ("root=/var/lib/firecrab/dev", "root=" + shlex.quote(str(self.cache))),
             ("bin_root=/usr/local/lib/firecrab-dev", "bin_root=" + shlex.quote(str(self.binaries))),
             ("unit_root=/etc/systemd/system", "unit_root=" + shlex.quote(str(self.units))),
+            ("os_root=/", "os_root=" + shlex.quote(str(self.root))),
             ("/run/firecrab/net-helper.sock", str(self.root / "helper.sock")),
         ]:
             script = script.replace(original, replacement)
@@ -108,13 +129,63 @@ class GuestDevelopmentTest(unittest.TestCase):
         environment.update(TEST_ROOT=str(self.root), PATH=str(self.commands) + ":" + environment["PATH"])
         environment.update({key: str(value) for key, value in flags.items()})
         args = [shell, str(self.script), profile]
-        if profile not in ["start", "stop", "restart"]:
+        if profile not in ["start", "stop", "restart", "check"]:
             args.extend(["1.97.1", self.archive.name])
         return subprocess.run(args,
                               env=environment, text=True, capture_output=True, timeout=10)
 
     def override(self, unit="firecrab-api"):
         return self.units / (unit + ".service.d/90-firecrab-dev.conf")
+
+    def test_read_only_os_rejects_start_restart_and_build_even_with_healthy_api(self):
+        self.mounts.write_text("/dev/os / ext4 ro,relatime 0 0\n")
+        for action in ["check", "start", "restart", "debug", "restore"]:
+            with self.subTest(action=action):
+                result = self.run_guest(action)
+                self.assertEqual(result.returncode, 74, result.stderr)
+                self.assertIn("is not writable", result.stderr)
+                self.assertNotIn("[PASS]", result.stdout)
+                self.assertFalse((self.root / "events").exists())
+                self.assertFalse((self.root / "rustup-events").exists())
+
+    def test_read_only_data_mount_is_checked_separately_from_os(self):
+        self.mounts.write_text(f"/dev/os / ext4 rw 0 0\n/dev/data {self.cache} ext4 ro 0 0\n")
+        self.cache.mkdir(exist_ok=True)
+        result = self.run_guest()
+        self.assertEqual(result.returncode, 74, result.stderr)
+        self.assertIn(str(self.cache), result.stderr)
+        self.assertFalse((self.root / "events").exists())
+
+    def test_read_only_overmount_takes_precedence_over_the_original_mount(self):
+        self.mounts.write_text("/dev/os / ext4 ro 0 0\n/dev/os / ext4 rw 0 0\n")
+        result = self.run_guest("start")
+        self.assertEqual(result.returncode, 74, result.stderr)
+        self.assertNotIn("[PASS]", result.stdout)
+
+    def test_stop_remains_available_on_read_only_os(self):
+        self.mounts.write_text("/dev/os / ext4 ro 0 0\n")
+        result = self.run_guest("stop")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("[PASS]", result.stdout)
+
+    def test_disk_failure_during_build_preserves_services_and_recovery_files(self):
+        result = self.run_guest(DISK_FAIL_AFTER_BUILD=1)
+        self.assertEqual(result.returncode, 74, result.stderr)
+        self.assertIn("firecrab service repair", result.stderr)
+        self.assertIn("[PRESERVE]", result.stderr)
+        self.assertTrue(self.archive.exists())
+        self.assertFalse((self.root / "events").exists())
+        self.assertFalse(self.override().exists())
+
+    def test_unreadable_system_executable_is_reported_as_os_failure(self):
+        chmod = self.commands / "chmod"
+        chmod.unlink()
+        chmod.write_text("#!/bin/sh\necho 'Input/output error' >&2\nexit 126\n")
+        chmod.chmod(0o755)
+        result = self.run_guest("start")
+        self.assertEqual(result.returncode, 74, result.stderr)
+        self.assertIn("OS cannot execute chmod", result.stderr)
+        self.assertFalse((self.root / "events").exists())
 
     def test_legacy_service_uses_the_new_helper_executable_and_restore_removes_its_override(self):
         result = self.run_guest(LEGACY_HELPER=1)

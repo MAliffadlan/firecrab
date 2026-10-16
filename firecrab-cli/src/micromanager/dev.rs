@@ -50,6 +50,9 @@ pub enum Error {
     )]
     GuestSshUnavailable { ip: IpAddr, detail: String },
     #[cfg(target_os = "macos")]
+    #[error("management VM filesystem is unhealthy: {0}; inspect `firecrab service debug --logs`")]
+    GuestFilesystemUnhealthy(String),
+    #[cfg(target_os = "macos")]
     #[error("management SSH failed during {0}; inspect `firecrab service debug --logs`")]
     GuestSshInterrupted(&'static str),
     #[error(
