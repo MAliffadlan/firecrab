@@ -17,7 +17,7 @@ pub enum ServiceRuntime {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct MicroServiceSpec {
-    /// Unique DNS label; also usable as the future <name>.internal address.
+    /// Unique DNS label; also usable as the future `<name>.internal` address.
     pub name: String,
     /// OCI image reference (tag or sha256 digest). Resolved only during deployment.
     pub image: String,
