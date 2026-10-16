@@ -48,7 +48,12 @@ export default function CloudflareConnect({ config, snapshot, busy, onBusy, onCo
   }
 
   return <section className="panel cloudflare-connect" aria-label={t("Connect Cloudflare", "Cloudflare 연결")}>
-    <h2 className="panel-title">{t("Connect Cloudflare Tunnel", "Cloudflare Tunnel 연결")}</h2>
+    <h2 className="panel-title">
+      <span className="panel-title-with-icon">
+        <img className="panel-brand-icon" src="/cloudflare.svg" alt="" width={28} height={28} />
+        {t("Connect Cloudflare Tunnel", "Cloudflare Tunnel 연결")}
+      </span>
+    </h2>
     <p>{t("Create a public app address here. Firecrab creates the tunnel, registers DNS and starts the connector.", "공개할 앱 주소를 만든다. Firecrab이 터널 생성, DNS 등록, 연결 프로그램 실행을 처리한다.")}</p>
     {error && <div className="banner error" role="alert">{error}</div>}
     {publicUrl && <div className="banner info" role="status">{t("Cloudflare connector connected. DNS and HTTPS may take a moment to become available.", "Cloudflare 연결을 확인했다. DNS와 HTTPS 적용에는 시간이 걸릴 수 있다.")} <a href={publicUrl} target="_blank" rel="noreferrer">{publicUrl}</a></div>}
