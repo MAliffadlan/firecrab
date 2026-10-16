@@ -637,6 +637,7 @@ while :; do
   fi
   if ! kill -0 "$resource_pid" 2>/dev/null; then
     wait "$resource_pid" 2>/dev/null
+    sleep 5
     FIRECRAB_MICROMANAGER_HOME="$root" FIRECRAB_MICROMANAGER_HELPER="$helper" \
       "$cli" service resource-server --home "$root" &
     resource_pid=$!

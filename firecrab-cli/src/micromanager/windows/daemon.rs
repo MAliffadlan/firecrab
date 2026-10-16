@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use firecrab_api_types::HostOs;
 
 use super::super::host_platform::{self, HOST_PLATFORM_DESCRIPTOR_PATH};
@@ -411,8 +412,11 @@ fn render_resource_task(user: &str, cli: &Path, home: &Path, settings: &Runtime)
     let launcher = windows.join("System32/WindowsPowerShell/v1.0/powershell.exe");
     let cli = cli.to_string_lossy().replace('\'', "''");
     let home = home.to_string_lossy().replace('\'', "''");
+    let command = format!("& '{cli}' service resource-server --home '{home}'");
+    let bytes: Vec<_> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let arguments = format!(
-        "-NoProfile -NonInteractive -WindowStyle Hidden -Command \"& '{cli}' service resource-server --home '{home}'\""
+        "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {}",
+        STANDARD.encode(bytes)
     );
     render_task(user, &launcher, &arguments, settings)
 }
@@ -439,6 +443,23 @@ fn xml_escape(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn resource_command(task: &str) -> String {
+        let encoded = task
+            .split_once("-EncodedCommand ")
+            .unwrap()
+            .1
+            .split_once("</Arguments>")
+            .unwrap()
+            .0;
+        assert!(!encoded.contains('%'));
+        let bytes = STANDARD.decode(encoded).unwrap();
+        let units: Vec<_> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16(&units).unwrap()
+    }
+
     #[test]
     fn resource_controller_owns_the_holder_and_preserves_custom_managed_home() {
         let task = render_resource_task(
@@ -448,11 +469,25 @@ mod tests {
             &Runtime::default(),
         );
         assert!(task.contains("-WindowStyle Hidden"));
-        assert!(task.contains("&apos;C:\\Apps\\firecrab.exe&apos; service resource-server"));
-        assert!(
-            task.contains("service resource-server --home &apos;C:\\User Data\\micromanager&apos;")
+        assert_eq!(
+            resource_command(&task),
+            "& 'C:\\Apps\\firecrab.exe' service resource-server --home 'C:\\User Data\\micromanager'"
         );
         assert!(task.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+    }
+
+    #[test]
+    fn resource_task_preserves_percent_unicode_and_quoted_paths() {
+        let task = render_resource_task(
+            "dev",
+            Path::new("C:\\Apps%PATH%\\🦀's.exe"),
+            Path::new("D:\\User Data\\한글%TEMP%\\it's"),
+            &Runtime::default(),
+        );
+        assert_eq!(
+            resource_command(&task),
+            "& 'C:\\Apps%PATH%\\🦀''s.exe' service resource-server --home 'D:\\User Data\\한글%TEMP%\\it''s'"
+        );
     }
 
     #[test]
