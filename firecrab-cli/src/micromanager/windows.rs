@@ -12,6 +12,7 @@ mod provision;
 mod repair;
 mod wsl;
 
+use super::dev::dashboard;
 use super::{Command, DevCommand, debug, managed_home, manifest};
 use doctor::Status;
 use wsl::DISTRO_NAME;
@@ -194,6 +195,11 @@ fn run_dev(
         )?)
     };
     let layout = lifecycle::Layout::from_process_env()?;
+    let frontend = checkout
+        .as_ref()
+        .map(|checkout| dashboard::prepare(&checkout.root))
+        .transpose()
+        .map_err(super::dev::Error::from)?;
     if !layout.runtime().join("microManager-task.xml").is_file()
         || daemon::task_state() == daemon::TaskState::Missing
         || !wsl::contains(&wsl::distributions(), DISTRO_NAME)
@@ -217,6 +223,11 @@ fn run_dev(
         return Err(super::dev::Error::LocalApiUnavailable.into());
     }
     super::report!("[PASS] API: http://127.0.0.1:5523/");
+    if let Some(source) = frontend {
+        dashboard::start(&source, &layout.managed_home).map_err(super::dev::Error::from)?;
+    } else {
+        dashboard::stop(&layout.managed_home).map_err(super::dev::Error::from)?;
+    }
     super::report!("  logs: firecrab service debug --logs --tail 100");
     Ok(0)
 }
@@ -226,10 +237,23 @@ fn run_dev_control(command: DevCommand) -> Result<i32, Error> {
         return Err(Error::GuestNotRunning);
     }
     dev::control(command)?;
+    let layout = lifecycle::Layout::from_process_env()?;
+    if command != DevCommand::Start {
+        dashboard::stop(&layout.managed_home).map_err(super::dev::Error::from)?;
+    }
+    if command != DevCommand::Stop {
+        let source = dashboard::source(&layout.managed_home).map_err(super::dev::Error::from)?;
+        dashboard::start(&source, &layout.managed_home).map_err(super::dev::Error::from)?;
+    }
     Ok(0)
 }
 
 fn run_stop() -> Result<i32, Error> {
+    match lifecycle::Layout::from_process_env() {
+        Ok(layout) => dashboard::stop(&layout.managed_home).map_err(super::dev::Error::from)?,
+        Err(lifecycle::Error::MissingManagedHome) => {}
+        Err(error) => return Err(error.into()),
+    }
     daemon::stop()?;
     println!("[PASS] task_scheduler: stopped");
     Ok(0)
@@ -257,7 +281,10 @@ fn collect_debug(layout: &lifecycle::Layout, options: debug::Options) -> debug::
         "windows",
         &layout.managed_home,
         options,
-        &[("provision", "guest-provision.log")],
+        &[
+            ("dashboard", "dev-dashboard.log"),
+            ("provision", "guest-provision.log"),
+        ],
     );
     let capabilities = doctor::report(doctor::Inputs::debug());
     report.capability = debug::Capability::from_checks(
@@ -454,6 +481,7 @@ fn run_uninstall(layout: &lifecycle::Layout, purge: bool) -> Result<i32, Error> 
     if purge {
         lifecycle::validate_purge(layout)?;
     }
+    dashboard::stop(&layout.managed_home).map_err(super::dev::Error::from)?;
     daemon::uninstall(layout)?;
     if purge {
         if wsl::contains(&wsl::distributions(), DISTRO_NAME) {
@@ -578,18 +606,8 @@ mod tests {
                 }
                 other => panic!("dev control changed the host: {other}"),
             });
-            assert_eq!(
-                run(Command::Dev {
-                    command: Some(command),
-                    source: None,
-                    release: false,
-                    restore: false,
-                    yes: false,
-                })
-                .unwrap(),
-                0
-            );
-            assert_eq!(wsl.calls().len(), 2);
+            dev::control(command).unwrap();
+            assert_eq!(wsl.calls().len(), 1);
         }
     }
 
