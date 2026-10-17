@@ -136,12 +136,14 @@ fn lock(home: &Path) -> Result<fs::File, Error> {
     Ok(file)
 }
 
-/// Probe a listener without treating recently closed TCP connections as port conflicts.
+/// Only a successful connection proves that a server is listening.
 fn listening(url: &str) -> bool {
     let Ok(address) = url.trim_start_matches("http://").parse::<SocketAddr>() else {
         return true;
     };
-    !matches!(TcpStream::connect_timeout(&address, Duration::from_millis(250)), Err(error) if error.kind() == io::ErrorKind::ConnectionRefused)
+    // Windows can time out before a closed loopback port reports connection refused.
+    // Vite's strictPort still rejects any bind conflict when starting the server.
+    TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
 }
 
 /// Stop only a server that proves ownership; stale state never authorizes killing a PID.

@@ -141,6 +141,16 @@ fn switches_checkouts_by_stopping_only_the_previous_owned_server() {
 }
 
 #[test]
+fn port_probe_tracks_listener_lifecycle() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    assert!(listening(&url));
+    drop(listener.accept().unwrap());
+    drop(listener);
+    assert!(!listening(&url));
+}
+
+#[test]
 fn occupied_ports_are_errors_and_the_other_listener_remains_open() {
     let fixture = Fixture::new();
     let listener = TcpListener::bind(("127.0.0.1", fixture.port)).unwrap();
