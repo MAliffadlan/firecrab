@@ -239,7 +239,7 @@ export default function App() {
         {/* Each page mounts only while selected, so its own polling stops
             the moment you navigate away. */}
         {view === "networks" && <MicroNetworks />}
-        {view === "pipe" && <Pipe onUnsavedChange={setPipeHasUnsavedChanges} />}
+        {view === "pipe" && <Pipe vms={state.vms} vmsLoading={!state.loaded} vmsUnavailable={state.consecutiveFailures > 0} onUnsavedChange={setPipeHasUnsavedChanges} />}
         {view === "storages" && <MicroStorages />}
         {view === "images" && <Images />}
         {view === "kernels" && <Kernels />}

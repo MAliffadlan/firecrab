@@ -2,16 +2,26 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { applyPipe, disablePipe, getPipe, type PipeConfig, type PipeRoute, type PipeSnapshot } from "../api/pipe";
 import { useI18n } from "../i18n";
 import CloudflareConnect from "./CloudflareConnect";
+import type { VmResponse } from "../bindings";
+import { canUsePipeApps, pipeApps } from "../pipeApps";
+import PipeAppPicker from "./PipeAppPicker";
 
 const EMPTY: PipeConfig = { listen: "127.0.0.1:8080", routes: [], tunnel: null };
 
-export default function Pipe({ onUnsavedChange }: { onUnsavedChange: (unsaved: boolean) => void }) {
+interface Props {
+  vms: VmResponse[];
+  vmsLoading: boolean;
+  vmsUnavailable: boolean;
+  onUnsavedChange: (unsaved: boolean) => void;
+}
+
+export default function Pipe({ vms, vmsLoading, vmsUnavailable, onUnsavedChange }: Props) {
   const { t } = useI18n();
   const [snapshot, setSnapshot] = useState<PipeSnapshot | null>(null);
   const [draft, setDraft] = useState<PipeConfig>(EMPTY);
   const [host, setHost] = useState("");
   const [path, setPath] = useState("/");
-  const [upstreams, setUpstreams] = useState("");
+  const [upstreams, setUpstreams] = useState<string[]>([]);
   const [editing, setEditing] = useState<number | null>(null);
   const [credentials, setCredentials] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -21,8 +31,12 @@ export default function Pipe({ onUnsavedChange }: { onUnsavedChange: (unsaved: b
   const initialized = useRef(false);
   const revision = useRef(0);
   const mutating = useRef(false);
-  const hasUnsavedChanges = dirty || editing !== null || !!host.trim() || path !== "/" || !!upstreams.trim() || !!credentials.trim();
-  const saveDisabled = busy || !snapshot?.nginxAvailable || editing !== null || !!host.trim() || (draft.tunnel !== null && !snapshot.cloudflaredAvailable);
+  const apps = pipeApps(vms);
+  const preserved = editing === null ? [] : draft.routes[editing]?.upstreams ?? [];
+  const appsReady = !vmsLoading && !vmsUnavailable && canUsePipeApps(apps, upstreams, preserved);
+  const editorPending = editing !== null || !!host.trim() || path !== "/" || upstreams.length > 0;
+  const hasUnsavedChanges = dirty || editorPending || !!credentials.trim();
+  const saveDisabled = busy || !snapshot?.nginxAvailable || (editorPending && (!host.trim() || !path.startsWith("/") || !appsReady)) || (draft.tunnel !== null && !snapshot.cloudflaredAvailable);
 
   useEffect(() => {
     onUnsavedChange(hasUnsavedChanges);
@@ -68,27 +82,28 @@ export default function Pipe({ onUnsavedChange }: { onUnsavedChange: (unsaved: b
   }, []);
 
   function change(next: PipeConfig) { initialized.current = true; setDraft(next); setDirty(true); setNotice(null); }
-  function clearEditor() { setHost(""); setPath("/"); setUpstreams(""); setEditing(null); }
-  function edit(route: PipeRoute, index: number) { setHost(route.host); setPath(route.pathPrefix); setUpstreams(route.upstreams.join(", ")); setEditing(index); }
-  function addRoute(event: FormEvent) {
-    event.preventDefault();
-    const route = { host: host.trim().toLowerCase(), pathPrefix: path.trim() || "/", upstreams: upstreams.split(/[\s,]+/).filter(Boolean) };
-    const duplicate = draft.routes.some((existing, index) => index !== editing && existing.host === route.host && existing.pathPrefix.replace(/\/+$/, "") === route.pathPrefix.replace(/\/+$/, ""));
-    if (duplicate) { setError(t("This domain and path already exist.", "이 도메인과 경로가 이미 있다.")); return; }
-    change({ ...draft, routes: editing === null ? [...draft.routes, route] : draft.routes.map((existing, index) => index === editing ? route : existing) });
-    clearEditor(); setError(null);
-  }
-  async function save() {
-    if (busy) return;
+  function clearEditor() { setHost(""); setPath("/"); setUpstreams([]); setEditing(null); }
+  function edit(route: PipeRoute, index: number) { setHost(route.host); setPath(route.pathPrefix); setUpstreams([...route.upstreams]); setEditing(index); }
+  async function save(event?: FormEvent) {
+    event?.preventDefault();
+    if (mutating.current) return;
+    let config = draft;
+    if (editorPending) {
+      if (!host.trim() || !path.startsWith("/") || !appsReady) { setError(t("Enter a domain and path, then select at least one app.", "도메인과 경로를 입력하고 앱을 하나 이상 선택한다.")); return; }
+      const route = { host: host.trim().toLowerCase(), pathPrefix: path.trim() || "/", upstreams };
+      const duplicate = draft.routes.some((existing, index) => index !== editing && existing.host === route.host && existing.pathPrefix.replace(/\/+$/, "") === route.pathPrefix.replace(/\/+$/, ""));
+      if (duplicate) { setError(t("This domain and path already exist.", "이 도메인과 경로가 이미 있다.")); return; }
+      config = { ...draft, routes: editing === null ? [...draft.routes, route] : draft.routes.map((existing, index) => index === editing ? route : existing) };
+    }
     if (draft.tunnel && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(draft.tunnel.id.trim())) { setError(t("Enter a valid tunnel UUID.", "올바른 터널 UUID를 입력한다.")); return; }
     let secret: unknown = null;
-    try { if (draft.tunnel && credentials.trim()) secret = JSON.parse(credentials); }
+    try { if (config.tunnel && credentials.trim()) secret = JSON.parse(credentials); }
     catch { setError(t("Tunnel credentials must be valid JSON.", "터널 인증 정보는 올바른 JSON이어야 한다.")); return; }
     mutating.current = true; setBusy(true); revision.current++; setError(null); setNotice(null);
     try {
-      const next = await applyPipe(draft, secret);
-      setSnapshot(next); setDraft(next.config ?? draft); setDirty(false); setCredentials("");
-      setNotice(t("Routes applied. Existing requests continue during reload.", "라우트를 적용했다. 설정 전환 중 기존 요청을 계속 처리한다."));
+      const next = await applyPipe(config, secret);
+      setSnapshot(next); setDraft(next.config ?? config); setDirty(false); setCredentials(""); clearEditor();
+      setNotice(t("Routes saved.", "라우트를 저장했다."));
     } catch (failure) { setError((failure as Error).message); }
     finally { mutating.current = false; setBusy(false); revision.current++; }
   }
@@ -115,28 +130,25 @@ export default function Pipe({ onUnsavedChange }: { onUnsavedChange: (unsaved: b
       {snapshot && !snapshot.nginxAvailable && <p className="field-error">{t("Install Nginx on this host before applying routes.", "라우트를 적용하기 전에 이 호스트에 Nginx를 설치한다.")}</p>}
       <div className="pipe-controls">
         <label className="field"><span>{t("Listen address", "수신 주소")}</span><input aria-label={t("Listen address", "수신 주소")} value={draft.listen} disabled={busy} onChange={event => change({ ...draft, listen: event.target.value })} /></label>
-        <button className="btn primary" type="button" disabled={saveDisabled} onClick={save}>{busy ? t("Applying…", "처리 중…") : t("Save and apply", "저장·적용")}</button>
+        <button className="btn primary" type="button" disabled={saveDisabled} onClick={() => void save()}>{busy ? t("Saving…", "저장 중…") : t("Save", "저장")}</button>
         <button className="btn" type="button" disabled={busy || !snapshot || !snapshot.units.some(unit => unit.activeState === "active")} onClick={stop}>{t("Stop", "중지")}</button>
-        <span className="poll-note">{dirty ? t("Unapplied changes", "적용하지 않은 변경") : t("Saved configuration", "저장된 설정")}</span>
+        <span className="poll-note">{hasUnsavedChanges ? t("Unsaved changes", "저장하지 않은 변경") : t("Saved configuration", "저장된 설정")}</span>
       </div>
     </section>
 
-    <CloudflareConnect config={draft} snapshot={snapshot} busy={busy}
+    <CloudflareConnect config={draft} snapshot={snapshot} busy={busy} apps={apps} vmsLoading={vmsLoading} vmsUnavailable={vmsUnavailable}
       onBusy={value => { mutating.current = value; setBusy(value); revision.current++; }}
       onConnected={next => { setSnapshot(next); setDraft(next.config ?? draft); setDirty(false); setCredentials(""); setError(null); }} />
 
     <section className="panel" aria-label={t("Routes", "라우트")}>
       <h2 className="panel-title">{t("Routes", "라우트")}</h2>
-      <p className="poll-note">{t("Add, edit or remove routes, then select Save and apply. Refreshing before saving reloads the saved routes.", "라우트를 추가·수정·제거한 뒤 저장·적용을 누른다. 저장 전에 새로고침하면 기존 라우트를 다시 불러온다.")}</p>
-      {dirty && <div className="banner info pipe-unsaved" role="status">
-        <span>{t("Route changes have not been saved. Save and apply to update the running service.", "라우트 변경을 아직 저장하지 않았다. 저장·적용을 눌러 실행 중인 서비스에 반영한다.")}</span>
-        <button className="btn primary" type="button" aria-label={t("Save route changes", "라우트 변경 저장")} disabled={saveDisabled} onClick={save}>{busy ? t("Applying…", "처리 중…") : t("Save and apply", "저장·적용")}</button>
-      </div>}
-      <form className="create-grid pipe-route-form" onSubmit={addRoute}>
-        <div className="field"><label htmlFor="pipe-domain">{t("Domain", "도메인")}</label><input id="pipe-domain" placeholder="app.example.com" value={host} onChange={event => setHost(event.target.value)} required disabled={busy} /></div>
+      <p className="pipe-description">{t("Routes send requests to apps based on the domain and URL path. Select multiple apps to distribute requests between them.", "도메인과 URL 경로에 따라 요청을 앱으로 전달한다. 앱을 여러 개 선택하면 요청을 나누어 처리한다.")}</p>
+      {hasUnsavedChanges && <div className="pipe-unsaved" role="status">{t("You have unsaved changes.", "저장하지 않은 변경이 있다.")}</div>}
+      <form className="create-grid pipe-route-form" onSubmit={save}>
+        <div className="field"><label htmlFor="pipe-domain">{t("Domain", "도메인")}</label><input id="pipe-domain" placeholder="app.example.com" value={host} onChange={event => setHost(event.target.value)} required={editorPending} disabled={busy} /></div>
         <div className="field"><label htmlFor="pipe-path">{t("Path prefix", "경로 시작")}</label><input id="pipe-path" placeholder="/api" value={path} onChange={event => setPath(event.target.value)} required pattern="/.*" disabled={busy} /></div>
-        <div className="field pipe-targets"><label htmlFor="pipe-upstreams">{t("App addresses", "앱 주소")}</label><input id="pipe-upstreams" placeholder="127.0.0.1:18081, 127.0.0.1:18082" value={upstreams} onChange={event => setUpstreams(event.target.value)} required disabled={busy} /><span className="poll-note">{t("IP:port, separated by commas. Requests are distributed in turn.", "IP:포트를 쉼표로 구분한다. 요청을 순서대로 분산한다.")}</span></div>
-        <div className="field field-submit"><label>&nbsp;</label><button className="btn" type="submit" disabled={busy}>{editing === null ? t("Add route", "라우트 추가") : t("Update route", "라우트 수정")}</button>{editing !== null && <button type="button" className="btn" onClick={clearEditor}>{t("Cancel", "취소")}</button>}</div>
+        <PipeAppPicker id="pipe-apps" label={t("Apps", "앱 선택")} apps={apps} selected={upstreams} preserved={preserved} loading={vmsLoading} unavailable={vmsUnavailable} disabled={busy} onChange={setUpstreams} />
+        <div className="field field-submit"><label>&nbsp;</label><button className="btn primary" type="submit" disabled={saveDisabled || !hasUnsavedChanges}>{busy ? t("Saving…", "저장 중…") : t("Save", "저장")}</button>{editorPending && <button type="button" className="btn" disabled={busy} onClick={clearEditor}>{t("Cancel", "취소")}</button>}</div>
       </form>
       {draft.routes.length > 0 ? <div className="table-scroll"><table className="vm-table pipe-route-table"><thead><tr><th>{t("Domain", "도메인")}</th><th>{t("Path", "경로")}</th><th>{t("App addresses", "앱 주소")}</th><th>{t("Actions", "작업")}</th></tr></thead><tbody>
         {draft.routes.map((route, index) => <tr key={`${index}:${route.host}:${route.pathPrefix}`}><td>{route.host}</td><td>{route.pathPrefix}</td><td className="pipe-addresses">{route.upstreams.map(address => <div key={address}>{address}</div>)}</td><td><div className="pipe-row-actions"><button className="btn" type="button" disabled={busy} onClick={() => edit(route, index)}>{t("Edit", "수정")}</button><button className="btn" type="button" disabled={busy} onClick={() => { change({ ...draft, routes: draft.routes.filter((_, row) => row !== index) }); clearEditor(); }}>{t("Remove", "제거")}</button></div></td></tr>)}

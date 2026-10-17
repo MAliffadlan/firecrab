@@ -1,43 +1,48 @@
 import { useState } from "react";
 import { connectCloudflare, getCloudflareZones, type CloudflareZone, type PipeConfig, type PipeSnapshot } from "../api/pipe";
 import { useI18n } from "../i18n";
+import { canUsePipeApps, type PipeApp } from "../pipeApps";
+import PipeAppPicker from "./PipeAppPicker";
 
 interface Props {
   config: PipeConfig;
   snapshot: PipeSnapshot | null;
   busy: boolean;
+  apps: PipeApp[];
+  vmsLoading: boolean;
+  vmsUnavailable: boolean;
   onBusy: (busy: boolean) => void;
   onConnected: (snapshot: PipeSnapshot) => void;
 }
 
-export default function CloudflareConnect({ config, snapshot, busy, onBusy, onConnected }: Props) {
+export default function CloudflareConnect({ config, snapshot, busy, apps, vmsLoading, vmsUnavailable, onBusy, onConnected }: Props) {
   const { t } = useI18n();
   const [token, setToken] = useState("");
   const [zones, setZones] = useState<CloudflareZone[]>([]);
   const [zoneId, setZoneId] = useState("");
   const [subdomain, setSubdomain] = useState("app");
-  const [addresses, setAddresses] = useState("");
+  const [addresses, setAddresses] = useState<string[]>([]);
   const [step, setStep] = useState<"idle" | "domains" | "connecting">("idle");
   const [error, setError] = useState<string | null>(null);
   const [publicUrl, setPublicUrl] = useState<string | null>(null);
   const zone = zones.find(zone => zone.id === zoneId);
   const hostname = zone ? [subdomain.trim().toLowerCase(), zone.name].filter(Boolean).join(".") : "";
   const configured = snapshot?.config?.tunnel;
+  const appsReady = !vmsLoading && !vmsUnavailable && canUsePipeApps(apps, addresses);
 
   async function loadDomains() {
     setStep("domains"); onBusy(true); setError(null); setPublicUrl(null);
     try {
       const result = await getCloudflareZones(token.trim());
       setZones(result); setZoneId(result[0]?.id ?? "");
-      if (!addresses.trim()) setAddresses(config.routes[0]?.upstreams.join(", ") ?? "");
     } catch (failure) { setError((failure as Error).message); setZones([]); }
     finally { setStep("idle"); onBusy(false); }
   }
 
   async function connect() {
-    if (!hostname || !zoneId || busy) return;
+    if (!hostname || !zoneId || busy || !appsReady) return;
     setStep("connecting"); onBusy(true); setError(null);
-    const route = { host: hostname, pathPrefix: "/", upstreams: addresses.split(/[\s,]+/).filter(Boolean) };
+    const route = { host: hostname, pathPrefix: "/", upstreams: addresses };
     const next = { ...config, tunnel: null, routes: [...config.routes.filter(route => !(route.host === hostname && route.pathPrefix.replace(/\/+$/, "") === "")), route] };
     try {
       const result = await connectCloudflare(token.trim(), zoneId, hostname, next);
@@ -80,8 +85,8 @@ export default function CloudflareConnect({ config, snapshot, busy, onBusy, onCo
       {zones.length > 0 && <div className="pipe-tunnel-fields">
         <label className="field"><span>{t("Cloudflare domain", "Cloudflare 도메인")}</span><select aria-label={t("Cloudflare domain", "Cloudflare 도메인")} value={zoneId} disabled={busy} onChange={event => setZoneId(event.target.value)}>{zones.map(zone => <option key={zone.id} value={zone.id}>{zone.name}</option>)}</select></label>
         <label className="field"><span>{t("Subdomain", "서브도메인")}</span><input aria-label={t("Subdomain", "서브도메인")} value={subdomain} placeholder="app" disabled={busy} onChange={event => setSubdomain(event.target.value)} /><span className="poll-note">{hostname}</span></label>
-        <label className="field"><span>{t("Public app addresses", "공개할 앱 주소")}</span><input aria-label={t("Public app addresses", "공개할 앱 주소")} value={addresses} placeholder="127.0.0.1:18081, 127.0.0.1:18082" disabled={busy} onChange={event => setAddresses(event.target.value)} /><span className="poll-note">{t("Reachable IP:port addresses in the managed host. Multiple addresses share requests.", "관리 호스트에서 접근할 수 있는 IP:포트를 입력한다. 여러 주소로 요청을 분산한다.")}</span></label>
-        <div className="field field-submit"><button className="btn primary" type="button" disabled={busy || !snapshot?.nginxAvailable || !addresses.trim()} onClick={connect}>{step === "connecting" ? t("Connecting…", "연결 중…") : t("Connect and publish", "연결하고 공개")}</button><span className="poll-note">{t("Creates a public DNS record. Existing DNS records are never overwritten.", "공개 DNS 기록을 만든다. 기존 DNS 기록은 덮어쓰지 않는다.")}</span></div>
+        <PipeAppPicker id="cloudflare-apps" label={t("Public apps", "공개할 앱 선택")} apps={apps} selected={addresses} loading={vmsLoading} unavailable={vmsUnavailable} disabled={busy} onChange={setAddresses} />
+        <div className="field field-submit"><button className="btn primary" type="button" disabled={busy || !snapshot?.nginxAvailable || !appsReady} onClick={connect}>{step === "connecting" ? t("Connecting…", "연결 중…") : t("Connect and publish", "연결하고 공개")}</button><span className="poll-note">{t("Creates a public DNS record. Existing DNS records are never overwritten.", "공개 DNS 기록을 만든다. 기존 DNS 기록은 덮어쓰지 않는다.")}</span></div>
       </div>}
       {step === "connecting" && <p className="poll-note" role="status">{t("Installing the connector if needed, creating the tunnel and DNS, then checking the Cloudflare connection. Keep this page open.", "필요한 연결 프로그램을 설치하고 터널과 DNS를 생성한 뒤 Cloudflare 연결을 확인한다. 이 화면을 유지한다.")}</p>}
       {snapshot && !snapshot.nginxAvailable && <p className="field-error">{t("Install Nginx on the managed host before connecting.", "연결 전에 관리 호스트에 Nginx를 설치한다.")}</p>}
