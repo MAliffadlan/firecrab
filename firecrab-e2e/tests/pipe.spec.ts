@@ -84,6 +84,100 @@ test.describe("Pipe dashboard @dashboard", () => {
     await expect(panel.locator(".state-badge.running")).toHaveCount(0);
   });
 
+  test("keeps a removed route out of the draft across polling and cancelled refresh", async ({ page }, info) => {
+    await page.clock.install();
+    const mock = await open(page);
+    const routes = page.getByRole("region", { name: "Routes", exact: true });
+    await routes.getByRole("button", { name: "Remove", exact: true }).click();
+    await expect(routes.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
+    await expect(routes.getByRole("status")).toContainText("Route changes have not been saved.");
+    await page.clock.runFor(8_100);
+    await expect(routes.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
+    expect(mock.writes).toHaveLength(0);
+    await routes.screenshot({ path: info.outputPath("pipe-unsaved-desktop.png") });
+
+    const dialogPromise = page.waitForEvent("dialog", { timeout: 10_000 });
+    const reloading = page.reload({ timeout: 10_000 }).catch(() => undefined);
+    const dialog = await dialogPromise;
+    expect(dialog.type()).toBe("beforeunload");
+    await dialog.dismiss();
+    await reloading;
+    await expect(routes.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
+    await expect(routes.getByRole("button", { name: "Save route changes", exact: true })).toBeEnabled();
+  });
+
+  test("saves route removal from the nearby action and keeps it removed after refresh", async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mock = await open(page, { locale: "ko" });
+    const routes = page.getByRole("region", { name: "라우트", exact: true });
+    await expect(routes).toContainText("저장 전에 새로고침하면 기존 라우트를 다시 불러온다.");
+    await routes.getByRole("button", { name: "제거", exact: true }).click();
+    await expect(routes.getByRole("status")).toContainText("라우트 변경을 아직 저장하지 않았다.");
+    await expect(routes.getByText("라우트가 없다. 도메인, 경로, 앱 주소를 추가한다.", { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await routes.screenshot({ path: info.outputPath("pipe-unsaved-mobile-ko.png") });
+    await routes.getByRole("button", { name: "라우트 변경 저장", exact: true }).click();
+    await expect(page.getByText("저장된 설정", { exact: true })).toBeVisible();
+    expect(mock.writes).toHaveLength(1);
+    expect(mock.writes[0].config.routes).toEqual([]);
+    await expect(routes.getByRole("status")).toHaveCount(0);
+    const dialogs: string[] = [];
+    page.on("dialog", async dialog => { dialogs.push(dialog.type()); await dialog.dismiss(); });
+    await page.reload();
+    await expect(routes).toContainText("라우트가 없다.");
+    expect(dialogs).toEqual([]);
+  });
+
+  test("confirms leaving unsaved Pipe changes and keeps them when navigation is cancelled", async ({ page }) => {
+    const mock = await open(page, { reject: true });
+    const routes = page.getByRole("region", { name: "Routes", exact: true });
+    await routes.getByRole("button", { name: "Remove", exact: true }).click();
+    await routes.getByRole("button", { name: "Save route changes", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("invalid app address");
+    page.once("dialog", async dialog => {
+      expect(dialog.type()).toBe("confirm");
+      expect(dialog.message()).toContain("Pipe changes have not been saved.");
+      await dialog.dismiss();
+    });
+    await page.getByRole("button", { name: "MicroVM", exact: true }).click();
+    await expect(page).toHaveURL(/#\/pipe$/);
+    await expect(routes.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
+    expect(mock.writes).toHaveLength(1);
+
+    page.once("dialog", dialog => dialog.accept());
+    await page.getByRole("button", { name: "MicroVM", exact: true }).click();
+    await expect(page).toHaveURL(/#\/vms$/);
+    await page.getByRole("button", { name: "Pipe", exact: true }).click();
+    await expect(routes.getByRole("button", { name: "Remove", exact: true })).toHaveCount(1);
+    await expect(routes.getByRole("status")).toHaveCount(0);
+  });
+
+  for (const direction of ["back", "forward"] as const) test(`keeps unfinished route inputs and browser history when ${direction} is cancelled`, async ({ page }) => {
+    await open(page);
+    await page.getByRole("button", { name: "MicroVM", exact: true }).click();
+    await expect(page).toHaveURL(/#\/vms$/);
+    await page.getByRole("button", { name: "Pipe", exact: true }).click();
+    if (direction === "forward") {
+      await page.getByRole("button", { name: "MicroVM", exact: true }).click();
+      await expect(page).toHaveURL(/#\/vms$/);
+      await page.goBack();
+      await expect(page).toHaveURL(/#\/pipe$/);
+    }
+    await page.getByLabel("Domain", { exact: true }).fill("unfinished.example.com");
+    page.once("dialog", dialog => dialog.dismiss());
+    await (direction === "back" ? page.goBack() : page.goForward());
+    await expect(page).toHaveURL(/#\/pipe$/);
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("unfinished.example.com");
+
+    page.once("dialog", dialog => dialog.accept());
+    await (direction === "back" ? page.goBack() : page.goForward());
+    await expect(page).toHaveURL(/#\/vms$/);
+    await (direction === "back" ? page.goForward() : page.goBack());
+    await expect(page).toHaveURL(/#\/pipe$/);
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("");
+    await expect(page.getByText("Saved configuration", { exact: true })).toBeVisible();
+  });
+
   test("uses the existing responsive shell and clears credentials after saving", async ({ page }, info) => {
     await page.setViewportSize({ width: 390, height: 844 });
     const mock = await open(page, { locale: "ko" });

@@ -2084,6 +2084,8 @@ table.image-table .image-package-url a:hover {
 
 /* Pipe uses the existing panels, tables and field tokens. */
 .pipe-controls { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; margin-top: 1rem; }
+.pipe-unsaved { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; }
+.pipe-unsaved > span { flex: 1 1 18rem; }
 .cloudflare-help { margin-top: 1rem; }
 .cloudflare-help summary { cursor: pointer; padding-block: .4rem; }
 .cloudflare-help ol { padding-left: 1.4rem; line-height: 1.7; }

@@ -115,7 +115,12 @@ export default function App() {
   // id of the VM whose detail modal is open, if any — local UI state, not
   // server-synced. The serial console is a full-page hash route instead.
   const [openDetailId, setOpenDetailId] = useState<string | null>(null);
-  const { route, selectView, closeConsole } = useAppRoute();
+  const [pipeHasUnsavedChanges, setPipeHasUnsavedChanges] = useState(false);
+  const confirmLeave = useCallback(() => !pipeHasUnsavedChanges || window.confirm(t(
+    "Pipe changes have not been saved. Leave without saving?",
+    "Pipe 변경을 저장하지 않았다. 저장하지 않고 이동할까요?",
+  )), [pipeHasUnsavedChanges, t]);
+  const { route, selectView, closeConsole } = useAppRoute(confirmLeave);
 
   const runRefresh = useCallback(() => {
     const gen = ++refreshGen.current;
@@ -234,7 +239,7 @@ export default function App() {
         {/* Each page mounts only while selected, so its own polling stops
             the moment you navigate away. */}
         {view === "networks" && <MicroNetworks />}
-        {view === "pipe" && <Pipe />}
+        {view === "pipe" && <Pipe onUnsavedChange={setPipeHasUnsavedChanges} />}
         {view === "storages" && <MicroStorages />}
         {view === "images" && <Images />}
         {view === "kernels" && <Kernels />}
