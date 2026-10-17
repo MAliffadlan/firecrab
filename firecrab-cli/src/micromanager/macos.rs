@@ -2,11 +2,12 @@ mod daemon;
 mod dev;
 mod filesystem;
 mod forward;
-mod lifecycle;
+pub(super) mod lifecycle;
 mod processes;
 mod provision;
 mod provision_log;
 mod repair;
+pub(super) mod resource;
 mod ssh;
 
 use std::ffi::OsString;
@@ -17,6 +18,7 @@ use std::process::{Child, Command as ProcessCommand, ExitStatus};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::dev::dashboard;
 use super::{Command, DevCommand, debug, managed_home, manifest, report};
 
 const HELPER_NAME: &str = "firecrab-micromanager-macos";
@@ -32,6 +34,8 @@ const PROVISION_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Resource(#[from] super::resource::Error),
     #[error("could not resolve the running firecrab executable: {0}")]
     CurrentExecutable(#[source] std::io::Error),
     #[error("could not find {0}; build or reinstall the signed macOS helper first")]
@@ -104,6 +108,7 @@ impl Error {
             | Self::Dev(
                 dev::Error::GuestNotReady
                 | dev::Error::GuestSshUnavailable { .. }
+                | dev::Error::GuestFilesystemUnhealthy(_)
                 | dev::Error::GuestSshInterrupted(_)
                 | dev::Error::LocalApiUnavailable,
             ) => Some(REPAIR_HINT),
@@ -114,6 +119,9 @@ impl Error {
 
 pub fn run(command: Command) -> Result<i32, Error> {
     match command {
+        Command::Resource { options } => Ok(super::resource::run(options)?),
+        Command::ResourceServer { home } => Ok(super::resource_server::run(home)?),
+        Command::ResourceApply { id } => Ok(super::resource::run_apply(&id)?),
         Command::Install { yes } => run_install(false, yes),
         Command::Reinstall { yes } => run_install(true, yes),
         Command::Repair => run_repair(),
@@ -251,6 +259,11 @@ fn run_start() -> Result<i32, Error> {
     let paths = daemon::paths(&layout)?;
     if paths.plist.is_file() && paths.wrapper.is_file() {
         provision::require_guest_provisioned(&layout.managed_home)?;
+        daemon::install(
+            &layout,
+            &layout.helper_path(),
+            &layout.managed_home.join("runtime/manager_ed25519"),
+        )?;
     }
     let status = daemon::start(&layout)?;
     print_daemon_status(&status, &layout);
@@ -276,6 +289,11 @@ fn run_dev(source: Option<&Path>, release: bool, restore: bool, yes: bool) -> Re
         )?)
     };
     let layout = lifecycle::Layout::from_process_env()?;
+    let frontend = checkout
+        .as_ref()
+        .map(|checkout| dashboard::prepare(&checkout.root))
+        .transpose()
+        .map_err(dev::Error::from)?;
     let paths = daemon::paths(&layout)?;
     if !paths.wrapper.is_file() || !paths.plist.is_file() {
         if restore {
@@ -299,27 +317,47 @@ fn run_dev(source: Option<&Path>, release: bool, restore: bool, yes: bool) -> Re
         .filter(|_| status.loaded)
         .ok_or(dev::Error::GuestNotReady)?;
     dev::deploy(&layout, ip, checkout.as_ref(), release)?;
+    wait_for_dev_api(&layout)?;
+    report!("[PASS] API: http://127.0.0.1:5523/");
+    if let Some(source) = frontend {
+        dashboard::start(&source, &layout.managed_home).map_err(dev::Error::from)?;
+    } else {
+        dashboard::stop(&layout.managed_home).map_err(dev::Error::from)?;
+    }
+    report!("  logs: firecrab service debug --logs --tail 100");
+    Ok(0)
+}
+
+fn wait_for_dev_api(layout: &lifecycle::Layout) -> Result<(), Error> {
     let started = Instant::now();
-    while !daemon::status(&layout)?.api_reachable {
+    while !daemon::status(layout)?.api_reachable {
         if started.elapsed() >= Duration::from_secs(30) {
             return Err(dev::Error::LocalApiUnavailable.into());
         }
         thread::sleep(Duration::from_secs(1));
     }
-    report!("[PASS] API: http://127.0.0.1:5523/");
-    report!("  logs: firecrab service debug --logs --tail 100");
-    Ok(0)
+    Ok(())
 }
 
 fn run_dev_control(command: DevCommand) -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
     let ip = running_guest_ip(&layout)?;
     dev::control(&layout, ip, command)?;
+    if command != DevCommand::Start {
+        dashboard::stop(&layout.managed_home).map_err(dev::Error::from)?;
+    }
+    if command != DevCommand::Stop {
+        wait_for_dev_api(&layout)?;
+        report!("[PASS] API: http://127.0.0.1:5523/");
+        let source = dashboard::source(&layout.managed_home).map_err(dev::Error::from)?;
+        dashboard::start(&source, &layout.managed_home).map_err(dev::Error::from)?;
+    }
     Ok(0)
 }
 
 fn run_stop() -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
+    dashboard::stop(&layout.managed_home).map_err(dev::Error::from)?;
     daemon::stop(&layout)?;
     report!("[PASS] launchd: stopped");
     Ok(0)
@@ -343,6 +381,7 @@ fn run_debug(options: debug::Options) -> Result<i32, Error> {
         &[
             ("daemon", "daemon.log"),
             ("console", "vm-console.log"),
+            ("dashboard", "dev-dashboard.log"),
             ("provision", "guest-provision.log"),
         ],
     );
@@ -830,6 +869,7 @@ fn run_uninstall(purge: bool) -> Result<i32, Error> {
     if purge {
         lifecycle::validate_purge(&layout)?;
     }
+    dashboard::stop(&layout.managed_home).map_err(dev::Error::from)?;
     daemon::uninstall(&layout)?;
     lifecycle::uninstall_at(&layout, purge)?;
     report!("microManager uninstalled");
@@ -907,6 +947,9 @@ fn command_arguments(command: &Command) -> Vec<OsString> {
         | Command::Stop
         | Command::Status
         | Command::Debug { .. }
+        | Command::Resource { .. }
+        | Command::ResourceServer { .. }
+        | Command::ResourceApply { .. }
         | Command::Dev { .. }
         | Command::Shell { .. }
         | Command::ForwardPorts { .. } => {
@@ -944,6 +987,9 @@ mod tests {
                 detail: "kex_exchange_identification: read: Connection reset by peer".to_string(),
             }),
             Error::Dev(dev::Error::GuestSshInterrupted("source upload")),
+            Error::Dev(dev::Error::GuestFilesystemUnhealthy(
+                "read-only root".into(),
+            )),
             Error::Dev(dev::Error::LocalApiUnavailable),
         ] {
             assert_eq!(error.recovery_hint(), Some(REPAIR_HINT), "{error}");

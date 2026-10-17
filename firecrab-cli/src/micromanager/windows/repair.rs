@@ -37,7 +37,7 @@ pub fn run(layout: &Layout) -> Result<daemon::Status, Error> {
         super::super::runtime::Runtime::load(&layout.managed_home).map_err(daemon::Error::from)?;
     run_with(
         layout,
-        || daemon::task_definition(&settings),
+        || daemon::task_definition(layout, &settings),
         daemon::READY_TIMEOUT,
     )
 }

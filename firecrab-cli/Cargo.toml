@@ -10,6 +10,7 @@ name = "firecrab"
 path = "src/main.rs"
 
 [dependencies]
+axum = "0.8.9"
 base64 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
@@ -34,3 +35,6 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.30", features = ["user"] }
+
+[dev-dependencies]
+tower = { version = "0.5.3", features = ["util"] }

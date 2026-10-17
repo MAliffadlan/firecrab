@@ -34,7 +34,8 @@ The outer runtime and localhost connection differ.
 
 macOS launchd keeps the VM and SSH tunnel running.
 Its OS and persistent data use separate disks.
-Windows Task Scheduler keeps WSL open; OS and data share `ext4.vhdx`.
+Windows Task Scheduler runs the native resource controller, which holds WSL open with a windowless `wsl.exe --exec sleep infinity` child; OS and data share `ext4.vhdx`.
+The controller serves [management VM resource controls](../guides/micromanager-resources.md) on host loopback port 5524.
 Both require nested virtualization.
 See the [macOS](../getting-started/macos.md) and [Windows](../getting-started/windows.md) guides for support limits and recovery.
 

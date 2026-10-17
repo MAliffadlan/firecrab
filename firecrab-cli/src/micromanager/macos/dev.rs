@@ -28,11 +28,16 @@ pub fn deploy(
 ) -> Result<(), Error> {
     // A guest marker is written before the host tunnel succeeds and can survive
     // a failed boot. Verify the live SSH connection before uploading the snapshot.
-    let output = ssh_command(layout, ip, "true")?
-        .stdin(Stdio::null())
+    let output = ssh_command(layout, ip, "bash -s -- check")?
+        .stdin(Stdio::from(guest_script()?))
         .output()
         .map_err(|source| io_error("probe management SSH", source))?;
     if !output.status.success() {
+        if output.status.code() == Some(74) {
+            return Err(Error::GuestFilesystemUnhealthy(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
         return Err(Error::GuestSshUnavailable {
             ip,
             detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -87,7 +92,9 @@ fn run_ssh(
         .status()
         .map_err(|source| io_error(action, source))?;
     if !status.success() {
-        return Err(if status.code() == Some(255) {
+        return Err(if status.code() == Some(74) {
+            Error::GuestFilesystemUnhealthy(action.to_string())
+        } else if status.code() == Some(255) {
             Error::GuestSshInterrupted(action)
         } else {
             Error::Command(action)

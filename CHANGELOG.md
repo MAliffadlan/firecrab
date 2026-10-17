@@ -71,13 +71,20 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Changed
 
-- None.
+- The dashboard's VM list shows only a VM's own state: the API label next to it
+  is gone, and the API's reconciliation result for a VM stays in its detail view.
 
 ### Deprecated
 
 - None.
 
 ### Fixed
+
+- macOS and Windows `service dev` starts the source dashboard on
+  `http://localhost:8080`, checks its API proxy, and keeps it running after the
+  command exits. Development start/stop/restart commands control the dashboard
+  with the guest services. Port conflicts and frontend startup failures fail
+  the command instead of reporting an API-only success.
 
 - macOS service repair prints all six stages. Service start and repair report
   VM/API readiness and elapsed time every ten seconds while waiting. Shutdown

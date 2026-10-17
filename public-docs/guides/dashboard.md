@@ -37,10 +37,17 @@ An external client may also need router forwarding.
 
 ## State and usage
 
-**VM** shows lifecycle state.
-**API** shows the latest API startup or explicit network-recovery result.
-Hover or focus the labels for details; VM details include diagnostics and check time.
-These results are snapshots; a new VM start clears the previous result.
+The list shows one **VM** label for lifecycle state.
+Green means running, amber means starting or stopping, red means error, and gray means inactive.
+Hover or focus the label for the VM's name, ID, state, and description.
+Tooltips fit the viewport, stay open while hovered, and close with Escape.
+
+VM details show **API-STATUS** when the API recorded a startup or explicit network-recovery result.
+The section identifies Firecrab API (`firecrab-api`) and includes the outcome, information,
+diagnostics, and check time in English or Korean.
+Check times use `YYYY-MM-DD HH:mm:ss` with the viewer's UTC offset.
+Results are snapshots; a new VM start clears the previous result.
+VMs without a recorded result have no **API-STATUS** section.
 See the [reconciliation contract](../reference/api.md#api-startup-reconciliation) for each outcome.
 
 Guest CPU and memory require the Firecrab Metrics Agent.
