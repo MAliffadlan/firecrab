@@ -142,7 +142,7 @@ pub enum Command {
         #[arg(long, requires = "logs", value_parser = clap::value_parser!(u16).range(1..=1000))]
         tail: Option<u16>,
     },
-    /// Build and deploy local sources, or control the guest API and helper.
+    /// Build/deploy guest services and start the source dashboard on localhost:8080.
     #[command(args_conflicts_with_subcommands = true)]
     Dev {
         #[command(subcommand)]
@@ -184,11 +184,11 @@ pub enum Command {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Subcommand)]
 pub enum DevCommand {
-    /// Start the deployed API and helper without rebuilding or starting microManager.
+    /// Start the deployed API/helper and dashboard without rebuilding or booting the VM.
     Start,
-    /// Stop the API and helper while keeping microManager running.
+    /// Stop the API/helper and development dashboard while keeping microManager running.
     Stop,
-    /// Restart the deployed API and helper without rebuilding or restarting microManager.
+    /// Restart the deployed API/helper and dashboard without rebuilding or rebooting the VM.
     Restart,
 }
 

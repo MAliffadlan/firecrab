@@ -69,6 +69,12 @@ Entries land here as work merges, and move under the next version heading when t
 
 ### Fixed
 
+- macOS and Windows `service dev` starts the source dashboard on
+  `http://localhost:8080`, checks its API proxy, and keeps it running after the
+  command exits. Development start/stop/restart commands control the dashboard
+  with the guest services. Port conflicts and frontend startup failures fail
+  the command instead of reporting an API-only success.
+
 - macOS service repair prints all six stages. Service start and repair report
   VM/API readiness and elapsed time every ten seconds while waiting. Shutdown
   waits also report launchd/VM state. Local VM/API startup uses a ten-second

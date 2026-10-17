@@ -18,6 +18,7 @@ use std::process::{Child, Command as ProcessCommand, ExitStatus};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::dev::dashboard;
 use super::{Command, DevCommand, debug, managed_home, manifest, report};
 
 const HELPER_NAME: &str = "firecrab-micromanager-macos";
@@ -288,6 +289,11 @@ fn run_dev(source: Option<&Path>, release: bool, restore: bool, yes: bool) -> Re
         )?)
     };
     let layout = lifecycle::Layout::from_process_env()?;
+    let frontend = checkout
+        .as_ref()
+        .map(|checkout| dashboard::prepare(&checkout.root))
+        .transpose()
+        .map_err(dev::Error::from)?;
     let paths = daemon::paths(&layout)?;
     if !paths.wrapper.is_file() || !paths.plist.is_file() {
         if restore {
@@ -313,9 +319,11 @@ fn run_dev(source: Option<&Path>, release: bool, restore: bool, yes: bool) -> Re
     dev::deploy(&layout, ip, checkout.as_ref(), release)?;
     wait_for_dev_api(&layout)?;
     report!("[PASS] API: http://127.0.0.1:5523/");
-    report!(
-        "  dashboard dev server: npm --prefix firecrab-frontend run dev (http://localhost:8080/)"
-    );
+    if let Some(source) = frontend {
+        dashboard::start(&source, &layout.managed_home).map_err(dev::Error::from)?;
+    } else {
+        dashboard::stop(&layout.managed_home).map_err(dev::Error::from)?;
+    }
     report!("  logs: firecrab service debug --logs --tail 100");
     Ok(0)
 }
@@ -335,18 +343,21 @@ fn run_dev_control(command: DevCommand) -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
     let ip = running_guest_ip(&layout)?;
     dev::control(&layout, ip, command)?;
+    if command != DevCommand::Start {
+        dashboard::stop(&layout.managed_home).map_err(dev::Error::from)?;
+    }
     if command != DevCommand::Stop {
         wait_for_dev_api(&layout)?;
         report!("[PASS] API: http://127.0.0.1:5523/");
-        report!(
-            "  dashboard dev server: npm --prefix firecrab-frontend run dev (http://localhost:8080/)"
-        );
+        let source = dashboard::source(&layout.managed_home).map_err(dev::Error::from)?;
+        dashboard::start(&source, &layout.managed_home).map_err(dev::Error::from)?;
     }
     Ok(0)
 }
 
 fn run_stop() -> Result<i32, Error> {
     let layout = lifecycle::Layout::from_process_env()?;
+    dashboard::stop(&layout.managed_home).map_err(dev::Error::from)?;
     daemon::stop(&layout)?;
     report!("[PASS] launchd: stopped");
     Ok(0)
@@ -370,6 +381,7 @@ fn run_debug(options: debug::Options) -> Result<i32, Error> {
         &[
             ("daemon", "daemon.log"),
             ("console", "vm-console.log"),
+            ("dashboard", "dev-dashboard.log"),
             ("provision", "guest-provision.log"),
         ],
     );
@@ -829,6 +841,7 @@ fn run_uninstall(purge: bool) -> Result<i32, Error> {
     if purge {
         lifecycle::validate_purge(&layout)?;
     }
+    dashboard::stop(&layout.managed_home).map_err(dev::Error::from)?;
     daemon::uninstall(&layout)?;
     lifecycle::uninstall_at(&layout, purge)?;
     report!("microManager uninstalled");

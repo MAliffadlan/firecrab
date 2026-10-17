@@ -5,6 +5,8 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub(super) mod dashboard;
+
 pub(super) const GUEST_SCRIPT: &str =
     include_str!("../../../scripts/micromanager/dev-macos-guest.sh");
 // Include the workspace manifests and compile-time resources, not the whole
@@ -28,6 +30,8 @@ const OPTIONAL_SOURCE_INPUTS: &[&str] = &["packaging/micromanager.toml"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Dashboard(#[from] dashboard::Error),
     #[cfg(target_os = "macos")]
     #[error(transparent)]
     Manifest(#[from] super::manifest::Error),
