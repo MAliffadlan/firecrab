@@ -50,7 +50,8 @@ async fn execute(
     action: &str,
     input: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, HelperFailure> {
-    let mut child = Command::new(cli)
+    let mut command = Command::new(cli);
+    command
         .args(["pipe", action])
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -59,9 +60,24 @@ async fn execute(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(failure)?;
+        .kill_on_drop(true);
+    // Parallel tests can fork while another test writes its stub CLI. The child
+    // briefly inherits that writer, so Linux rejects exec with ETXTBSY. Match
+    // the API's bounded test-only retry; installed binaries keep failing fast.
+    let mut attempt = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Err(error)
+                if cfg!(test)
+                    && error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && attempt < 8 =>
+            {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(10 * attempt)).await;
+            }
+            result => break result.map_err(failure)?,
+        }
+    };
     let task = async {
         if let Some(input) = input {
             child
@@ -180,6 +196,60 @@ mod tests {
     use super::*;
     use firecrab_helper_protocol::pipe::{Service, ServiceAction, ServiceRequest};
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_busy_cli_is_retried_without_losing_stdin_or_running_twice() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = directory.path().join("firecrab");
+        std::fs::write(
+            &cli,
+            "#!/bin/sh\nprintf 'run\\n' >> \"${0%/*}/runs\"\ncat\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&cli).unwrap();
+        assert_eq!(
+            std::process::Command::new(&cli)
+                .status()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::ExecutableFileBusy
+        );
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            drop(writer);
+        });
+
+        let input = b"private request".to_vec();
+        let output = execute(&cli, "quick-manage", Some(input.clone())).await;
+        releaser.join().unwrap();
+
+        assert_eq!(output.unwrap(), input);
+        assert_eq!(
+            std::fs::read(directory.path().join("runs")).unwrap(),
+            b"run\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cli_that_stays_busy_returns_the_spawn_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = directory.path().join("firecrab");
+        std::fs::write(&cli, "#!/bin/sh\nprintf run > \"${0%/*}/runs\"\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _writer = std::fs::OpenOptions::new().write(true).open(&cli).unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(2), execute(&cli, "inspect", None))
+            .await
+            .expect("busy retries must be bounded")
+            .unwrap_err();
+
+        let expected = std::io::Error::from_raw_os_error(libc::ETXTBSY).to_string();
+        assert!(matches!(error, HelperFailure::Internal { detail } if detail == expected));
+        assert!(!directory.path().join("runs").exists());
+    }
 
     #[tokio::test]
     async fn controls_only_the_fixed_cli_action_and_returns_a_fresh_snapshot() {
