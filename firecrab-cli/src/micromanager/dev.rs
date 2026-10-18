@@ -30,8 +30,11 @@ const SOURCE_INPUTS: &[&str] = &[
     "packaging/systemd/firecrab-ingress.service",
     "packaging/systemd/firecrab-tunnel.service",
 ];
-// Older checkouts predate the manifest and remain valid development sources.
-const OPTIONAL_SOURCE_INPUTS: &[&str] = &["packaging/micromanager.toml"];
+// Older checkouts predate these resources and remain valid development sources.
+const OPTIONAL_SOURCE_INPUTS: &[&str] = &[
+    "packaging/micromanager.toml",
+    "packaging/systemd/firecrab-quick-tunnel.service",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -324,6 +327,7 @@ members = ["firecrab-api", "firecrab-api-types", "firecrab-cli", "firecrab-helpe
             "packaging/pipe-engines.json",
             "packaging/systemd/firecrab-ingress.service",
             "packaging/systemd/firecrab-tunnel.service",
+            "packaging/systemd/firecrab-quick-tunnel.service",
         ] {
             assert_eq!(
                 fs::read(unpacked.path().join(input)).expect(input),

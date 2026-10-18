@@ -15,7 +15,7 @@ mod network;
 mod pipe;
 #[cfg(target_os = "linux")]
 mod service;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 mod shell;
 #[cfg(target_os = "linux")]
 mod status;

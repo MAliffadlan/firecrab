@@ -95,7 +95,7 @@ impl ConnectRequest {
             return Err("Invalid Cloudflare domain identifier".into());
         }
         self.config.validate().map_err(|e| e.to_string())?;
-        if self.config.tunnel.is_some() {
+        if self.config.tunnel.is_some() || self.config.quick_tunnel.is_some() {
             return Err("Disconnect the configured tunnel before creating a new connection".into());
         }
         if !self
@@ -117,6 +117,35 @@ impl ConnectRequest {
 mod tests {
     use super::*;
     #[test]
+    fn named_onboarding_rejects_an_existing_quick_tunnel() {
+        let request: ConnectRequest = serde_json::from_value(serde_json::json!({
+            "apiToken": "scoped-api-token-01234567890123456789",
+            "zoneId": "01234567890123456789012345678901",
+            "hostname": "app.example.com",
+            "config": {
+                "routes": [{ "host": "app.example.com", "upstreams": ["172.30.1.2:80"] }],
+                "quickTunnel": { "upstreams": ["172.30.1.2:80"] }
+            }
+        }))
+        .unwrap();
+        assert!(request.validate().unwrap_err().contains("Disconnect"));
+    }
+
+    #[test]
+    fn named_onboarding_preserves_independent_quick_tunnels() {
+        let request: ConnectRequest = serde_json::from_value(serde_json::json!({
+            "apiToken": "scoped-api-token-01234567890123456789",
+            "zoneId": "01234567890123456789012345678901",
+            "hostname": "app.example.com",
+            "config": {
+                "routes": [{ "host": "app.example.com", "upstreams": ["172.30.1.2:80"] }],
+                "quickTunnels": [{ "id":"00000000-0000-0000-0000-000000000002", "name":"App", "target":{"type":"apps","upstreams":["172.30.1.2:80"]} }]
+            }
+        })).unwrap();
+        request.validate().unwrap();
+    }
+
+    #[test]
     fn api_tokens_are_redacted_and_commands_are_rejected() {
         let secret = "scoped-api-token-01234567890123456789";
         let request: AccessRequest =
@@ -128,5 +157,29 @@ mod tests {
         )
         .unwrap();
         assert!(invalid.api_token.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod stable_hostname_tests {
+    #[test]
+    fn named_hostname_requires_its_route_and_coexists_with_independent_quick_tunnels() {
+        let mut config: crate::pipe::Config = serde_json::from_value(serde_json::json!({
+            "routes":[{"host":"app.example.com","upstreams":["127.0.0.1:9000"]}],
+            "tunnel":{"id":"00000000-0000-0000-0000-000000000009","credentialsFile":"credentials.json","hostname":"app.example.com"},
+            "quickTunnels":[{"id":"00000000-0000-0000-0000-000000000002","name":"Preview","target":{"type":"routes","host":"app.example.com"}}]
+        })).unwrap();
+        config.validate().unwrap();
+        config.quick_tunnels.clear();
+        config.routes.clear();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("Cloudflare public hostname")
+        );
+        config.tunnel.as_mut().unwrap().hostname = None;
+        config.validate().unwrap();
     }
 }

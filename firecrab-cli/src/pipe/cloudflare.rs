@@ -165,6 +165,7 @@ impl Cloudflare {
             config.tunnel = Some(Tunnel {
                 id: tunnel,
                 credentials_file: "credentials.json".into(),
+                hostname: Some(request.hostname.clone()),
             });
             apply(config, credentials, &zone.account.id, tunnel)
         })();
@@ -228,7 +229,7 @@ pub(super) fn connect() -> Result<()> {
     if bytes.len() > 48 * 1024 {
         return Err("Cloudflare request exceeds 48 KiB".into());
     }
-    let request: ConnectRequest = serde_json::from_slice(&bytes)?;
+    let mut request: ConnectRequest = serde_json::from_slice(&bytes)?;
     request.validate()?;
     let snapshot = host::snapshot(true)?;
     if snapshot
@@ -240,6 +241,25 @@ pub(super) fn connect() -> Result<()> {
     }
     if !snapshot.nginx_available {
         return Err("Install Nginx before connecting Cloudflare".into());
+    }
+    // The lock covers setup. Use the latest saved routes and connector peers.
+    if let Some(mut current) = snapshot.config {
+        if !current
+            .routes
+            .iter()
+            .any(|route| route.host == request.hostname)
+        {
+            current.routes.extend(
+                request
+                    .config
+                    .routes
+                    .iter()
+                    .filter(|route| route.host == request.hostname)
+                    .cloned(),
+            );
+        }
+        request.config = current;
+        request.validate()?;
     }
     let client = Cloudflare::new(&request)?;
     if !snapshot.cloudflared_available {
@@ -262,3 +282,22 @@ pub(super) fn connect() -> Result<()> {
 #[cfg(test)]
 #[path = "cloudflare_tests.rs"]
 mod tests;
+
+#[cfg(target_os = "linux")]
+pub(super) fn disconnect() -> Result<()> {
+    use super::host;
+    host::require_root()?;
+    let _lock = host::lock()?;
+    let manifest = crate::service::env::ServiceEnv::from_process_env()
+        .confdir
+        .join("pipe/manifest.json");
+    let mut config = Config::read(&manifest)?;
+    if config.tunnel.is_none() {
+        return Ok(());
+    }
+    config.tunnel = None;
+    let directory = tempfile::tempdir()?;
+    let file = directory.path().join("pipe.json");
+    std::fs::write(&file, serde_json::to_vec(&config)?)?;
+    host::apply_quick_locked(&file)
+}

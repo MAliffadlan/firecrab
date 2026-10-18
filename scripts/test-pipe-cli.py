@@ -121,7 +121,10 @@ while True: time.sleep(10)
             request(b"first")
             stored = root / "config/pipe"
             assert (stored / "secrets/tunnel-credentials.json").stat().st_mode & 0o777 == 0o600
-            pipe("status")
+            status = pipe("status").stdout
+            assert "Nginx" in status and "Cloudflare Tunnel" in status
+            assert "running" in status and "available" in status
+            pipe("status", "--json", success=False)
             (unit_root / control).write_text("[Service]\nExecStart=/bin/sleep infinity\n")
             systemctl("daemon-reload")
             systemctl("start", control)

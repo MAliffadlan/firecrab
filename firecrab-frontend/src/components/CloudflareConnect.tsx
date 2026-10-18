@@ -1,8 +1,10 @@
-import { useState } from "react";
-import { connectCloudflare, getCloudflareZones, type CloudflareZone, type PipeConfig, type PipeSnapshot } from "../api/pipe";
+import { useEffect, useRef, useState } from "react";
+import { controlQuickTunnel, deleteQuickTunnel, saveQuickTunnel, type PipeConfig, type PipeSnapshot, type QuickTunnelSnapshot, type QuickTunnelTarget } from "../api/pipe";
 import { useI18n } from "../i18n";
 import { canUsePipeApps, type PipeApp } from "../pipeApps";
 import PipeAppPicker from "./PipeAppPicker";
+import PipeServiceMenu from "./PipeServiceMenu";
+import PipeCopyButton from "./PipeCopyButton";
 
 interface Props {
   config: PipeConfig;
@@ -13,83 +15,128 @@ interface Props {
   vmsUnavailable: boolean;
   onBusy: (busy: boolean) => void;
   onConnected: (snapshot: PipeSnapshot) => void;
+  onUnsavedChange: (unsaved: boolean) => void;
 }
 
-export default function CloudflareConnect({ config, snapshot, busy, apps, vmsLoading, vmsUnavailable, onBusy, onConnected }: Props) {
+interface Editor {
+  id: string | null;
+  name: string;
+  kind: "apps" | "routes";
+  addresses: string[];
+  host: string;
+}
+
+function target(editor: Editor): QuickTunnelTarget {
+  return editor.kind === "apps" ? { type: "apps", upstreams: editor.addresses } : { type: "routes", host: editor.host };
+}
+
+export default function CloudflareConnect({ config, snapshot, busy, apps, vmsLoading, vmsUnavailable, onBusy, onConnected, onUnsavedChange }: Props) {
   const { t } = useI18n();
-  const [token, setToken] = useState("");
-  const [zones, setZones] = useState<CloudflareZone[]>([]);
-  const [zoneId, setZoneId] = useState("");
-  const [subdomain, setSubdomain] = useState("app");
-  const [addresses, setAddresses] = useState<string[]>([]);
-  const [step, setStep] = useState<"idle" | "domains" | "connecting">("idle");
+  const [editor, setEditor] = useState<Editor | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [publicUrl, setPublicUrl] = useState<string | null>(null);
-  const zone = zones.find(zone => zone.id === zoneId);
-  const hostname = zone ? [subdomain.trim().toLowerCase(), zone.name].filter(Boolean).join(".") : "";
-  const configured = snapshot?.config?.tunnel;
-  const appsReady = !vmsLoading && !vmsUnavailable && canUsePipeApps(apps, addresses);
+  const [notice, setNotice] = useState<string | null>(null);
+  const running = useRef(false);
+  const tunnels = snapshot?.quickTunnels ?? [];
+  const hosts = [...new Set(config.routes.map(route => route.host))];
+  const original = tunnels.find(tunnel => tunnel.id === editor?.id);
+  const preserved = original?.target.type === "apps" ? original.target.upstreams : [];
+  const changed = !!editor && (editor.id === null
+    ? !!editor.name.trim() || editor.addresses.length > 0 || !!editor.host
+    : !original || editor.name !== original.name || JSON.stringify(target(editor)) !== JSON.stringify(original.target));
+  const ready = !!editor && !!editor.name.trim() && (editor.kind === "routes"
+    ? hosts.includes(editor.host)
+    : !vmsLoading && !vmsUnavailable && canUsePipeApps(apps, editor.addresses, preserved));
+  const migrating = editor?.id === "00000000-0000-0000-0000-000000000001" && !!config.quickTunnel;
+  const saveDisabled = busy || !snapshot?.nginxAvailable || !ready || (!!editor?.id && !changed && !migrating);
 
-  async function loadDomains() {
-    setStep("domains"); onBusy(true); setError(null); setPublicUrl(null);
-    try {
-      const result = await getCloudflareZones(token.trim());
-      setZones(result); setZoneId(result[0]?.id ?? "");
-    } catch (failure) { setError((failure as Error).message); setZones([]); }
-    finally { setStep("idle"); onBusy(false); }
+  useEffect(() => {
+    onUnsavedChange(changed);
+    return () => onUnsavedChange(false);
+  }, [changed, onUnsavedChange]);
+
+  function appLabel(address: string) {
+    const app = apps.find(value => value.address === address);
+    return app?.port ? app.name + " · TCP " + app.port : address;
   }
 
-  async function connect() {
-    if (!hostname || !zoneId || busy || !appsReady) return;
-    setStep("connecting"); onBusy(true); setError(null);
-    const route = { host: hostname, pathPrefix: "/", upstreams: addresses };
-    const next = { ...config, tunnel: null, routes: [...config.routes.filter(route => !(route.host === hostname && route.pathPrefix.replace(/\/+$/, "") === "")), route] };
-    try {
-      const result = await connectCloudflare(token.trim(), zoneId, hostname, next);
-      setToken(""); setZones([]); setZoneId("");
-      setPublicUrl(`https://${hostname}`); onConnected(result);
-    } catch (failure) { setError((failure as Error).message); }
-    finally { setStep("idle"); onBusy(false); }
+  function edit(tunnel: QuickTunnelSnapshot) {
+    setError(null); setNotice(null);
+    setEditor({ id: tunnel.id, name: tunnel.name, kind: tunnel.target.type,
+      addresses: tunnel.target.type === "apps" ? [...tunnel.target.upstreams] : [],
+      host: tunnel.target.type === "routes" ? tunnel.target.host : "" });
   }
 
-  return <section className="panel cloudflare-connect" aria-label={t("Connect Cloudflare", "Cloudflare 연결")}>
-    <h2 className="panel-title">
-      <span className="panel-title-with-icon">
-        <img className="panel-brand-icon" src="/cloudflare.svg" alt="" width={28} height={28} />
-        {t("Connect Cloudflare Tunnel", "Cloudflare Tunnel 연결")}
-      </span>
-    </h2>
-    <p>{t("Create a public app address here. Firecrab creates the tunnel, registers DNS and starts the connector.", "공개할 앱 주소를 만든다. Firecrab이 터널 생성, DNS 등록, 연결 프로그램 실행을 처리한다.")}</p>
+  async function mutate(request: () => Promise<PipeSnapshot>, done?: () => void) {
+    if (busy || running.current) return;
+    running.current = true; onBusy(true); setError(null); setNotice(null);
+    try { onConnected(await request()); done?.(); }
+    catch (failure) { setError((failure as Error).message); }
+    finally { running.current = false; onBusy(false); }
+  }
+
+  function save() {
+    if (!editor || saveDisabled) return;
+    void mutate(() => saveQuickTunnel({ id: editor.id, name: editor.name.trim(), target: target(editor) }), () => {
+      setEditor(null); setNotice(t("Tunnel saved. Its URL appears when issued.", "터널을 저장했다. 주소가 발급되면 목록에 표시한다."));
+    });
+  }
+
+
+  return <section className="panel cloudflare-connect" aria-label="Quick Tunnel">
+    <h2 className="panel-title"><span className="panel-title-with-icon">
+      <img className="panel-brand-icon" src="/cloudflare.svg" alt="" width={28} height={28} />Cloudflare Quick Tunnel
+    </span><button className="btn" type="button" disabled={busy || !!editor || !snapshot || tunnels.length >= 16} aria-expanded={!!editor} aria-controls="quick-tunnel-editor"
+      onClick={() => { setEditor({ id: null, name: "", kind: "apps", addresses: [], host: "" }); setError(null); setNotice(null); }}>{t("Add tunnel", "터널 추가")}</button></h2>
+    <p className="pipe-description">{t("Publish VM apps or saved Nginx routes through temporary public URLs. Each tunnel has its own URL and service controls. Restarting a tunnel changes its URL.", "VM 앱이나 저장된 Nginx 라우트를 임시 주소로 공개한다. 터널마다 주소와 실행 상태를 따로 관리한다. 터널을 재시작하면 주소가 바뀐다.")}</p>
     {error && <div className="banner error" role="alert">{error}</div>}
-    {publicUrl && <div className="banner info" role="status">{t("Cloudflare connector connected. DNS and HTTPS may take a moment to become available.", "Cloudflare 연결을 확인했다. DNS와 HTTPS 적용에는 시간이 걸릴 수 있다.")} <a href={publicUrl} target="_blank" rel="noreferrer">{publicUrl}</a></div>}
-    {configured ? <p className="poll-note">{t("A tunnel is configured. Its live state is shown above. To replace it, remove its local configuration in advanced settings first. Cloudflare DNS and tunnel records are managed separately.", "터널이 설정되어 있다. 실제 실행 상태는 위 표에서 확인한다. 교체하려면 고급 설정에서 로컬 터널 설정을 먼저 제거한다. Cloudflare의 DNS와 터널 기록은 별도로 관리한다.")}</p> : <>
-      <details className="cloudflare-help">
-        <summary>{t("How to create an API token", "API 토큰 발급 방법")}</summary>
-        <ol>
-          <li>{t("Add your own domain to Cloudflare and complete its nameserver setup first.", "소유한 도메인을 Cloudflare에 등록하고 네임서버 설정을 먼저 완료한다.")}</li>
-          <li><a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noreferrer">{t("Open Cloudflare API Tokens", "Cloudflare API Tokens 열기")}</a>{t(" and select Create Token → Create Custom Token.", "에서 Create Token → Create Custom Token을 선택한다.")}</li>
-          <li>{t("Name the token Firecrab and add these permissions:", "이름을 Firecrab으로 정하고 아래 권한을 추가한다.")}</li>
-        </ol>
-        <div className="table-scroll"><table className="vm-table"><thead><tr><th>{t("Scope", "범위")}</th><th>{t("Resource", "항목")}</th><th>{t("Permission", "권한")}</th></tr></thead><tbody>
-          <tr><td>Account</td><td>Cloudflare Tunnel</td><td>Edit</td></tr>
-          <tr><td>Zone</td><td>DNS</td><td>Edit</td></tr>
-          <tr><td>Zone</td><td>Zone</td><td>Read</td></tr>
-        </tbody></table></div>
-        <p>{t("Limit Account Resources to your account and Zone Resources to the domain you will publish. Select Continue to summary → Create Token, then copy the token into Firecrab.", "Account Resources는 사용할 계정으로, Zone Resources는 공개할 도메인으로 제한한다. Continue to summary → Create Token을 선택하고 발급한 토큰을 Firecrab에 붙여 넣는다.")}</p>
-        <p>{t("Use a Cloudflare API token. A tunnel token or installation command is a different credential. The API token is used only during setup and is not saved.", "Cloudflare API 토큰을 사용한다. 터널 토큰이나 설치 명령은 다른 인증 정보다. API 토큰은 연결 작업에만 사용하고 저장하지 않는다.")}</p>
-      </details>
-      <div className="pipe-controls">
-        <label className="field"><span>Cloudflare API token</span><input type="password" autoComplete="off" spellCheck={false} value={token} disabled={busy} onChange={event => { setToken(event.target.value); setZones([]); setZoneId(""); setError(null); }} /></label>
-        <button className="btn" type="button" disabled={busy || !token.trim()} onClick={loadDomains}>{step === "domains" ? t("Loading domains…", "도메인 확인 중…") : t("Load domains", "도메인 불러오기")}</button>
-      </div>
-      {zones.length > 0 && <div className="pipe-tunnel-fields">
-        <label className="field"><span>{t("Cloudflare domain", "Cloudflare 도메인")}</span><select aria-label={t("Cloudflare domain", "Cloudflare 도메인")} value={zoneId} disabled={busy} onChange={event => setZoneId(event.target.value)}>{zones.map(zone => <option key={zone.id} value={zone.id}>{zone.name}</option>)}</select></label>
-        <label className="field"><span>{t("Subdomain", "서브도메인")}</span><input aria-label={t("Subdomain", "서브도메인")} value={subdomain} placeholder="app" disabled={busy} onChange={event => setSubdomain(event.target.value)} /><span className="poll-note">{hostname}</span></label>
-        <PipeAppPicker id="cloudflare-apps" label={t("Public apps", "공개할 앱 선택")} apps={apps} selected={addresses} loading={vmsLoading} unavailable={vmsUnavailable} disabled={busy} onChange={setAddresses} />
-        <div className="field field-submit"><button className="btn primary" type="button" disabled={busy || !snapshot?.nginxAvailable || !appsReady} onClick={connect}>{step === "connecting" ? t("Connecting…", "연결 중…") : t("Connect and publish", "연결하고 공개")}</button><span className="poll-note">{t("Creates a public DNS record. Existing DNS records are never overwritten.", "공개 DNS 기록을 만든다. 기존 DNS 기록은 덮어쓰지 않는다.")}</span></div>
-      </div>}
-      {step === "connecting" && <p className="poll-note" role="status">{t("Installing the connector if needed, creating the tunnel and DNS, then checking the Cloudflare connection. Keep this page open.", "필요한 연결 프로그램을 설치하고 터널과 DNS를 생성한 뒤 Cloudflare 연결을 확인한다. 이 화면을 유지한다.")}</p>}
-      {snapshot && !snapshot.nginxAvailable && <p className="field-error">{t("Install Nginx on the managed host before connecting.", "연결 전에 관리 호스트에 Nginx를 설치한다.")}</p>}
-    </>}
+    {notice && <div className="banner info" role="status">{notice}</div>}
+    {editor && <form id="quick-tunnel-editor" className="create-grid quick-tunnel-form" onSubmit={event => { event.preventDefault(); save(); }}>
+      <label className="field"><span>{t("Name", "이름")}</span><input aria-label={t("Name", "이름")} value={editor.name} maxLength={64} required disabled={busy} autoFocus onChange={event => setEditor({ ...editor, name: event.target.value })} /></label>
+      <label className="field"><span>{t("Target", "공개 대상")}</span><select aria-label={t("Target", "공개 대상")} value={editor.kind} disabled={busy} onChange={event => setEditor({ ...editor, kind: event.target.value as Editor["kind"] })}>
+        <option value="apps">{t("VM apps", "VM 앱")}</option><option value="routes">{t("Nginx routes", "Nginx 라우트")}</option>
+      </select></label>
+      {editor.kind === "apps" ? <PipeAppPicker id="quick-tunnel-apps" label={t("Public apps", "공개할 앱 선택")} apps={apps} selected={editor.addresses} preserved={preserved} loading={vmsLoading} unavailable={vmsUnavailable} disabled={busy} onChange={addresses => setEditor({ ...editor, addresses })} />
+        : <div className="field quick-tunnel-route-target"><label htmlFor="quick-tunnel-host">{t("Route domain", "라우트 도메인")}</label>
+          <select id="quick-tunnel-host" value={editor.host} required disabled={busy || !hosts.length} onChange={event => setEditor({ ...editor, host: event.target.value })}>
+            <option value="">{t("Select a saved route domain", "저장된 라우트 도메인 선택")}</option>
+            {hosts.map(host => <option key={host} value={host}>{host}</option>)}
+            {editor.host && !hosts.includes(editor.host) && <option value={editor.host}>{editor.host}</option>}
+          </select>
+          <span className="poll-note">{t("Publishes all saved paths for this domain. Route changes update the tunnel's destinations without changing its URL.", "이 도메인에 저장된 모든 경로를 공개한다. 라우트를 수정하면 같은 임시 주소에서 변경된 앱으로 요청을 전달한다.")}</span>
+          {!!editor.host && hosts.includes(editor.host) && <span className="quick-tunnel-paths">{config.routes.filter(route => route.host === editor.host).map(route => route.pathPrefix).join(", ")}</span>}
+          {!hosts.length && <span className="field-error">{t("Save a route before selecting Nginx routes.", "Nginx 라우트를 선택하려면 먼저 라우트를 저장한다.")}</span>}
+        </div>}
+      {migrating && <p className="poll-note quick-tunnel-submit">{t("Saving moves this existing tunnel into the list management mode. Its temporary URL changes once.", "저장하면 기존 터널을 목록 관리 방식으로 전환한다. 임시 주소가 한 번 바뀐다.")}</p>}
+      <div className="pipe-controls quick-tunnel-submit"><button className="btn primary" type="submit" disabled={saveDisabled}>
+        {busy ? t("Saving…", "저장 중…") : editor.id ? t("Save", "저장") : t("Create temporary URL", "임시 주소 만들기")}
+      </button><button className="btn" type="button" disabled={busy} onClick={() => setEditor(null)}>{t("Cancel", "취소")}</button></div>
+    </form>}
+    {tunnels.length >= 16 && <p className="poll-note">{t("You can keep up to 16 Quick Tunnels.", "Quick Tunnel은 최대 16개까지 저장한다.")}</p>}
+    {!snapshot ? <p className="poll-note">{t("Loading tunnels…", "터널 목록을 불러오는 중이다.")}</p>
+      : tunnels.length === 0 ? <div className="empty">{t("No Quick Tunnels. Add a tunnel to publish apps or Nginx routes.", "Quick Tunnel이 없다. 터널을 추가해 앱이나 Nginx 라우트를 공개한다.")}</div>
+        : <div className="table-scroll"><table className="vm-table quick-tunnel-table"><thead><tr>
+          <th>{t("Name", "이름")}</th><th>{t("Target", "공개 대상")}</th><th>{t("Public URL", "공개 주소")}</th><th>{t("State", "상태")}</th><th className="actions">{t("Actions", "작업")}</th>
+        </tr></thead><tbody>{tunnels.map(tunnel => {
+          const state = tunnel.unit.activeState;
+          const url = state === "active" ? tunnel.publicUrl : null;
+          const changing = ["activating", "deactivating", "reloading"].includes(state);
+          const available = tunnel.unit.loadState === "loaded" && snapshot.cloudflaredAvailable;
+          return <tr key={tunnel.id}>
+            <td>{tunnel.name}</td>
+            <td>{tunnel.target.type === "routes" ? <><div>{t("Nginx routes", "Nginx 라우트")}</div><div className="quick-tunnel-target">{tunnel.target.host}</div><div className="poll-note">{config.routes.filter(route => route.host === (tunnel.target.type === "routes" ? tunnel.target.host : "")).map(route => route.pathPrefix).join(", ")}</div></>
+              : <><div>{t("VM apps", "VM 앱")}</div>{tunnel.target.upstreams.map(address => <div className="quick-tunnel-target" key={address}>{appLabel(address)}</div>)}</>}</td>
+            <td>{url ? <div className="pipe-url"><a className="quick-tunnel-link" href={url} target="_blank" rel="noreferrer">{url}</a><PipeCopyButton url={url} onError={setError} /></div>
+              : <span className="poll-note">{state === "active" || state === "activating" ? t("Preparing URL…", "주소 발급 중…") : "—"}</span>}</td>
+            <td><span className={"state-badge" + (state === "active" ? " running" : state === "failed" ? " error" : "")}>{state}</span></td>
+            <td className="actions"><PipeServiceMenu label={t(tunnel.name + " actions", tunnel.name + " 작업")} disabled={busy || changing} items={[
+              { label: t("Edit", "수정"), disabled: !!editor, onSelect: () => edit(tunnel) },
+              { label: t("Start", "시작"), disabled: !available || state === "active", onSelect: () => void mutate(() => controlQuickTunnel(tunnel.id, "start")) },
+              { label: t("Stop", "중지"), disabled: tunnel.unit.loadState !== "loaded" || !["active", "failed"].includes(state), danger: true, onSelect: () => void mutate(() => controlQuickTunnel(tunnel.id, "stop")) },
+              { label: t("Restart", "재시작"), disabled: !available, onSelect: () => void mutate(() => controlQuickTunnel(tunnel.id, "restart")) },
+              { label: t("Delete", "삭제"), danger: true, onSelect: () => void mutate(() => deleteQuickTunnel(tunnel.id), () => { if (editor?.id === tunnel.id) setEditor(null); }) },
+            ]} /></td>
+          </tr>;
+        })}</tbody></table></div>}
+    {snapshot && !snapshot.nginxAvailable && <p className="field-error">{t("Install Nginx on the managed host before connecting.", "연결 전에 관리 호스트에 Nginx를 설치한다.")}</p>}
   </section>;
 }
