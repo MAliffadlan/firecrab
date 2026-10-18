@@ -73,6 +73,41 @@ test.describe("MicroService configuration @dashboard", () => {
     await expect(page.getByRole("status")).toHaveText("Stopped");
     await expect(page.getByRole("button", { name: "Deploy and run", exact: true })).toBeEnabled();
   });
+
+  test("accepts a status response slower than the polling interval", async ({ page }) => {
+    await openServices(page, [INITIAL]);
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    await page.route(`**/api/micro-services/${ID}/deployment`, async (route) => {
+      activeReads += 1;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      await route.fulfill({ json: null });
+      activeReads -= 1;
+    });
+    await page.getByRole("button", { name: "Run orders", exact: true }).click();
+    await expect(page.getByRole("status")).toHaveText("Not deployed");
+    expect(maxActiveReads).toBe(1);
+  });
+
+  test("closes stale runtime settings after saving and preserves mobile headers", async ({ page }) => {
+    await openServices(page, [INITIAL]);
+    await page.route(`**/api/micro-services/${ID}/deployment`, (route) => route.fulfill({ json: null }));
+    await page.getByRole("button", { name: "Run orders", exact: true }).click();
+    await expect(page.getByRole("status")).toHaveText("Not deployed");
+    await page.getByRole("button", { name: "Edit orders", exact: true }).click();
+    await page.getByLabel("App port", { exact: true }).fill("9090");
+    await page.getByLabel("Replicas", { exact: true }).fill("3");
+    await page.getByRole("button", { name: "Save configuration" }).click();
+    await expect(page.getByRole("heading", { name: "Run: orders", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Edit: orders", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Run orders", exact: true }).click();
+    await expect(page.getByText("Each replica uses one host port, starting at 30100. App port: 9090.", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("First host port")).toHaveAttribute("max", "65533");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByRole("columnheader", { name: "Port", exact: true })).toHaveCount(1);
+    await expect(page.getByRole("cell", { name: /9090/ })).toHaveAttribute("headers", "service-column-2");
+  });
   const browserErrors = new WeakMap<Page, string[]>();
   test.beforeEach(({ page }) => {
     const errors: string[] = [];

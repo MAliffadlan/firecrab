@@ -18,11 +18,15 @@ export default function ServiceDeployment({ service, onClose }: { service: Micro
   const [statusError, setStatusError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const generation = useRef(0);
+  const polling = useRef(false);
+  const acting = useRef(false);
   const busy = !!deployment && BUSY.includes(deployment.phase);
   const hasInstances = !!deployment?.instances.length;
 
   const refresh = useCallback(async () => {
-    const current = ++generation.current;
+    if (polling.current || acting.current) return;
+    polling.current = true;
+    const current = generation.current;
     try {
       const result = await getServiceDeployment(service.id);
       if (generation.current !== current) return;
@@ -34,7 +38,7 @@ export default function ServiceDeployment({ service, onClose }: { service: Micro
     } catch (failure) {
       if (generation.current !== current) return;
       setStatusError((failure as Error).message); setLoaded(true);
-    }
+    } finally { polling.current = false; }
   }, [service.id]);
 
   useEffect(() => {
@@ -46,7 +50,8 @@ export default function ServiceDeployment({ service, onClose }: { service: Micro
   }, [refresh]);
 
   const act = async (stop: boolean) => {
-    if (submitting) return;
+    if (acting.current) return;
+    acting.current = true;
     setSubmitting(true); setError(null); generation.current += 1;
     try {
       const result = stop ? await stopMicroService(service.id) : await deployMicroService(service.id, { hostPort: port, microNetworkId: network || null });
@@ -54,7 +59,7 @@ export default function ServiceDeployment({ service, onClose }: { service: Micro
       setDeployment(result);
     } catch (failure) {
       setError((failure as Error).message);
-    } finally { setSubmitting(false); }
+    } finally { generation.current += 1; acting.current = false; setSubmitting(false); }
   };
 
   const submit = (event: FormEvent) => { event.preventDefault(); act(false); };
@@ -84,7 +89,7 @@ export default function ServiceDeployment({ service, onClose }: { service: Micro
       <p className="poll-note">{t(`Each replica uses one host port, starting at ${port}. App port: ${service.port}.`, `복제본마다 ${port}번부터 호스트 포트를 하나씩 사용한다. 앱 포트는 ${service.port}번이다.`)}</p>
       {(service.domain || Object.keys(service.secrets).length > 0) && <p className="field-error">{t("This deployment supports host ports and plain environment variables. Domain routing and CrabSecrets injection require later work.", "현재 배포는 호스트 포트와 일반 환경 변수를 지원한다. 도메인 연결과 CrabSecrets 주입은 아직 지원하지 않는다.")}</p>}
       {hasInstances && <>
-        <div className="table-scroll"><table className="vm-table service-table"><thead><tr><th scope="col">MicroVM</th><th scope="col">{t("State", "상태")}</th><th scope="col">{t("App health", "앱 상태")}</th><th scope="col">{t("Endpoint", "접속 주소")}</th></tr></thead><tbody>{deployment!.instances.map((instance) => <tr key={instance.vmId}><td data-label="MicroVM"><a href={consoleHash(instance.vmId)}>{instance.vmId.slice(0, 8)}</a></td><td data-label={t("State", "상태")}>{instance.state}</td><td data-label={t("App health", "앱 상태")}>{instance.healthy ? t("Healthy", "정상") : t("Not healthy", "정상 응답 없음")}</td><td data-label={t("Endpoint", "접속 주소")}><a href={endpoint(instance.hostPort)} target="_blank" rel="noreferrer">:{instance.hostPort}</a></td></tr>)}</tbody></table></div>
+        <div className="table-scroll"><table className="vm-table service-table"><thead><tr><th id="service-instance-column-0" scope="col">MicroVM</th><th id="service-instance-column-1" scope="col">{t("State", "상태")}</th><th id="service-instance-column-2" scope="col">{t("App health", "앱 상태")}</th><th id="service-instance-column-3" scope="col">{t("Endpoint", "접속 주소")}</th></tr></thead><tbody>{deployment!.instances.map((instance) => <tr key={instance.vmId}><td headers="service-instance-column-0" data-label="MicroVM"><a href={consoleHash(instance.vmId)}>{instance.vmId.slice(0, 8)}</a></td><td headers="service-instance-column-1" data-label={t("State", "상태")}>{instance.state}</td><td headers="service-instance-column-2" data-label={t("App health", "앱 상태")}>{instance.healthy ? t("Healthy", "정상") : t("Not healthy", "정상 응답 없음")}</td><td headers="service-instance-column-3" data-label={t("Endpoint", "접속 주소")}><a href={endpoint(instance.hostPort)} target="_blank" rel="noreferrer">:{instance.hostPort}</a></td></tr>)}</tbody></table></div>
         <div className="service-actions"><button className="btn danger" disabled={submitting || busy} onClick={() => { if (window.confirm(t("Stop and remove these service instances?", "서비스 인스턴스를 중지하고 삭제할까요?"))) act(true); }}>{t("Stop service", "서비스 중지")}</button></div>
       </>}
       {deployment && <pre className="service-deploy-log" aria-label={t("Deployment log", "배포 로그")}>{deployment.log.join("\n")}</pre>}

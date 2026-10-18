@@ -113,7 +113,7 @@ async fn run() -> Result<(), StartupError> {
     init_tracing();
     let config = HttpConfig::load().map_err(StartupError::Config)?;
     let templates = TemplateRegistry::load_default().map_err(StartupError::Template)?;
-    let state = AppState::new(templates)
+    let mut state = AppState::new(templates)
         .await
         .map_err(StartupError::Persistence)?;
     // Bridges, nftables rules and dnsmasq's config are all host state a
@@ -130,7 +130,6 @@ async fn run() -> Result<(), StartupError> {
     // Fetch the shared bootstrap builder source now, in the background, so
     // the request that needs it doesn't have to — see spawn_warmup.
     microboot::spawn_warmup(state.clone());
-    let app = build_router(state, &config);
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr)
         .await
@@ -140,6 +139,8 @@ async fn run() -> Result<(), StartupError> {
         })?;
 
     let local_address = listener.local_addr().map_err(StartupError::LocalAddress)?;
+    state.api_port = local_address.port();
+    let app = build_router(state, &config);
     tracing::info!(address = %local_address, "listening on http://{local_address}");
     axum::serve(listener, app)
         .await

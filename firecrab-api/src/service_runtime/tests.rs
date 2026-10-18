@@ -43,11 +43,11 @@ fn deployments_reject_unsupported_configuration_and_port_overflow_before_claimin
         micro_network_id: None,
         host_port: 30100,
     };
-    assert!(deployment_fields(&spec(), &request).is_empty());
+    assert!(deployment_fields(&spec(), &request, 5523).is_empty());
     let mut spec = spec();
     spec.domain = Some("example.com".into());
     spec.secrets.insert("PASSWORD".into(), Uuid::new_v4());
-    let fields = deployment_fields(&spec, &request);
+    let fields = deployment_fields(&spec, &request, 5523);
     assert!(fields.contains_key("domain"));
     assert!(fields.contains_key("secrets"));
     spec.replicas = 2;
@@ -58,11 +58,24 @@ fn deployments_reject_unsupported_configuration_and_port_overflow_before_claimin
                 &DeployMicroServiceRequest {
                     host_port: port,
                     ..request.clone()
-                }
+                },
+                5523,
             )
             .contains_key("hostPort")
         );
     }
+}
+
+#[test]
+fn deployments_reserve_the_bound_api_port_across_the_replica_range() {
+    let mut spec = spec();
+    spec.replicas = 2;
+    let request = DeployMicroServiceRequest {
+        micro_network_id: None,
+        host_port: 30100,
+    };
+    assert!(deployment_fields(&spec, &request, 30101).contains_key("hostPort"));
+    assert!(deployment_fields(&spec, &request, 30102).is_empty());
 }
 
 #[tokio::test]

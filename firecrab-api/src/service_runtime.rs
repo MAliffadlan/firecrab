@@ -38,7 +38,7 @@ pub async fn deploy(
     let service = database(request_id.0, move || store.micro_service(id))
         .await?
         .ok_or_else(|| AppError::not_found(request_id.0))?;
-    let fields = deployment_fields(&service.spec, &request);
+    let fields = deployment_fields(&service.spec, &request, state.api_port);
     if !fields.is_empty() {
         return Err(AppError::validation(fields, request_id.0));
     }
@@ -166,10 +166,10 @@ pub(crate) async fn ensure_editable(
 fn deployment_fields(
     spec: &MicroServiceSpec,
     request: &DeployMicroServiceRequest,
+    api_port: u16,
 ) -> BTreeMap<String, String> {
     let mut fields = BTreeMap::new();
     let end = u32::from(request.host_port) + u32::from(spec.replicas) - 1;
-    let api_port = crate::server::HttpConfig::load().map_or(5523, |config| config.bind_addr.port());
     if request.host_port < 1024
         || end > 65535
         || (u32::from(request.host_port)..=end).contains(&5523)

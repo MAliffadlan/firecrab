@@ -97,6 +97,8 @@ const DISK_PREP_CONCURRENCY: usize = 2;
 /// table, template registry, and runtime config.
 #[derive(Debug, Clone)]
 pub struct AppState {
+    /// Port of the bound HTTP listener, set before serving requests.
+    pub(crate) api_port: u16,
     /// In-memory cache of every VM record, mirrored to [`AppState::store`].
     pub vms: Arc<Mutex<HashMap<Uuid, VmRecord>>>,
     /// Results from startup or explicit network retry; never persisted as live health.
@@ -170,6 +172,7 @@ impl AppState {
         let network = NetworkClient::from_env();
         let runtime = RuntimeConfig::from_defaults(&storage, &network);
         Ok(AppState {
+            api_port: 5523,
             vms: Arc::new(Mutex::new(vms)),
             templates: Arc::new(templates),
             store,

@@ -81,13 +81,13 @@ export default function MicroServices() {
         ) : (
           <div className="table-scroll">
             <table className="vm-table service-table">
-              <thead><tr>{[t("Name", "이름"), t("Image", "이미지"), t("Port", "포트"), t("Replicas", "복제 수"), "RAM / CPU", t("Domain", "도메인"), t("Actions", "작업")].map((label) => <th key={label} scope="col">{label}</th>)}</tr></thead>
+              <thead><tr>{[t("Name", "이름"), t("Image", "이미지"), t("Port", "포트"), t("Replicas", "복제 수"), "RAM / CPU", t("Domain", "도메인"), t("Actions", "작업")].map((label, index) => <th key={label} id={`service-column-${index}`} scope="col">{label}</th>)}</tr></thead>
               <tbody>{services.map((service) => (
                 <tr key={service.id}>
-                  <td className="name" data-label={t("Name", "이름")}>{service.name}</td><td className="mono service-image" data-label={t("Image", "이미지")}>{service.image}</td>
-                  <td data-label={t("Port", "포트")}>{service.port}</td><td data-label={t("Replicas", "복제 수")}>{service.replicas}</td><td data-label="RAM / CPU">{service.ram} MiB / {service.cpu}</td>
-                  <td className="mono" data-label={t("Domain", "도메인")}>{service.domain ?? "—"}</td>
-                  <td className="actions">
+                  <td headers="service-column-0" className="name" data-label={t("Name", "이름")}>{service.name}</td><td headers="service-column-1" className="mono service-image" data-label={t("Image", "이미지")}>{service.image}</td>
+                  <td headers="service-column-2" data-label={t("Port", "포트")}>{service.port}</td><td headers="service-column-3" data-label={t("Replicas", "복제 수")}>{service.replicas}</td><td headers="service-column-4" data-label="RAM / CPU">{service.ram} MiB / {service.cpu}</td>
+                  <td headers="service-column-5" className="mono" data-label={t("Domain", "도메인")}>{service.domain ?? "—"}</td>
+                  <td headers="service-column-6" className="actions">
                     <button className="btn primary" disabled={busy || editor !== undefined} onClick={() => setRuntime(service)} aria-label={t(`Run ${service.name}`, `${service.name} 실행 관리`)}>{t("Run", "실행 관리")}</button>
                     <button className="btn" disabled={busy || editor !== undefined} onClick={() => edit(service.id)} aria-label={t(`Edit ${service.name}`, `${service.name} 수정`)}>{t("Edit", "수정")}</button>
                     <button className="btn danger" disabled={busy || editor !== undefined} onClick={() => remove(service)} aria-label={t(`Delete ${service.name}`, `${service.name} 삭제`)}>{t("Delete", "삭제")}</button>
@@ -98,8 +98,8 @@ export default function MicroServices() {
           </div>
         )}
       </section>
-      {runtime && <ServiceDeployment key={runtime.id} service={runtime} onClose={() => setRuntime(null)} />}
-      {editor !== undefined && <ServiceForm key={editor?.id ?? "new"} service={editor} onCancel={() => setEditor(undefined)} onSaved={async () => { setEditor(undefined); await refresh(); }} />}
+      {runtime && <ServiceDeployment key={`runtime-${runtime.id}`} service={runtime} onClose={() => setRuntime(null)} />}
+      {editor !== undefined && <ServiceForm key={`editor-${editor?.id ?? "new"}`} service={editor} onCancel={() => setEditor(undefined)} onSaved={async () => { setEditor(undefined); setRuntime(null); await refresh(); }} />}
     </>
   );
 }
