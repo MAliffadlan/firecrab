@@ -1053,7 +1053,7 @@ restore_host_baseline() {
 do_uninstall() {
     require_sudo_ticket
     stop_vm_units
-    for unit in firecrab-tunnel.service firecrab-ingress.service firecrab-api.service firecrab-helper.service firecrab-net-helper.service; do
+    for unit in firecrab-address-updater.service firecrab-tunnel.service firecrab-ingress.service firecrab-api.service firecrab-helper.service firecrab-net-helper.service; do
         $SUDO systemctl disable --now "$unit" 2>/dev/null || true
         $SUDO rm -f "$UNITDIR/$unit"
     done

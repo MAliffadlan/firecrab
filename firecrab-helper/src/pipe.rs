@@ -79,6 +79,7 @@ async fn execute(
         Ok(output.stdout)
     };
     let timeout = match action {
+        "firecrab-manage" => 450,
         "quick-connect" | "quick-manage" => 450,
         "cloudflare-connect" => 420,
         _ => 220,
@@ -96,6 +97,17 @@ pub(super) async fn run(request: Operation) -> Result<Snapshot, HelperFailure> {
 /// Keep command execution separate from trusted executable discovery for isolated tests.
 async fn run_with_cli(cli: &Path, request: Operation) -> Result<Snapshot, HelperFailure> {
     match request {
+        Operation::ManageFirecrabTunnel { request } => {
+            request
+                .validate()
+                .map_err(|detail| HelperFailure::InvalidRequest { detail })?;
+            execute(
+                cli,
+                "firecrab-manage",
+                Some(serde_json::to_vec(&request).map_err(failure)?),
+            )
+            .await?;
+        }
         Operation::Inspect => {}
         Operation::DisconnectCloudflare => {
             execute(cli, "cloudflare-disconnect", None).await?;

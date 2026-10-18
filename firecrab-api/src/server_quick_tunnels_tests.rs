@@ -105,6 +105,7 @@ async fn multiple_quick_tunnels_forward_only_the_requested_intent_and_preserve_o
         ),
     ];
     let snapshot = Snapshot {
+        firecrab_tunnels: Vec::new(),
         config: None,
         units: Vec::new(),
         nginx_available: true,
@@ -324,31 +325,109 @@ async fn cloudflare_disconnect_keeps_origin_protection_and_its_service_deadline(
 }
 
 #[tokio::test]
-async fn removed_registration_service_routes_are_not_exposed() {
+async fn firecrab_address_requests_validate_names_targets_and_reject_secrets() {
     let directory = tempfile::tempdir().unwrap();
     let app = router(directory.path(), directory.path().join("missing.sock")).await;
-    for (method, path, body) in [
+    for (body, status) in [
         (
-            Method::POST,
-            "/api/pipe/firecrab-tunnels",
-            json!({"subdomain":"my-app"}),
+            json!({"subdomain":"www","target":{"type":"nginx","host":"app.test"}}),
+            StatusCode::BAD_REQUEST,
         ),
         (
-            Method::DELETE,
-            "/api/pipe/firecrab-tunnels/11111111-1111-4111-8111-111111111111",
-            serde_json::Value::Null,
+            json!({"subdomain":"my-app","target":{"type":"nginx","host":"bad;host"}}),
+            StatusCode::BAD_REQUEST,
         ),
         (
-            Method::POST,
-            "/api/pipe/firecrab-tunnels/11111111-1111-4111-8111-111111111111/state",
-            json!({"enabled":true}),
+            json!({"subdomain":"my-app","target":{"type":"quick_tunnel","id":"00000000-0000-0000-0000-000000000000"}}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"subdomain":"my-app","target":{"type":"nginx","host":"app.test"},"token":"secret"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
         ),
     ] {
         let response = app
             .clone()
-            .oneshot(request(method, path, body, "http://localhost:3000"))
+            .oneshot(request(
+                Method::POST,
+                "/api/pipe/firecrab-tunnels",
+                body,
+                "http://localhost:3000",
+            ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), status);
     }
+}
+
+#[tokio::test]
+async fn firecrab_address_forwards_only_local_intent_and_keeps_origin_protection() {
+    use firecrab_helper_protocol::firecrab_tunnel::{Request as AddressRequest, Target};
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("addresses.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let helper = tokio::spawn(async move {
+        for expected in [
+            AddressRequest::Save {
+                subdomain: "my-app".into(),
+                target: Target::Nginx {
+                    host: "app.test".into(),
+                },
+            },
+            AddressRequest::Delete {
+                subdomain: "my-app".into(),
+            },
+        ] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let envelope: NetworkRequestEnvelope = read_frame(&mut stream).await.unwrap();
+            assert_eq!(
+                envelope.request,
+                NetworkRequest::Pipe {
+                    request: Operation::ManageFirecrabTunnel { request: expected }
+                }
+            );
+            write_frame(&mut stream,&NetworkResponseEnvelope{version:firecrab_helper_protocol::PROTOCOL_VERSION,request_id:envelope.request_id,result:Ok(()),pipe:Some(serde_json::from_value(json!({"config":null,"units":[],"nginxAvailable":true,"cloudflaredAvailable":true})).unwrap())}).await.unwrap();
+        }
+    });
+    let app = router(directory.path(), socket).await;
+    let body = json!({"subdomain":"my-app","target":{"type":"nginx","host":"app.test"}});
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                "/api/pipe/firecrab-tunnels",
+                body.clone(),
+                "http://evil.test"
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                "/api/pipe/firecrab-tunnels",
+                body,
+                "http://localhost:3000"
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.oneshot(request(
+            Method::DELETE,
+            "/api/pipe/firecrab-tunnels/my-app",
+            Value::Null,
+            "http://localhost:3000"
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    helper.await.unwrap();
 }

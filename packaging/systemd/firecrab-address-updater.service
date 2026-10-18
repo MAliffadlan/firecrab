@@ -1,0 +1,22 @@
+[Unit]
+Description=Firecrab stable subdomain target updater
+After=network-online.target firecrab-ingress.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=CONFDIR=@CONFDIR@
+ExecStart=@CLI@ pipe firecrab-sync
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=@CONFDIR@/pipe /run/firecrab-pipe-apply.lock /run/firecrab-addresses.lock
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

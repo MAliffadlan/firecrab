@@ -10,15 +10,14 @@ Public domain ─── DNS / Cloudflare Tunnel ─┐
 Temporary trycloudflare.com URL ──────────┘
 ```
 
-A hostname such as `my-app.firecrab.dev` is an example of an existing domain you
-control. Firecrab does not allocate names under `firecrab.dev`. This flow uses no
-Firecrab registration server, proprietary connection token, reservation API or
-address-updater service.
+For a fixed `*.firecrab.dev` subdomain, use [Firecrab Tunnel](firecrab-tunnel.md).
+The steps below cover user-owned public domains and temporary Quick Tunnel URLs.
+User-owned domains use the existing Cloudflare Tunnel flow.
 
 ## Use an existing domain
 
 1. Open **Pipe → Routes → Add route**.
-2. Enter the full domain, for example `my-app.firecrab.dev`.
+2. Enter the full domain, for example `my-app.example.com`.
 3. Enter the path, select the VM app ports, and click **Save**.
 4. Add another path under the same hostname if needed. Selecting multiple apps
    balances requests across them.
@@ -59,7 +58,7 @@ A request such as the following checks the Nginx route inside that VM:
 
 ```sh
 ./target/debug/firecrab service shell curl -fsS \
-  -H 'Host: my-app.firecrab.dev' http://127.0.0.1:8080/
+  -H 'Host: my-app.example.com' http://127.0.0.1:8080/
 ```
 
 This checks routing, not public DNS or HTTPS. Verify the actual public hostname

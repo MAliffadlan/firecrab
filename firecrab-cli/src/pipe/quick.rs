@@ -47,6 +47,12 @@ pub(super) fn manage() -> Result<(), Box<dyn std::error::Error>> {
     let request: QuickTunnelRequest = serde_json::from_slice(&bytes)?;
     request.validate()?;
     let _lock = super::host::lock()?;
+    if let QuickTunnelRequest::Delete { id } = &request {
+        super::firecrab::require_unreferenced(*id)?;
+    }
+    if let QuickTunnelRequest::Save { id: Some(id), .. } = &request {
+        super::firecrab::require_editable(*id)?;
+    }
     let manifest = crate::service::env::ServiceEnv::from_process_env()
         .confdir
         .join("pipe/manifest.json");

@@ -86,3 +86,4 @@ mod tests {
     }
 }
 pub mod cloudflare;
+pub mod firecrab_tunnel;

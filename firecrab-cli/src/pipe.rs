@@ -5,6 +5,8 @@ mod cloudflare;
 mod config;
 #[cfg(any(target_os = "linux", test))]
 mod engines;
+#[cfg(target_os = "linux")]
+mod firecrab;
 mod guest;
 #[cfg(target_os = "linux")]
 pub(crate) mod host;
@@ -24,6 +26,19 @@ pub(crate) const TUNNEL_UNIT: &str = "firecrab-tunnel.service";
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Connect or remove a stable *.firecrab.dev address.
+    Address {
+        #[command(subcommand)]
+        command: AddressCommand,
+    },
+    /// Manage a stable Firecrab address from a JSON intent on stdin.
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    FirecrabManage,
+    /// Refresh stable address targets independently of the API.
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    FirecrabSync,
     /// Check Nginx and install the verified cloudflared connector on the host or guest.
     Install,
     /// Validate a pipe manifest and print its native Nginx configuration.
@@ -78,8 +93,57 @@ pub enum Command {
     },
 }
 
+#[derive(Subcommand)]
+pub enum AddressCommand {
+    /// Connect an existing Quick Tunnel or all saved paths of an Nginx hostname.
+    Connect {
+        subdomain: String,
+        #[arg(long, conflicts_with = "nginx", required_unless_present = "nginx")]
+        quick: Option<uuid::Uuid>,
+        #[arg(long, conflicts_with = "quick", required_unless_present = "quick")]
+        nginx: Option<String>,
+    },
+    /// Remove the owned public address and its exclusively managed connector.
+    Delete { subdomain: String },
+}
+
 pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::Address { command } => {
+            use firecrab_helper_protocol::firecrab_tunnel::{Request, Target};
+            let request = match command {
+                AddressCommand::Connect {
+                    subdomain,
+                    quick,
+                    nginx,
+                } => Request::Save {
+                    subdomain,
+                    target: match (quick, nginx) {
+                        (Some(id), None) => Target::QuickTunnel { id },
+                        (None, Some(host)) => Target::Nginx { host },
+                        _ => return Err("Select either --quick or --nginx".into()),
+                    },
+                },
+                AddressCommand::Delete { subdomain } => Request::Delete { subdomain },
+            };
+            request.validate()?;
+            #[cfg(target_os = "linux")]
+            {
+                firecrab::manage_request(request)
+            }
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            {
+                use std::io::{Seek, Write};
+                let mut input = tempfile::tempfile()?;
+                input.write_all(&serde_json::to_vec(&request)?)?;
+                input.rewind()?;
+                guest::run(vec!["firecrab-manage".into()], Some(input))
+            }
+        }
+        #[cfg(target_os = "linux")]
+        Command::FirecrabManage => firecrab::manage(),
+        #[cfg(target_os = "linux")]
+        Command::FirecrabSync => firecrab::sync(),
         #[cfg(target_os = "linux")]
         Command::CloudflareConnect => cloudflare::connect(),
         #[cfg(target_os = "linux")]

@@ -32,8 +32,10 @@ const SOURCE_INPUTS: &[&str] = &[
 ];
 // Older checkouts predate these resources and remain valid development sources.
 const OPTIONAL_SOURCE_INPUTS: &[&str] = &[
+    "firecrab-tunnel",
     "packaging/micromanager.toml",
     "packaging/systemd/firecrab-quick-tunnel.service",
+    "packaging/systemd/firecrab-address-updater.service",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -161,10 +163,15 @@ fn validate_checkout(root: &Path) -> Result<String, Error> {
             ));
         }
     }
-    if members.len() != 5 {
+    if members.iter().any(|member| {
+        member.as_str().is_none_or(|name| {
+            !SOURCE_INPUTS.contains(&name)
+                && !(name == "firecrab-tunnel" && root.join(name).is_dir())
+        })
+    }) {
         return Err(checkout_error(
             root,
-            "development archive supports the five Firecrab workspace members",
+            "development archive contains an unsupported workspace member",
         ));
     }
     let toolchain = read_toml(root, "rust-toolchain.toml")?;
@@ -328,6 +335,8 @@ members = ["firecrab-api", "firecrab-api-types", "firecrab-cli", "firecrab-helpe
             "packaging/systemd/firecrab-ingress.service",
             "packaging/systemd/firecrab-tunnel.service",
             "packaging/systemd/firecrab-quick-tunnel.service",
+            "packaging/systemd/firecrab-address-updater.service",
+            "firecrab-tunnel/Cargo.toml",
         ] {
             assert_eq!(
                 fs::read(unpacked.path().join(input)).expect(input),

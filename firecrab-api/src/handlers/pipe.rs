@@ -168,6 +168,62 @@ pub async fn control_quick_tunnel(
     .await
 }
 
+/// Dashboard input for one stable public address; no ownership secret is accepted.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirecrabSaveRequest {
+    subdomain: String,
+    target: firecrab_helper_protocol::firecrab_tunnel::Target,
+}
+
+/// Save one stable Firecrab address without accepting ownership tokens or server URLs.
+pub async fn save_firecrab_tunnel(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    Json(request): Json<FirecrabSaveRequest>,
+) -> Result<Json<Snapshot>, AppError> {
+    firecrab_request(
+        state,
+        request_id,
+        firecrab_helper_protocol::firecrab_tunnel::Request::Save {
+            subdomain: request.subdomain,
+            target: request.target,
+        },
+    )
+    .await
+}
+/// Remove one owned address and its exclusively managed connector.
+pub async fn delete_firecrab_tunnel(
+    State(state): State<AppState>,
+    Path(subdomain): Path<String>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<Snapshot>, AppError> {
+    firecrab_request(
+        state,
+        request_id,
+        firecrab_helper_protocol::firecrab_tunnel::Request::Delete { subdomain },
+    )
+    .await
+}
+async fn firecrab_request(
+    state: AppState,
+    request_id: RequestId,
+    request: firecrab_helper_protocol::firecrab_tunnel::Request,
+) -> Result<Json<Snapshot>, AppError> {
+    request.validate().map_err(|error| {
+        AppError::validation(
+            std::collections::BTreeMap::from([("firecrabTunnel".into(), error)]),
+            request_id.0,
+        )
+    })?;
+    call(
+        &state.network,
+        Operation::ManageFirecrabTunnel { request },
+        request_id,
+    )
+    .await
+}
+
 /// Request one fixed systemd service action while retaining configuration.
 pub async fn control(
     State(state): State<AppState>,

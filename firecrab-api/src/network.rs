@@ -63,6 +63,7 @@ impl NetworkClient {
         let timeout = if matches!(
             &request,
             firecrab_helper_protocol::pipe::Operation::ConnectCloudflare { .. }
+                | firecrab_helper_protocol::pipe::Operation::ManageFirecrabTunnel { .. }
                 | firecrab_helper_protocol::pipe::Operation::ConnectQuickTunnel { .. }
                 | firecrab_helper_protocol::pipe::Operation::ManageQuickTunnel {
                     request: firecrab_helper_protocol::pipe::QuickTunnelRequest::Save { .. }

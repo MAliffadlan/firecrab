@@ -239,6 +239,9 @@ fn apply_mode_locked(
     verify: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let config = Config::read(config_file)?;
+    if mode == ApplyMode::Configuration {
+        super::firecrab::validate_config(&config)?;
+    }
     let env = ServiceEnv::from_process_env();
     let nginx_path = nginx.map(Path::to_path_buf).unwrap_or_else(|| {
         super::engines::nginx_binary().unwrap_or_else(|| PathBuf::from("/usr/sbin/nginx"))
@@ -689,6 +692,7 @@ fn snapshot_with(
         }
     }
     Ok(Snapshot {
+        firecrab_tunnels: super::firecrab::addresses()?,
         config,
         units: vec![ingress, legacy],
         quick_tunnel,

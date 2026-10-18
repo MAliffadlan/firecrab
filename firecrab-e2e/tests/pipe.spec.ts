@@ -72,7 +72,7 @@ async function addQuick(page: Page, name: string) {
   return panel;
 }
 
-async function open(page: Page, options: { unavailable?: boolean; locale?: string; reject?: boolean; quickFailure?: string; quickDeleteFailure?: string; namedFailure?: string; zonesFailure?: boolean; zoneName?: string; missingConnector?: boolean; missingNginx?: boolean; holdConnection?: boolean; quickUrlPending?: boolean; vms?: VmResponse[]; savedAddresses?: string[]; savedRoutes?: PipeConfig["routes"]; vmsUnavailable?: boolean; configuredTunnel?: boolean; configuredLegacyQuick?: boolean; quickTunnels?: QuickEntry[]; ingressState?: string; tunnelState?: string; serviceFailure?: string; unconfiguredIngress?: boolean } = {}) {
+async function open(page: Page, options: { unavailable?: boolean; firecrabFailure?: boolean; firecrabPending?: boolean; locale?: string; reject?: boolean; quickFailure?: string; quickDeleteFailure?: string; namedFailure?: string; zonesFailure?: boolean; zoneName?: string; missingConnector?: boolean; missingNginx?: boolean; holdConnection?: boolean; quickUrlPending?: boolean; vms?: VmResponse[]; savedAddresses?: string[]; savedRoutes?: PipeConfig["routes"]; vmsUnavailable?: boolean; configuredTunnel?: boolean; configuredLegacyQuick?: boolean; quickTunnels?: QuickEntry[]; ingressState?: string; tunnelState?: string; serviceFailure?: string; unconfiguredIngress?: boolean } = {}) {
   let snapshot: PipeSnapshot = structuredClone(initial);
   if (options.savedRoutes) snapshot.config!.routes = structuredClone(options.savedRoutes);
   if (options.unconfiguredIngress) snapshot.config = null;
@@ -99,6 +99,8 @@ async function open(page: Page, options: { unavailable?: boolean; locale?: strin
   const namedConnections: { apiToken: string; zoneId: string; hostname: string; config: PipeConfig }[] = [];
   const zoneRequests: string[] = [];
   let namedDisconnects = 0;
+  const firecrabSaves: { subdomain: string; target: import("../../firecrab-frontend/src/api/pipe").FirecrabTarget }[] = [];
+  const firecrabDeletes: string[] = [];
   const quickSaves: QuickSave[] = [];
   const quickDeletes: string[] = [];
   const quickActions: { id: string; action: ServiceAction }[] = [];
@@ -123,6 +125,17 @@ async function open(page: Page, options: { unavailable?: boolean; locale?: strin
       namedDisconnects++;
       snapshot.config = { ...snapshot.config!, tunnel: null };
       snapshot.units[1] = { ...snapshot.units[1], loadState: "not-found", activeState: "inactive", subState: "dead", mainPid: 0 };
+      return route.fulfill({ json: snapshot });
+    }
+    if (path === "/api/pipe/firecrab-tunnels") {
+      const body = route.request().postDataJSON(); firecrabSaves.push(body);
+      if (options.firecrabFailure) return route.fulfill({ status: 400, json: { error: { message: "Subdomain is unavailable" } } });
+      snapshot.firecrabTunnels = [...(snapshot.firecrabTunnels ?? []).filter(a => a.subdomain !== body.subdomain), { ...body, publicUrl: `https://${body.subdomain}.firecrab.dev`, connectorId: body.target.type === "quick_tunnel" ? body.target.id : SECOND_QUICK_ID, connected: !options.firecrabPending, error: options.firecrabPending ? "Cannot reach the Firecrab connection service" : null }];
+      return route.fulfill({ json: snapshot });
+    }
+    if (path.startsWith("/api/pipe/firecrab-tunnels/")) {
+      const name = decodeURIComponent(path.split("/").at(-1)!); firecrabDeletes.push(name);
+      snapshot.firecrabTunnels = snapshot.firecrabTunnels?.filter(a => a.subdomain !== name);
       return route.fulfill({ json: snapshot });
     }
     if (path === "/api/pipe/quick-tunnels") {
@@ -187,36 +200,71 @@ async function open(page: Page, options: { unavailable?: boolean; locale?: strin
   });
   await page.addInitScript(locale => localStorage.setItem("firecrab.locale", locale), options.locale ?? "en");
   await page.goto("/#/pipe");
-  return { namedConnections, zoneRequests, get namedDisconnects() { return namedDisconnects; }, writes, actions, quickSaves, quickDeletes, quickActions, finishConnection, unavailable: () => { unavailable = true; }, setVms: (next: VmResponse[]) => { vms = next; }, failVms: () => { vmsUnavailable = true; }, publishQuickUrl: (id = QUICK_ID) => { snapshot.quickTunnels!.find(value => value.id === id)!.publicUrl = QUICK_URL; }, failTunnel: (id = QUICK_ID) => { const unit = snapshot.quickTunnels!.find(value => value.id === id)!.unit; unit.activeState = "failed"; unit.subState = "failed"; unit.mainPid = 0; } };
+  return { firecrabSaves, firecrabDeletes, namedConnections, zoneRequests, get namedDisconnects() { return namedDisconnects; }, writes, actions, quickSaves, quickDeletes, quickActions, finishConnection, unavailable: () => { unavailable = true; }, setVms: (next: VmResponse[]) => { vms = next; }, failVms: () => { vmsUnavailable = true; }, publishQuickUrl: (id = QUICK_ID) => { snapshot.quickTunnels!.find(value => value.id === id)!.publicUrl = QUICK_URL; }, failTunnel: (id = QUICK_ID) => { const unit = snapshot.quickTunnels!.find(value => value.id === id)!.unit; unit.activeState = "failed"; unit.subState = "failed"; unit.mainPid = 0; } };
 }
 
 test.describe("Pipe dashboard @dashboard", () => {
   test.describe.configure({ timeout: 45_000 });
-  test("offers temporary URLs and existing domains in Firecrab Tunnel", async ({ page }, testInfo) => {
-    const mock = await open(page);
-    const tunnel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
-    await expect(tunnel.getByRole("heading", { name: "Firecrab Tunnel", exact: true })).toBeVisible();
-    await expect(tunnel.getByRole("region", { name: "Quick Tunnel", exact: true })).toBeVisible();
-    await expect(tunnel.getByLabel("Cloudflare API token", { exact: true })).toBeVisible();
-    await expect(tunnel.getByLabel(/registration server|Firecrab connection token/i)).toHaveCount(0);
-    await tunnel.getByRole("button", { name: "Add tunnel", exact: true }).click();
-    await tunnel.getByLabel("Name", { exact: true }).fill("Saved Nginx routes");
-    await tunnel.getByLabel("Target", { exact: true }).selectOption("routes");
-    await tunnel.getByLabel("Route domain", { exact: true }).selectOption("app.example.com");
-    await tunnel.getByRole("button", { name: "Create temporary URL", exact: true }).click();
-    await expect(tunnel.getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
-    expect(mock.quickSaves).toEqual([{ id: null, name: "Saved Nginx routes", target: { type: "routes", host: "app.example.com" } }]);
-    expect(mock.namedConnections).toHaveLength(0);
+  test("connects a stable Firecrab subdomain to Quick Tunnel and retargets it to Nginx", async ({ page }, info) => {
+    const mock = await open(page, { quickTunnels: [webTunnel], savedRoutes: groupedRoutes });
+    const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
+    await panel.getByRole("button", { name: "Add fixed address" }).click();
+    await panel.getByLabel("Subdomain", { exact: true }).fill("my-app");
+    await panel.getByLabel("Quick Tunnel", { exact: true }).selectOption(QUICK_ID);
+    await panel.getByRole("button", { name: "Connect address", exact: true }).click();
+    const url = "https://my-app.firecrab.dev";
+    await expect(panel.getByRole("link", { name: url, exact: true })).toBeVisible();
+    await expect(panel.getByText("Connected", { exact: true })).toBeVisible();
+    await panel.getByRole("button", { name: "my-app actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    await expect(panel.getByLabel("Subdomain", { exact: true })).toBeDisabled();
+    await panel.getByLabel("Connection target", { exact: true }).selectOption("nginx");
+    await panel.getByLabel("Nginx route domain", { exact: true }).selectOption("app.example.com");
+    await panel.getByRole("button", { name: "Connect address", exact: true }).click();
+    expect(mock.firecrabSaves).toEqual([{ subdomain: "my-app", target: { type: "quick_tunnel", id: QUICK_ID } }, { subdomain: "my-app", target: { type: "nginx", host: "app.example.com" } }]);
     expect(mock.writes).toHaveLength(0);
-    await page.screenshot({ path: testInfo.outputPath("firecrab-tunnel-desktop.png"), fullPage: true });
+    expect(mock.quickSaves).toHaveLength(0);
+    await page.reload();
+    await expect(panel.getByRole("link", { name: url, exact: true })).toBeVisible();
+    await expect(panel.getByText("app.example.com", { exact: true })).toBeVisible();
+    await expect(panel.getByLabel(/token|server URL/i)).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath("firecrab-address-desktop.png"), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(tunnel.getByLabel("Cloudflare API token", { exact: true })).toBeVisible();
-    const publicAddress = await tunnel.getByRole("link", { name: QUICK_URL, exact: true }).boundingBox();
-    expect(publicAddress).not.toBeNull();
-    expect(publicAddress!.x).toBeGreaterThanOrEqual(0);
-    expect(publicAddress!.x + publicAddress!.width).toBeLessThanOrEqual(390);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: testInfo.outputPath("firecrab-tunnel-mobile.png"), fullPage: true });
+    await page.screenshot({ path: info.outputPath("firecrab-address-mobile.png"), fullPage: true });
+    await panel.getByRole("button", { name: "my-app actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+    await expect(panel.getByRole("link", { name: url, exact: true })).toHaveCount(0);
+    expect(mock.firecrabDeletes).toEqual(["my-app"]);
+    await expect(quickRow(page, "Public web")).toBeVisible();
+  });
+
+  test("connects saved Nginx routes without requiring a pre-existing Quick Tunnel", async ({ page }) => {
+    const mock = await open(page, { savedRoutes: groupedRoutes, firecrabPending: true });
+    const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
+    await panel.getByRole("button", { name: "Add fixed address" }).click();
+    await panel.getByLabel("Subdomain", { exact: true }).fill("nginx-app");
+    await panel.getByLabel("Connection target", { exact: true }).selectOption("nginx");
+    await panel.getByLabel("Nginx route domain", { exact: true }).selectOption("app.example.com");
+    await panel.getByRole("button", { name: "Connect address", exact: true }).click();
+    await expect(panel.getByText("Pending", { exact: true })).toBeVisible();
+    await expect(panel.getByText("Cannot reach the Firecrab connection service", { exact: true })).toBeVisible();
+    await expect(panel.getByText("Connected", { exact: true })).toHaveCount(0);
+    expect(mock.firecrabSaves).toEqual([{ subdomain: "nginx-app", target: { type: "nginx", host: "app.example.com" } }]);
+  });
+
+  test("keeps the address form and unfinished routes when registration fails", async ({ page }) => {
+    await open(page, { quickTunnels: [webTunnel], firecrabFailure: true });
+    await page.getByRole("button", { name: "Add route", exact: true }).click();
+    await page.getByLabel("Domain", { exact: true }).fill("draft.test");
+    const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
+    await panel.getByRole("button", { name: "Add fixed address" }).click();
+    await panel.getByLabel("Subdomain", { exact: true }).fill("taken-name");
+    await panel.getByLabel("Quick Tunnel", { exact: true }).selectOption(QUICK_ID);
+    await panel.getByRole("button", { name: "Connect address", exact: true }).click();
+    await expect(panel.getByRole("alert")).toContainText("Subdomain is unavailable");
+    await expect(panel.getByLabel("Subdomain", { exact: true })).toHaveValue("taken-name");
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("draft.test");
   });
 
   test("controls Nginx from its menu without applying configuration", async ({ page }) => {

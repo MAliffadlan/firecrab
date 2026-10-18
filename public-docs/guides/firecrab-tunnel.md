@@ -1,72 +1,120 @@
 # Firecrab Tunnel
 
-Firecrab connects an existing public domain or a Cloudflare Quick Tunnel URL to
-Nginx. Nginx forwards requests to VM apps by hostname and path and balances
-requests across the selected apps.
-
-Open **Pipe → Firecrab Tunnel**. Choose **Cloudflare Quick Tunnel** for a
-temporary URL, or **Cloudflare Tunnel** to connect an existing domain. Each
-connection uses the independent ingress and connector services.
+Firecrab Tunnel connects `https://<subdomain>.firecrab.dev` to either an existing
+Quick Tunnel or saved Nginx routes. The connection service owns the public
+address. Nginx owns path routing and app request distribution.
 
 ```text
-Public domain ─── DNS / Cloudflare Tunnel ─┐
-                                         ├→ Nginx → VM apps
-Temporary trycloudflare.com URL ──────────┘
+*.firecrab.dev → connection service → selected Quick Tunnel → VM apps / Nginx
+                                  → managed connector → saved Nginx routes → VM apps
 ```
 
-A hostname such as `my-app.firecrab.dev` is an example of an existing domain you
-control. Firecrab does not allocate names under `firecrab.dev`. This flow uses no
-Firecrab registration server, proprietary connection token, reservation API or
-address-updater service.
+The service is the standalone `firecrab-tunnel` binary. It stores subdomain
+ownership in SQLite and forwards HTTP streams and WebSockets to the current
+target. A DNS CNAME alone does not implement this forwarding service.
 
-## Use an existing domain
+## Connect an address
 
-1. Open **Pipe → Routes → Add route**.
-2. Enter the full domain, for example `my-app.firecrab.dev`.
-3. Enter the path, select the VM app ports, and click **Save**.
-4. Add another path under the same hostname if needed. Selecting multiple apps
-   balances requests across them.
-5. Connect the domain to Nginx:
-   - With a separately configured public ingress, point DNS to that ingress and
-     configure HTTPS there.
-   - For the default private management-VM listener, use the **Cloudflare Tunnel**
-     panel. Follow its API-token instructions, load your domains, select the saved
-     route domain, and click **Connect and publish**.
-6. Open the public hostname with each saved path and check the app response.
+1. Open **Pipe → Firecrab Tunnel → Add fixed address**.
+2. Enter a subdomain with 3–48 lowercase letters, digits or hyphens.
+3. Select **Quick Tunnel** and an existing connector, or select **Nginx routes**
+   and a saved route domain.
+4. Select **Connect address**.
+5. Wait for **Connected**, then open the fixed HTTPS address and its app paths.
 
-Saving a route configures Nginx. It does not by itself create DNS records or make
-a loopback listener reachable from the Internet. The Cloudflare setup uses the
-real Cloudflare API for domain lookup, tunnel creation and DNS registration.
-Existing DNS records are preserved. A real account token and domain permissions
-are required for that provider-managed setup.
+Nginx mode publishes every saved path and app pool for the selected hostname.
+It creates a dedicated private connector automatically. Quick Tunnel mode
+reuses the selected connector. Editing the address can switch between these
+modes without changing the public hostname. Unrelated routes and connectors
+are retained. Deleting an address removes its remote reservation and only an
+exclusively owned connector; a reused user connector remains available.
 
-## Use a Quick Tunnel URL
+Ownership credentials are generated automatically and stored in the managed
+host's root-only `pipe/firecrab-addresses.json` file. The dashboard and API never
+return them. There is no user-facing registration-server URL or token field.
+Keep this protected state when migrating a host: losing it loses the ability
+to update or remove the existing reservation.
 
-1. Save the domain/path routes that should be reachable together.
-2. Open **Cloudflare Quick Tunnel → Add tunnel**.
-3. Enter a name and choose **Nginx routes** as the target.
-4. Select the saved route domain and click **Create temporary URL**.
-5. Open the issued `https://….trycloudflare.com` URL with the saved paths.
+The independent `firecrab-address-updater.service` refreshes target URLs every
+30 seconds. It continues when the API restarts. A service lease expires after
+180 seconds without refresh. Expired or stopped targets return HTTP 503, while
+the subdomain remains reserved. Unreachable service and name conflicts appear
+as pending/error states; saving a local entry alone is not public acceptance.
 
-The saved route domain may be a local name such as `pipe.test`. It selects the
-Nginx route group; the generated temporary hostname provides public access.
-Quick Tunnel needs no user account, API token or personal DNS record. Restarting
-a connector changes its URL. The list provides copy, edit, start, stop, restart
-and delete actions for each connector.
-
-## CLI and verification
-
-`firecrab pipe status` shows the independent Nginx and connector services. On
-macOS and Windows these services run inside the management VM.
-
-A request such as the following checks the Nginx route inside that VM:
+## CLI and API
 
 ```sh
-./target/debug/firecrab service shell curl -fsS \
-  -H 'Host: my-app.firecrab.dev' http://127.0.0.1:8080/
+# Linux requires root. macOS/Windows forward these commands into the managed guest.
+firecrab pipe address connect my-app --quick <connector-uuid>
+firecrab pipe address connect my-app --nginx app.internal
+firecrab pipe address delete my-app
 ```
 
-This checks routing, not public DNS or HTTPS. Verify the actual public hostname
-separately after its DNS and connection path are configured. See the
-[Cloudflare and Quick Tunnel guide](cloudflare-tunnel.md) for provider setup and
-the [Pipe guide](pipe.md) for unit ownership and traffic continuity.
+| Interface | Action |
+| --- | --- |
+| `GET /api/pipe` | Includes non-secret `firecrabTunnels` statuses |
+| `POST /api/pipe/firecrab-tunnels` | Save `{subdomain, target}` |
+| `DELETE /api/pipe/firecrab-tunnels/{subdomain}` | Remove one owned address |
+
+Target shapes are `{type: "quick_tunnel", id: "<uuid>"}` and
+`{type: "nginx", host: "<saved-hostname>"}`. Requests do not accept server URLs,
+ownership credentials, executable paths or arbitrary commands.
+
+## Deploy the connection service
+
+This is an operator task for the owner of `firecrab.dev`. Building the client
+or saving an address does not deploy the public service or change DNS.
+
+1. Build `cargo build --release -p firecrab-tunnel --locked` and install its
+   binary as `/usr/local/bin/firecrab-tunnel` on a persistent Linux host.
+2. Create the system user `firecrab-tunnel` with no login shell.
+3. Install [firecrab-connection.service](../../packaging/systemd/firecrab-connection.service)
+   in `/etc/systemd/system/`, then enable/start it. systemd creates the private
+   state directory. Retain its SQLite database and WAL files across upgrades.
+4. Create a locally managed Cloudflare Tunnel for this operator host. Adapt
+   [the connector example](../../packaging/firecrab-tunnel/cloudflared.yml.example)
+   with the actual tunnel UUID and protected credentials file.
+5. Add proxied CNAME records for `*` and `tunnel` under `firecrab.dev`, pointing
+   to the operator tunnel's `<uuid>.cfargotunnel.com` target. Existing explicit
+   records remain separate; inspect conflicts before changing DNS.
+6. Run cloudflared as its own persistent service with the adapted config.
+   Verify edge TLS covers `tunnel.firecrab.dev` and `*.firecrab.dev`.
+7. Check `https://tunnel.firecrab.dev/health` returns 204. Connect an isolated
+   canary address through the Firecrab dashboard before allowing normal use.
+
+The operator connector forwards both the control hostname and public wildcard
+hostnames to loopback port 8790. The server's `--trust-cloudflare-proxy` option
+uses Cloudflare's client-IP header only for local connector connections.
+Registration is limited to 16 new names per client IP per hour and 10,000 stored
+names. Apply the operator's edge abuse policy before public rollout.
+
+For an operator-approved directly reachable Nginx origin, use
+`--nginx-origin https://nginx.example.net`. Only explicitly allowlisted direct
+origins are accepted; arbitrary private URLs and metadata endpoints are rejected.
+Private management-VM Nginx uses the automatically managed connector instead.
+
+Operator-only `FIRECRAB_TUNNEL_ENDPOINT` can select an alternative HTTPS origin
+before the first local registration. The endpoint is persisted with the protected
+state. HTTP loopback origins are accepted only for isolated local QA.
+
+Cloudflare supports wildcard ingress rules and wildcard DNS records. Review the
+[configuration reference](https://developers.cloudflare.com/tunnel/features/locally-managed-tunnels/configuration-file/)
+and [wildcard DNS behavior](https://developers.cloudflare.com/dns/manage-dns-records/reference/wildcard-dns-records/)
+when configuring the operator tunnel and existing explicit hostnames.
+
+## Verification
+
+`cargo test -p firecrab-tunnel --locked` covers durable ownership, conflicts,
+strict origin validation, real HTTP forwarding, offline leases and WebSockets.
+The workspace CI includes these tests. Pipe browser E2E covers both target types,
+retargeting, pending/error states, deletion isolation and mobile layout.
+
+On an isolated systemd host, verify both target modes and each saved path. Restart
+the selected connector: its temporary URL must change while the fixed hostname
+continues reaching the same app after updater reconciliation. Restart only the
+API and verify the updater/connector PIDs remain unchanged. Stop the target and
+verify 503. Delete one address and verify other addresses, routes and user-owned
+connectors remain. Test a second host's conflict without disclosing credentials.
+
+Repeat these checks through actual wildcard DNS/TLS after deployment. Local
+fixtures, a running updater or a saved address do not establish public HTTPS.

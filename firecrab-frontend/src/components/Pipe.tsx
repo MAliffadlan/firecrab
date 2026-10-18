@@ -3,6 +3,7 @@ import { applyPipe, controlPipeService, getPipe, type PipeConfig, type PipeRoute
 import { useI18n } from "../i18n";
 import CloudflareConnect from "./CloudflareConnect";
 import NamedCloudflareTunnel from "./NamedCloudflareTunnel";
+import FirecrabTunnel from "./FirecrabTunnel";
 import type { VmResponse } from "../bindings";
 import { canUsePipeApps, pipeApps } from "../pipeApps";
 import PipeAppPicker from "./PipeAppPicker";
@@ -28,6 +29,7 @@ export default function Pipe({ vms, vmsLoading, vmsUnavailable, onUnsavedChange 
   const [editing, setEditing] = useState<number | "new" | null>(null);
   const [quickDirty, setQuickDirty] = useState(false);
   const [namedDirty, setNamedDirty] = useState(false);
+  const [firecrabDirty, setFirecrabDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -40,7 +42,7 @@ export default function Pipe({ vms, vmsLoading, vmsUnavailable, onUnsavedChange 
   const preserved = typeof editing === "number" ? draft.routes[editing]?.upstreams ?? [] : [];
   const appsReady = !vmsLoading && !vmsUnavailable && canUsePipeApps(apps, upstreams, preserved);
   const editorPending = typeof editing === "number" || !!host.trim() || path !== "/" || upstreams.length > 0;
-  const hasUnsavedChanges = dirty || editorPending || quickDirty || namedDirty || (listenInput !== null && listenInput !== draft.listen);
+  const hasUnsavedChanges = dirty || editorPending || quickDirty || namedDirty || firecrabDirty || (listenInput !== null && listenInput !== draft.listen);
   const saveDisabled = busy || !snapshot?.nginxAvailable || (listenInput !== null && !listenInput.trim()) || (editorOpen && (!host.trim() || !path.startsWith("/") || !appsReady)) || ((draft.tunnel !== null || !!draft.quickTunnel || !!snapshot?.config?.quickTunnels?.length) && !snapshot.cloudflaredAvailable);
 
   useEffect(() => {
@@ -171,11 +173,17 @@ export default function Pipe({ vms, vmsLoading, vmsUnavailable, onUnsavedChange 
       {snapshot && !snapshot.nginxAvailable && <p className="field-error">{t("Install Nginx on this host before applying routes.", "라우트를 적용하기 전에 이 호스트에 Nginx를 설치한다.")}</p>}
     </section>
 
-    <div className="stack" role="region" aria-label="Firecrab Tunnel">
-      <header>
-        <h2 className="panel-title">Firecrab Tunnel</h2>
-        <p className="pipe-description">{t("Use a temporary URL or connect an existing domain. Both forward requests through Nginx to your VM apps.", "임시 주소를 만들거나 기존 도메인을 연결한다. 두 방식 모두 Nginx를 통해 VM 앱으로 요청을 전달한다.")}</p>
-      </header>
+    <FirecrabTunnel snapshot={snapshot} busy={busy}
+      onBusy={value => { mutating.current = value; setBusy(value); revision.current++; }} onUnsavedChange={setFirecrabDirty}
+      onConnected={next => {
+        setSnapshot(next);
+        if (next.config) {
+          const { tunnel, quickTunnel, quickTunnels } = next.config;
+          setDraft(current => ({ ...current, tunnel, quickTunnel, quickTunnels }));
+        }
+        setError(null);
+      }} />
+
     <CloudflareConnect config={snapshot?.config ?? EMPTY} snapshot={snapshot} busy={busy} apps={apps} vmsLoading={vmsLoading} vmsUnavailable={vmsUnavailable}
       onBusy={value => { mutating.current = value; setBusy(value); revision.current++; }} onUnsavedChange={setQuickDirty}
       onConnected={next => {
@@ -197,8 +205,6 @@ export default function Pipe({ vms, vmsLoading, vmsUnavailable, onUnsavedChange 
         }
         setError(null);
       }} />
-
-    </div>
 
     <section className="panel" aria-label={t("Routes", "라우트")}>
       <h2 className="panel-title"><span>{t("Routes", "라우트")}</span><span className="pipe-row-actions">

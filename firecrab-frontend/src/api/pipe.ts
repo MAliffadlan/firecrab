@@ -10,12 +10,29 @@ export interface PipeConfig {
   quickTunnels?: QuickTunnelEntry[];
 }
 export interface PipeSnapshot {
+  firecrabTunnels?: FirecrabAddress[];
   config: PipeConfig | null;
   units: { unit: string; loadState: string; activeState: string; subState: string; mainPid: number }[];
   nginxAvailable: boolean;
   cloudflaredAvailable: boolean;
   quickTunnel?: { publicUrl: string | null } | null;
   quickTunnels?: QuickTunnelSnapshot[];
+}
+
+export type FirecrabTarget = { type: "quick_tunnel"; id: string } | { type: "nginx"; host: string };
+export interface FirecrabAddress {
+  subdomain: string;
+  publicUrl: string;
+  target: FirecrabTarget;
+  connectorId: string;
+  connected: boolean;
+  error: string | null;
+}
+export function saveFirecrabAddress(subdomain: string, target: FirecrabTarget): Promise<PipeSnapshot> {
+  return fetchJson("/api/pipe/firecrab-tunnels", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ subdomain, target }) });
+}
+export function deleteFirecrabAddress(subdomain: string): Promise<PipeSnapshot> {
+  return fetchJson("/api/pipe/firecrab-tunnels/" + encodeURIComponent(subdomain), { method: "DELETE" });
 }
 export function getPipe(signal?: AbortSignal): Promise<PipeSnapshot> {
   return fetchJson("/api/pipe", { signal });
