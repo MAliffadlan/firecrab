@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { PipeConfig, PipeSnapshot } from "../../firecrab-frontend/src/api/pipe";
 import type { VmResponse } from "../../firecrab-frontend/src/bindings/VmResponse";
 
 function appVm(name: string, ipv4: string | null, ports: number[], state: VmResponse["state"] = "running"): VmResponse {
@@ -28,38 +29,155 @@ const initial = {
     { unit: "firecrab-tunnel.service", loadState: "not-found", activeState: "inactive", subState: "dead", mainPid: 0 },
   ],
   nginxAvailable: true, cloudflaredAvailable: true,
-};
+} satisfies PipeSnapshot;
 
-async function open(page: Page, options: { unavailable?: boolean; locale?: string; reject?: boolean; cloudflareFailure?: string; missingConnector?: boolean; holdConnection?: boolean; vms?: VmResponse[]; savedAddresses?: string[]; vmsUnavailable?: boolean } = {}) {
-  let snapshot = structuredClone(initial);
-  if (options.savedAddresses) snapshot.config.routes[0].upstreams = options.savedAddresses;
+type Service = "ingress" | "tunnel";
+type ServiceAction = "start" | "stop" | "restart";
+
+async function serviceMenu(page: Page, name = "Nginx") {
+  await page.getByRole("region", { name: "Pipe", exact: true }).getByRole("button", { name: `${name} actions`, exact: true }).click();
+  return page.getByRole("menu");
+}
+
+async function editNginx(page: Page) {
+  await (await serviceMenu(page)).getByRole("menuitem", { name: "Edit", exact: true }).click();
+}
+
+const QUICK_ID = "11111111-1111-4111-8111-111111111111";
+const SECOND_QUICK_ID = "22222222-2222-4222-8222-222222222222";
+const LEGACY_QUICK_ID = "00000000-0000-0000-0000-000000000001";
+const QUICK_URL = "https://first-tunnel.trycloudflare.com";
+const SECOND_QUICK_URL = "https://second-tunnel.trycloudflare.com";
+type QuickEntry = NonNullable<PipeConfig["quickTunnels"]>[number];
+type QuickSave = Omit<QuickEntry, "id"> & { id?: string | null };
+const webTunnel: QuickEntry = { id: QUICK_ID, name: "Public web", target: { type: "apps", upstreams: ["172.30.36.2:80"] } };
+const apiTunnel: QuickEntry = { id: SECOND_QUICK_ID, name: "Public API", target: { type: "apps", upstreams: ["172.30.36.4:8080"] } };
+const groupedRoutes = [
+  ...initial.config.routes,
+  { host: "app.example.com", pathPrefix: "/api", upstreams: ["172.30.36.4:8080"] },
+  { host: "other.example.com", pathPrefix: "/", upstreams: ["172.30.36.4:9090"] },
+  { host: "api-only.example.com", pathPrefix: "/api", upstreams: ["172.30.36.4:8080"] },
+];
+
+function quickPanel(page: Page) { return page.getByRole("region", { name: "Quick Tunnel", exact: true }); }
+function quickRow(page: Page, name: string) { return quickPanel(page).getByRole("row").filter({ has: page.getByRole("cell", { name, exact: true }) }); }
+async function quickMenu(page: Page, name: string) {
+  await quickRow(page, name).getByRole("button", { name: `${name} actions`, exact: true }).click();
+  return page.getByRole("menu");
+}
+async function addQuick(page: Page, name: string) {
+  const panel = quickPanel(page);
+  await panel.getByRole("button", { name: "Add tunnel", exact: true }).click();
+  await panel.getByLabel("Name", { exact: true }).fill(name);
+  return panel;
+}
+
+async function open(page: Page, options: { unavailable?: boolean; locale?: string; reject?: boolean; quickFailure?: string; quickDeleteFailure?: string; namedFailure?: string; zonesFailure?: boolean; zoneName?: string; missingConnector?: boolean; missingNginx?: boolean; holdConnection?: boolean; quickUrlPending?: boolean; vms?: VmResponse[]; savedAddresses?: string[]; savedRoutes?: PipeConfig["routes"]; vmsUnavailable?: boolean; configuredTunnel?: boolean; configuredLegacyQuick?: boolean; quickTunnels?: QuickEntry[]; ingressState?: string; tunnelState?: string; serviceFailure?: string; unconfiguredIngress?: boolean } = {}) {
+  let snapshot: PipeSnapshot = structuredClone(initial);
+  if (options.savedRoutes) snapshot.config!.routes = structuredClone(options.savedRoutes);
+  if (options.unconfiguredIngress) snapshot.config = null;
+  if (options.configuredTunnel) snapshot.config!.tunnel = { id: QUICK_ID, credentialsFile: "/etc/firecrab/pipe/secrets/tunnel-credentials.json" };
+  snapshot.quickTunnels = (options.quickTunnels ?? []).map((entry, index) => ({ ...structuredClone(entry), unit: { unit: `firecrab-quick-tunnel-${entry.id.replaceAll("-", "")}.service`, loadState: "loaded", activeState: "active", subState: "running", mainPid: 301 + index }, publicUrl: index === 0 ? QUICK_URL : SECOND_QUICK_URL }));
+  if (options.quickTunnels) snapshot.config!.quickTunnels = structuredClone(options.quickTunnels);
+  if (options.configuredLegacyQuick) {
+    snapshot.config!.quickTunnel = { upstreams: ["172.30.36.2:80"] };
+    snapshot.quickTunnel = { publicUrl: QUICK_URL };
+    snapshot.quickTunnels.push({ id: LEGACY_QUICK_ID, name: "Quick Tunnel", target: { type: "apps", upstreams: ["172.30.36.2:80"] }, unit: { ...snapshot.units[1], loadState: "loaded", activeState: "active", subState: "running", mainPid: 202 }, publicUrl: QUICK_URL });
+  }
+  if (options.configuredTunnel || options.configuredLegacyQuick) snapshot.units[1] = { ...snapshot.units[1], loadState: "loaded", activeState: "active", subState: "running", mainPid: 202 };
+  for (const [index, state] of [options.ingressState, options.tunnelState].entries()) {
+    if (state) snapshot.units[index] = { ...snapshot.units[index], activeState: state, subState: state === "active" ? "running" : "dead", mainPid: state === "active" ? index + 101 : 0 };
+  }
+  snapshot.nginxAvailable = !options.missingNginx;
+  snapshot.cloudflaredAvailable = !options.missingConnector;
+  if (options.savedAddresses) snapshot.config!.routes[0].upstreams = options.savedAddresses;
   let vms = structuredClone(options.vms ?? appVms);
   let vmsUnavailable = options.vmsUnavailable ?? false;
-  const writes: { config: typeof initial.config; credentials: unknown }[] = [];
   let unavailable = options.unavailable ?? false;
-  snapshot.cloudflaredAvailable = !options.missingConnector;
-  const connections: { apiToken: string; zoneId: string; hostname: string; config: typeof initial.config }[] = [];
+  const writes: { config: PipeConfig; credentials: unknown }[] = [];
+  const actions: { service: Service; action: ServiceAction }[] = [];
+  const namedConnections: { apiToken: string; zoneId: string; hostname: string; config: PipeConfig }[] = [];
+  const zoneRequests: string[] = [];
+  let namedDisconnects = 0;
+  const quickSaves: QuickSave[] = [];
+  const quickDeletes: string[] = [];
+  const quickActions: { id: string; action: ServiceAction }[] = [];
   let finishConnection: () => void = () => {};
+  let quickGeneration = 0;
   const connectionGate = new Promise<void>(resolve => { finishConnection = resolve; });
   await page.route(/^https?:\/\/[^/]+\/api\//, async route => {
     const path = new URL(route.request().url()).pathname;
-    if (path === "/api/pipe/cloudflare/zones") return route.fulfill({ json: [{ id: "a".repeat(32), name: "example.com", status: "active", account: { id: "b".repeat(32), name: "Example" } }] });
+    if (path === "/api/pipe/cloudflare/zones") {
+      zoneRequests.push(route.request().postDataJSON().apiToken);
+      if (options.zonesFailure) return route.fulfill({ status: 400, json: { error: { message: "Cloudflare rejected the API token" } } });
+      return route.fulfill({ json: [{ id: "01234567890123456789012345678901", name: options.zoneName ?? "example.com", status: "active", account: { id: "abcdefabcdefabcdefabcdefabcdefab", name: "Test account" } }] });
+    }
     if (path === "/api/pipe/cloudflare/connect") {
-      const body = route.request().postDataJSON(); connections.push(body);
-      if (options.cloudflareFailure) return route.fulfill({ status: 400, json: { error: { message: "request validation failed", fields: { cloudflare: options.cloudflareFailure } } } });
-      snapshot = { ...snapshot, cloudflaredAvailable: true, config: { ...body.config, tunnel: { id: "11111111-1111-4111-8111-111111111111", credentialsFile: "/etc/firecrab/pipe/secrets/tunnel-credentials.json" } } };
+      const body = route.request().postDataJSON(); namedConnections.push(body);
+      if (options.namedFailure) return route.fulfill({ status: 400, json: { error: { message: options.namedFailure } } });
+      snapshot.config = { ...snapshot.config!, tunnel: { id: SECOND_QUICK_ID, credentialsFile: "/etc/firecrab/pipe/secrets/tunnel-credentials.json", hostname: body.hostname } };
       snapshot.units[1] = { ...snapshot.units[1], loadState: "loaded", activeState: "active", subState: "running", mainPid: 202 };
+      return route.fulfill({ json: snapshot });
+    }
+    if (path === "/api/pipe/cloudflare/disconnect") {
+      namedDisconnects++;
+      snapshot.config = { ...snapshot.config!, tunnel: null };
+      snapshot.units[1] = { ...snapshot.units[1], loadState: "not-found", activeState: "inactive", subState: "dead", mainPid: 0 };
+      return route.fulfill({ json: snapshot });
+    }
+    if (path === "/api/pipe/quick-tunnels") {
+      const body = route.request().postDataJSON() as QuickSave; quickSaves.push(body);
+      if (options.quickFailure) return route.fulfill({ status: 400, json: { error: { message: "request validation failed", fields: { quickTunnel: options.quickFailure } } } });
+      const id = body.id ?? (quickSaves.length === 1 ? QUICK_ID : SECOND_QUICK_ID);
+      const entry: QuickEntry = { id, name: body.name, target: body.target };
+      const saved = snapshot.config ?? structuredClone(initial.config);
+      snapshot.config = { ...saved, quickTunnel: id === LEGACY_QUICK_ID ? null : saved.quickTunnel, quickTunnels: [...(saved.quickTunnels ?? []).filter(value => value.id !== id), entry] };
+      const existing = snapshot.quickTunnels?.find(value => value.id === id);
+      snapshot.quickTunnels = [...(snapshot.quickTunnels ?? []).filter(value => value.id !== id), { ...entry, unit: { unit: `firecrab-quick-tunnel-${id.replaceAll("-", "")}.service`, loadState: "loaded", activeState: "active", subState: "running", mainPid: existing?.unit.mainPid || 303 }, publicUrl: options.quickUrlPending ? null : id === LEGACY_QUICK_ID && saved.quickTunnel ? "https://migrated-tunnel.trycloudflare.com" : existing?.publicUrl ?? (id === QUICK_ID ? QUICK_URL : SECOND_QUICK_URL) }];
+      snapshot.cloudflaredAvailable = true;
       if (options.holdConnection) await connectionGate;
+      return route.fulfill({ json: snapshot });
+    }
+    const quickOperation = path.match(/^\/api\/pipe\/quick-tunnels\/([^/]+)(\/service)?$/);
+    if (quickOperation) {
+      const id = quickOperation[1];
+      const entry = snapshot.quickTunnels?.find(value => value.id === id);
+      if (!entry) return route.fulfill({ status: 404, json: { error: { message: "Tunnel not found" } } });
+      if (route.request().method() === "DELETE") {
+        quickDeletes.push(id);
+        if (options.quickDeleteFailure) return route.fulfill({ status: 500, json: { error: { message: options.quickDeleteFailure } } });
+        snapshot.quickTunnels = snapshot.quickTunnels!.filter(value => value.id !== id);
+        snapshot.config = { ...snapshot.config!, quickTunnel: id === LEGACY_QUICK_ID ? null : snapshot.config?.quickTunnel, quickTunnels: (snapshot.config?.quickTunnels ?? []).filter(value => value.id !== id) };
+      } else if (quickOperation[2]) {
+        const { action } = route.request().postDataJSON() as { action: ServiceAction };
+        quickActions.push({ id, action });
+        if (options.serviceFailure) return route.fulfill({ status: 500, json: { error: { message: options.serviceFailure } } });
+        entry.unit.activeState = action === "stop" ? "inactive" : "active";
+        entry.unit.subState = action === "stop" ? "dead" : "running";
+        entry.unit.mainPid = action === "stop" ? 0 : 400 + ++quickGeneration;
+        if (action !== "stop") entry.publicUrl = `https://restarted-${quickGeneration}.trycloudflare.com`;
+      }
       return route.fulfill({ json: snapshot });
     }
     if (path === "/api/vms") return vmsUnavailable ? route.fulfill({ status: 503, json: { error: { message: "VM list unavailable" } } }) : route.fulfill({ json: vms });
     if (path === "/api/update") return route.fulfill({ json: { current: "0.3.1", latest: "0.3.1", updateAvailable: false } });
-    if (path === "/api/pipe/disable") { snapshot.units.forEach(unit => { unit.activeState = "inactive"; unit.mainPid = 0; }); return route.fulfill({ json: snapshot }); }
+    if (path === "/api/pipe/service") {
+      const action = route.request().postDataJSON() as { service: Service; action: ServiceAction };
+      actions.push(action);
+      if (options.serviceFailure) return route.fulfill({ status: 500, json: { error: { message: options.serviceFailure } } });
+      const unit = snapshot.units[action.service === "ingress" ? 0 : 1];
+      unit.activeState = action.action === "stop" ? "inactive" : "active";
+      unit.subState = action.action === "stop" ? "dead" : "running";
+      unit.mainPid = action.action === "stop" ? 0 : unit.mainPid || 303;
+      if (action.service === "tunnel" && action.action !== "stop" && snapshot.units[0].activeState !== "active") snapshot.units[0] = { ...snapshot.units[0], activeState: "active", subState: "running", mainPid: 404 };
+      return route.fulfill({ json: snapshot });
+    }
     if (path === "/api/pipe") {
       if (unavailable) return route.fulfill({ status: 503, json: { error: { message: "Pipe helper unavailable" } } });
       if (route.request().method() === "PUT") {
-        const body = route.request().postDataJSON();
-        writes.push(body);
+        const body = route.request().postDataJSON(); writes.push(body);
+        const missingHost = snapshot.quickTunnels?.find(value => value.target.type === "routes" && !body.config.routes.some((existing: { host: string }) => existing.host === (value.target as { host: string }).host));
+        if (missingHost) return route.fulfill({ status: 400, json: { error: { message: "request validation failed", fields: { config: "This domain is used by a Quick Tunnel. Update or delete the tunnel first." } } } });
         if (options.reject) return route.fulfill({ status: 400, json: { error: { message: "request validation failed", fields: { config: "invalid app address" } } } });
         snapshot = { ...snapshot, config: body.config };
       }
@@ -69,24 +187,244 @@ async function open(page: Page, options: { unavailable?: boolean; locale?: strin
   });
   await page.addInitScript(locale => localStorage.setItem("firecrab.locale", locale), options.locale ?? "en");
   await page.goto("/#/pipe");
-  return { writes, connections, finishConnection, unavailable: () => { unavailable = true; }, setVms: (next: VmResponse[]) => { vms = next; }, failVms: () => { vmsUnavailable = true; } };
+  return { namedConnections, zoneRequests, get namedDisconnects() { return namedDisconnects; }, writes, actions, quickSaves, quickDeletes, quickActions, finishConnection, unavailable: () => { unavailable = true; }, setVms: (next: VmResponse[]) => { vms = next; }, failVms: () => { vmsUnavailable = true; }, publishQuickUrl: (id = QUICK_ID) => { snapshot.quickTunnels!.find(value => value.id === id)!.publicUrl = QUICK_URL; }, failTunnel: (id = QUICK_ID) => { const unit = snapshot.quickTunnels!.find(value => value.id === id)!.unit; unit.activeState = "failed"; unit.subState = "failed"; unit.mainPid = 0; } };
 }
 
 test.describe("Pipe dashboard @dashboard", () => {
   test.describe.configure({ timeout: 45_000 });
+  test("controls Nginx from its menu without applying configuration", async ({ page }) => {
+    const mock = await open(page, { ingressState: "inactive" });
+    const panel = page.getByRole("region", { name: "Pipe", exact: true });
+    await expect(panel.getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0);
+    let menu = await serviceMenu(page);
+    await expect(menu.getByRole("menuitem", { name: "Stop", exact: true })).toBeDisabled();
+    await menu.getByRole("menuitem", { name: "Start", exact: true }).click();
+    await expect(page.getByText("Nginx start requested.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    menu = await serviceMenu(page);
+    await expect(menu.getByRole("menuitem", { name: "Start", exact: true })).toBeDisabled();
+    await menu.getByRole("menuitem", { name: "Restart", exact: true }).click();
+    await expect(page.getByText("Nginx restart requested.", { exact: true })).toBeVisible();
+    await (await serviceMenu(page)).getByRole("menuitem", { name: "Stop", exact: true }).click();
+    await expect(page.getByText("Nginx stop requested.", { exact: true })).toBeVisible();
+    expect(mock.actions).toEqual([{ service: "ingress", action: "start" }, { service: "ingress", action: "restart" }, { service: "ingress", action: "stop" }]);
+    await expect(panel.getByRole("button", { name: "Cloudflare Tunnel actions", exact: true })).toHaveCount(0);
+    expect(mock.writes).toHaveLength(0);
+  });
+
+  test("controls a configured tunnel separately and retains unfinished routes", async ({ page }) => {
+    const mock = await open(page, { configuredTunnel: true });
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await page.getByLabel("Domain", { exact: true }).fill("unfinished.example.com");
+    await editNginx(page);
+    await page.getByLabel("Listen address", { exact: true }).fill("127.0.0.1:8081");
+    const panel = page.getByRole("region", { name: "Pipe", exact: true });
+    await (await serviceMenu(page, "Cloudflare Tunnel")).getByRole("menuitem", { name: "Stop", exact: true }).click();
+    await expect(page.getByText("Cloudflare Tunnel stop requested.", { exact: true })).toBeVisible();
+    await expect(panel.getByRole("row").filter({ hasText: "Nginx" }).first().getByRole("cell", { name: "active", exact: true })).toBeVisible();
+    await expect(panel.getByRole("row").filter({ hasText: "Cloudflare Tunnel" }).getByRole("cell", { name: "inactive", exact: true })).toBeVisible();
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("unfinished.example.com");
+    await expect(page.getByLabel("Listen address", { exact: true })).toHaveValue("127.0.0.1:8081");
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
+    await (await serviceMenu(page, "Cloudflare Tunnel")).getByRole("menuitem", { name: "Start", exact: true }).click();
+    await expect(page.getByText("Cloudflare Tunnel start requested.", { exact: true })).toBeVisible();
+    expect(mock.actions).toEqual([{ service: "tunnel", action: "stop" }, { service: "tunnel", action: "start" }]);
+    expect(mock.writes).toHaveLength(0);
+  });
+
+  test("keeps the running tunnel when stopping Nginx and starts ingress with the tunnel", async ({ page }) => {
+    const mock = await open(page, { configuredTunnel: true });
+    const panel = page.getByRole("region", { name: "Pipe", exact: true });
+    await (await serviceMenu(page)).getByRole("menuitem", { name: "Stop", exact: true }).click();
+    await expect(page.getByText("Nginx stop requested.", { exact: true })).toBeVisible();
+    await expect(panel.getByRole("row").filter({ hasText: "Cloudflare Tunnel" }).getByRole("cell", { name: "active", exact: true })).toBeVisible();
+    await (await serviceMenu(page, "Cloudflare Tunnel")).getByRole("menuitem", { name: "Stop", exact: true }).click();
+    await expect(page.getByText("Cloudflare Tunnel stop requested.", { exact: true })).toBeVisible();
+    await (await serviceMenu(page, "Cloudflare Tunnel")).getByRole("menuitem", { name: "Start", exact: true }).click();
+    await expect(page.getByText("Cloudflare Tunnel start requested.", { exact: true })).toBeVisible();
+    await expect(panel.getByRole("row").filter({ hasText: "Nginx" }).first().getByRole("cell", { name: "active", exact: true })).toBeVisible();
+    expect(mock.actions).toHaveLength(3);
+    expect(mock.writes).toHaveLength(0);
+  });
+
+  test("disables start and restart for an unconfigured service", async ({ page }) => {
+    const mock = await open(page, { unconfiguredIngress: true, ingressState: "inactive" });
+    for (const name of ["Nginx"]) {
+      const menu = await serviceMenu(page, name);
+      for (const action of ["Start", "Stop", "Restart"]) await expect(menu.getByRole("menuitem", { name: action, exact: true })).toBeDisabled();
+      await page.keyboard.press("Escape");
+    }
+    expect(mock.actions).toHaveLength(0);
+  });
+
+  test("disables start and restart when an executable is unavailable", async ({ page }) => {
+    const mock = await open(page, { configuredTunnel: true, missingNginx: true, missingConnector: true, ingressState: "inactive", tunnelState: "inactive" });
+    for (const name of ["Nginx", "Cloudflare Tunnel"]) {
+      const menu = await serviceMenu(page, name);
+      await expect(menu.getByRole("menuitem", { name: "Start", exact: true })).toBeDisabled();
+      await expect(menu.getByRole("menuitem", { name: "Restart", exact: true })).toBeDisabled();
+      await page.keyboard.press("Escape");
+    }
+    expect(mock.actions).toHaveLength(0);
+  });
+
+  for (const state of ["activating", "deactivating", "reloading"]) test(`disables lifecycle actions while Nginx is ${state}`, async ({ page }) => {
+    const mock = await open(page, { ingressState: state });
+    await expect(page.getByRole("button", { name: "Nginx actions", exact: true })).toBeDisabled();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    expect(mock.actions).toHaveLength(0);
+  });
+
+  test("keeps draft and service status when a lifecycle request fails", async ({ page }) => {
+    const mock = await open(page, { serviceFailure: "service control unavailable" });
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await page.getByLabel("Domain", { exact: true }).fill("unfinished.example.com");
+    await (await serviceMenu(page)).getByRole("menuitem", { name: "Restart", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("service control unavailable");
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("unfinished.example.com");
+    await expect(page.getByRole("region", { name: "Pipe", exact: true }).getByRole("row").filter({ hasText: "Nginx" }).first().getByRole("cell", { name: "active", exact: true })).toBeVisible();
+    expect(mock.actions).toEqual([{ service: "ingress", action: "restart" }]);
+    expect(mock.writes).toHaveLength(0);
+  });
+
+  test("closes service menus on Escape and outside click without a request", async ({ page }) => {
+    const mock = await open(page);
+    await serviceMenu(page);
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Nginx actions", exact: true })).toBeFocused();
+    await serviceMenu(page);
+    await page.getByRole("region", { name: "Routes", exact: true }).getByText("Routes", { exact: true }).click();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    expect(mock.actions).toHaveLength(0);
+  });
+
+  test("edits the Nginx listener with one Save and closes the editor", async ({ page }) => {
+    const mock = await open(page);
+    const panel = page.getByRole("region", { name: "Pipe", exact: true });
+    await expect(panel.getByLabel("Listen address", { exact: true })).toHaveCount(0);
+    await expect(panel.getByText("Listen address", { exact: true })).toHaveCount(0);
+    await expect(panel.getByText("127.0.0.1:8080", { exact: true })).toHaveCount(0);
+    await editNginx(page);
+    const settings = panel.getByRole("form", { name: "Nginx settings", exact: true });
+    const listen = settings.getByLabel("Listen address", { exact: true });
+    await expect(settings).toBeVisible();
+    await expect(listen).toBeFocused();
+    await expect(listen).toHaveValue("127.0.0.1:8080");
+    await listen.fill("127.0.0.1:8081");
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
+    await settings.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => mock.writes.length).toBe(1);
+    expect(mock.writes[0].config.listen).toBe("127.0.0.1:8081");
+    expect(mock.writes[0].config.routes).toEqual(initial.config.routes);
+    await expect(settings).toHaveCount(0);
+    await expect(listen).toHaveCount(0);
+    await expect(panel.getByText("Listen address", { exact: true })).toHaveCount(0);
+    await expect(panel.getByText("127.0.0.1:8081", { exact: true })).toHaveCount(0);
+    await page.reload();
+    await expect(panel.getByRole("button", { name: "Nginx actions", exact: true })).toBeEnabled();
+    await expect(panel.getByText("Listen address", { exact: true })).toHaveCount(0);
+    await expect(panel.getByText("127.0.0.1:8081", { exact: true })).toHaveCount(0);
+    await editNginx(page);
+    await expect(listen).toHaveValue("127.0.0.1:8081");
+  });
+
+  test("cancelling the listener keeps pending route removal", async ({ page }) => {
+    const mock = await open(page);
+    const panel = page.getByRole("region", { name: "Pipe", exact: true });
+    const routes = page.getByRole("region", { name: "Routes", exact: true });
+    await routes.getByRole("button", { name: "Remove", exact: true }).click();
+    await editNginx(page);
+    await panel.getByLabel("Listen address", { exact: true }).fill("127.0.0.1:8081");
+    await panel.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(panel.getByText("Listen address", { exact: true })).toHaveCount(0);
+    await expect(panel.getByText("127.0.0.1:8080", { exact: true })).toHaveCount(0);
+    await expect(routes.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
+    expect(mock.writes).toHaveLength(0);
+    await editNginx(page);
+    await expect(panel.getByLabel("Listen address", { exact: true })).toHaveValue("127.0.0.1:8080");
+    await panel.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(panel.getByLabel("Listen address", { exact: true })).toHaveCount(0);
+    await routes.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => mock.writes.length).toBe(1);
+    expect(mock.writes[0].config).toMatchObject({ listen: "127.0.0.1:8080", routes: [] });
+  });
+
+  test("cancelling the listener keeps the open route editor", async ({ page }) => {
+    const mock = await open(page);
+    const panel = page.getByRole("region", { name: "Pipe", exact: true });
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await page.getByLabel("Domain", { exact: true }).fill("edited.example.com");
+    await editNginx(page);
+    await panel.getByLabel("Listen address", { exact: true }).fill("127.0.0.1:8081");
+    await panel.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("edited.example.com");
+    await expect(page.getByRole("group", { name: "Apps", exact: true }).getByRole("checkbox", { name: "web-a · TCP 80", exact: true })).toBeChecked();
+    await page.getByRole("region", { name: "Routes", exact: true }).getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => mock.writes.length).toBe(1);
+    expect(mock.writes[0].config.listen).toBe("127.0.0.1:8080");
+    expect(mock.writes[0].config.routes[0].host).toBe("edited.example.com");
+  });
+
+  test("keeps listener and route inputs when saving fails", async ({ page }) => {
+    const mock = await open(page, { reject: true });
+    const panel = page.getByRole("region", { name: "Pipe", exact: true });
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await page.getByLabel("Domain", { exact: true }).fill("edited.example.com");
+    await editNginx(page);
+    await panel.getByLabel("Listen address", { exact: true }).fill("127.0.0.1:8081");
+    await panel.getByRole("form", { name: "Nginx settings", exact: true }).getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("invalid app address");
+    await expect(panel.getByLabel("Listen address", { exact: true })).toHaveValue("127.0.0.1:8081");
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("edited.example.com");
+    await expect.poll(() => mock.writes.length).toBe(1);
+    expect(mock.writes[0].config.listen).toBe("127.0.0.1:8081");
+    expect(mock.writes[0].config.routes[0].host).toBe("edited.example.com");
+  });
+
+  test("opens route fields on demand and cancels without changing saved routes", async ({ page }) => {
+    const mock = await open(page);
+    const routes = page.getByRole("region", { name: "Routes", exact: true });
+    const add = routes.getByRole("button", { name: "Add route", exact: true });
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveCount(0);
+    await expect(page.getByLabel("Path prefix", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("group", { name: "Apps", exact: true })).toHaveCount(0);
+    await add.click();
+    await expect(add).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByLabel("Domain", { exact: true })).toBeFocused();
+    await expect(page.getByLabel("Path prefix", { exact: true })).toHaveValue("/");
+    await expect(page.getByRole("group", { name: "Apps", exact: true })).toBeVisible();
+    await page.getByLabel("Domain", { exact: true }).fill("draft.example.com");
+    await routes.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveCount(0);
+    await expect(add).toHaveAttribute("aria-expanded", "false");
+    await expect(routes.getByRole("row").filter({ hasText: "app.example.com" })).toHaveCount(1);
+    expect(mock.writes).toHaveLength(0);
+    await add.click();
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("");
+    await expect(routes.getByRole("status")).toHaveCount(0);
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
+    await expect(routes.getByRole("row").filter({ hasText: "app.example.com" })).toHaveCount(1);
+    await expect(routes.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  });
+
   test("edits domain/path routes and applies multiple app addresses", async ({ page }, info) => {
     const mock = await open(page);
     await expect(page.getByRole("button", { name: "Pipe", exact: true })).toHaveAttribute("aria-current", "page");
     await expect(page.getByRole("region", { name: "Pipe", exact: true })).toContainText("active");
+    await page.getByRole("button", { name: "Add route", exact: true }).click();
     await page.getByLabel("Domain", { exact: true }).fill("api.example.com");
     await page.getByLabel("Path prefix", { exact: true }).fill("/api");
     const apps = page.getByRole("group", { name: "Apps", exact: true });
     await apps.getByRole("checkbox", { name: "api · TCP 8080", exact: true }).check();
     await apps.getByRole("checkbox", { name: "api · TCP 9090", exact: true }).check();
     await apps.screenshot({ path: info.outputPath("pipe-app-picker-desktop.png") });
-    await expect(page.getByText("Unsaved changes", { exact: true })).toBeVisible();
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
     await page.getByRole("region", { name: "Routes", exact: true }).getByRole("button", { name: "Save", exact: true }).click();
     await expect(page.getByText("Routes saved.", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveCount(0);
     expect(mock.writes).toHaveLength(1);
     expect(mock.writes[0].config.routes[1]).toEqual({ host: "api.example.com", pathPrefix: "/api", upstreams: ["172.30.36.4:8080", "172.30.36.4:9090"] });
     expect(mock.writes[0].credentials).toBeNull();
@@ -116,13 +454,13 @@ test.describe("Pipe dashboard @dashboard", () => {
     await expect(panel.locator(".state-badge.running")).toHaveCount(0);
   });
 
-  for (const location of ["Routes", "Pipe"] as const) test(`saves edited routes with one ${location} Save action`, async ({ page }) => {
+  test("saves edited routes with one local Save action", async ({ page }) => {
     const mock = await open(page);
     await page.getByRole("button", { name: "Edit", exact: true }).click();
     await page.getByLabel("Domain", { exact: true }).fill("edited.example.com");
     await page.getByLabel("Path prefix", { exact: true }).fill("/api");
     await page.getByRole("group", { name: "Apps", exact: true }).getByRole("checkbox", { name: "web-b · TCP 80", exact: true }).uncheck();
-    await page.getByRole("region", { name: location, exact: true }).getByRole("button", { name: "Save", exact: true }).click();
+    await page.getByRole("region", { name: "Routes", exact: true }).getByRole("button", { name: "Save", exact: true }).click();
     await expect(page.getByText("Routes saved.", { exact: true })).toBeVisible();
     expect(mock.writes).toHaveLength(1);
     expect(mock.writes[0].config.routes).toEqual([{ host: "edited.example.com", pathPrefix: "/api", upstreams: ["172.30.36.2:80"] }]);
@@ -135,6 +473,7 @@ test.describe("Pipe dashboard @dashboard", () => {
 
   test("selects registered TCP ports and explains why other VMs are unavailable", async ({ page }) => {
     await open(page);
+    await page.getByRole("button", { name: "Add route", exact: true }).click();
     const apps = page.getByRole("group", { name: "Apps", exact: true });
     await expect(apps.getByRole("checkbox", { name: "api · TCP 8080", exact: true })).toHaveCount(1);
     await expect(apps.getByRole("checkbox", { name: /TCP 53/ })).toHaveCount(0);
@@ -155,6 +494,7 @@ test.describe("Pipe dashboard @dashboard", () => {
 
   for (const unavailable of [false, true]) test(`explains ${unavailable ? "failed" : "empty"} VM lists without allowing a route`, async ({ page }) => {
     await open(page, { vms: [], vmsUnavailable: unavailable });
+    await page.getByRole("button", { name: "Add route", exact: true }).click();
     const apps = page.getByRole("group", { name: "Apps", exact: true });
     await expect(apps).toContainText(unavailable ? "VMs are unavailable." : "No VMs.");
     await expect(page.getByRole("region", { name: "Routes", exact: true }).getByRole("button", { name: "Save", exact: true })).toBeDisabled();
@@ -163,6 +503,7 @@ test.describe("Pipe dashboard @dashboard", () => {
   for (const change of ["stopped", "address", "unavailable"] as const) test(`rechecks app selection after the VM ${change} poll`, async ({ page }) => {
     await page.clock.install();
     const mock = await open(page);
+    await page.getByRole("button", { name: "Add route", exact: true }).click();
     const apps = page.getByRole("group", { name: "Apps", exact: true });
     await apps.getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
     await page.getByLabel("Domain", { exact: true }).fill("selected.example.com");
@@ -188,14 +529,20 @@ test.describe("Pipe dashboard @dashboard", () => {
     await expect(apps.getByRole("checkbox", { name: "web-a · TCP 80", exact: true })).toHaveCount(1);
     await page.getByLabel("Domain", { exact: true }).fill("renamed.example.com");
     await page.getByRole("region", { name: "Routes", exact: true }).getByRole("button", { name: "Save", exact: true }).click();
-    await expect(page.getByText("Saved configuration", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Routes", exact: true }).getByRole("row").filter({ hasText: "renamed.example.com" })).toHaveCount(1);
+    await expect.poll(() => mock.writes.length).toBe(1);
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
     expect(mock.writes[0].config.routes[0].upstreams).toEqual(saved);
 
     await page.getByRole("button", { name: "Edit", exact: true }).click();
     await legacy.click();
     await expect(legacy).toHaveCount(0);
     await page.getByRole("region", { name: "Routes", exact: true }).getByRole("button", { name: "Save", exact: true }).click();
-    await expect(page.getByText("Saved configuration", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Routes", exact: true }).getByText("192.0.2.10:8888", { exact: true })).toHaveCount(0);
+    await expect.poll(() => mock.writes.length).toBe(2);
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
     expect(mock.writes[1].config.routes[0].upstreams).toEqual(["172.30.36.2:80"]);
   });
 
@@ -205,7 +552,7 @@ test.describe("Pipe dashboard @dashboard", () => {
     const routes = page.getByRole("region", { name: "Routes", exact: true });
     await routes.getByRole("button", { name: "Remove", exact: true }).click();
     await expect(routes.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
-    await expect(routes.getByRole("status")).toContainText("You have unsaved changes.");
+    await expect(routes.getByRole("status")).toHaveCount(0);
     await page.clock.runFor(8_100);
     await expect(routes.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
     expect(mock.writes).toHaveLength(0);
@@ -227,13 +574,14 @@ test.describe("Pipe dashboard @dashboard", () => {
     const routes = page.getByRole("region", { name: "라우트", exact: true });
     await expect(routes).toContainText("도메인과 URL 경로에 따라 요청을 앱으로 전달한다.");
     await routes.getByRole("button", { name: "제거", exact: true }).click();
-    await expect(routes.getByRole("status")).toContainText("저장하지 않은 변경이 있다.");
+    await expect(routes.getByRole("status")).toHaveCount(0);
     await expect(routes.getByText("라우트가 없다. 도메인, 경로, 앱 주소를 추가한다.", { exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await routes.screenshot({ path: info.outputPath("pipe-unsaved-mobile-ko.png") });
     await routes.getByRole("button", { name: "저장", exact: true }).click();
-    await expect(page.getByText("저장된 설정", { exact: true })).toBeVisible();
-    expect(mock.writes).toHaveLength(1);
+    await expect(routes.getByRole("status")).toHaveCount(0);
+    await expect(page.getByText("저장하지 않은 변경", { exact: true })).toHaveCount(0);
+    await expect.poll(() => mock.writes.length).toBe(1);
     expect(mock.writes[0].config.routes).toEqual([]);
     await expect(routes.getByRole("status")).toHaveCount(0);
     const dialogs: string[] = [];
@@ -278,6 +626,7 @@ test.describe("Pipe dashboard @dashboard", () => {
       await page.goBack();
       await expect(page).toHaveURL(/#\/pipe$/);
     }
+    await page.getByRole("button", { name: "Add route", exact: true }).click();
     await page.getByLabel("Domain", { exact: true }).fill("unfinished.example.com");
     page.once("dialog", dialog => dialog.dismiss());
     await (direction === "back" ? page.goBack() : page.goForward());
@@ -289,99 +638,523 @@ test.describe("Pipe dashboard @dashboard", () => {
     await expect(page).toHaveURL(/#\/vms$/);
     await (direction === "back" ? page.goForward() : page.goBack());
     await expect(page).toHaveURL(/#\/pipe$/);
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Add route", exact: true }).click();
     await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("");
-    await expect(page.getByText("Saved configuration", { exact: true })).toBeVisible();
+    const routes = page.getByRole("region", { name: "Routes", exact: true });
+    await expect(routes.getByRole("status")).toHaveCount(0);
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
+    await expect(routes.getByRole("row").filter({ hasText: "app.example.com" })).toHaveCount(1);
+    await expect(routes.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
   });
 
-  test("uses the existing responsive shell and clears credentials after saving", async ({ page }, info) => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    const mock = await open(page, { locale: "ko" });
-    await page.getByText("기존 터널 설정 열기", { exact: true }).click();
-    await page.getByRole("checkbox", { name: "Cloudflare로 외부 접속 사용", exact: true }).check();
-    await page.getByLabel("Tunnel UUID").fill("11111111-1111-4111-8111-111111111111");
-    const credentials = { AccountTag: "fixture", TunnelID: "11111111-1111-4111-8111-111111111111", TunnelSecret: "private-fixture" };
-    await page.getByLabel("인증 정보 JSON", { exact: true }).fill(JSON.stringify(credentials));
-    await page.getByRole("region", { name: "Pipe", exact: true }).getByRole("button", { name: "저장", exact: true }).click();
-    await expect(page.getByLabel("인증 정보 JSON", { exact: true })).toHaveValue("");
-    expect(mock.writes[0].credentials).toEqual(credentials);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: info.outputPath("pipe-mobile-ko.png"), fullPage: true });
-    page.on("dialog", dialog => dialog.accept());
-    await page.getByRole("button", { name: "중지", exact: true }).click();
-    await expect(page.getByText("Pipe를 중지했다.", { exact: false })).toBeVisible();
-    await expect(page.locator(".state-badge.running")).toHaveCount(0);
-  });
-
-  test("guides token creation and connects without UUID, JSON or a preinstalled connector", async ({ page }, info) => {
+  test("creates two tunnels with independent VM app targets and restores them on refresh", async ({ page }, info) => {
     const mock = await open(page, { missingConnector: true });
-    const panel = page.getByRole("region", { name: "Connect Cloudflare", exact: true });
-    await panel.getByText("How to create an API token", { exact: true }).click();
-    await expect(panel.getByRole("cell", { name: "Cloudflare Tunnel", exact: true })).toBeVisible();
-    await expect(panel.getByRole("link", { name: "Open Cloudflare API Tokens" })).toHaveAttribute("href", "https://dash.cloudflare.com/profile/api-tokens");
-    const token = "scoped-cloudflare-token-01234567890123456789";
-    await panel.getByLabel("Cloudflare API token", { exact: true }).fill(token);
-    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toHaveAttribute("type", "password");
-    await panel.getByRole("button", { name: "Load domains", exact: true }).click();
-    await expect(panel.getByRole("button", { name: "Connect and publish", exact: true })).toBeDisabled();
-    await expect(panel.getByLabel("Cloudflare domain", { exact: true })).toHaveValue("a".repeat(32));
-    await panel.getByLabel("Subdomain", { exact: true }).fill("demo");
+    const panel = quickPanel(page);
+    await expect(panel.getByRole("heading", { name: /^Cloudflare Quick Tunnel/ })).toBeVisible();
+    await expect(panel.getByLabel("Name", { exact: true })).toHaveCount(0);
+    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toHaveCount(0);
+    await expect(page.getByLabel("Tunnel UUID", { exact: true })).toHaveCount(0);
+    await addQuick(page, "Public web");
+    const create = panel.getByRole("button", { name: "Create temporary URL", exact: true });
+    await expect(create).toBeDisabled();
     const apps = panel.getByRole("group", { name: "Public apps", exact: true });
     await apps.getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
     await apps.getByRole("checkbox", { name: "web-b · TCP 80", exact: true }).check();
-    await page.screenshot({ path: info.outputPath("cloudflare-guided-desktop.png"), fullPage: true });
-    await panel.getByRole("button", { name: "Connect and publish", exact: true }).click();
-    await expect(panel.getByRole("link", { name: "https://demo.example.com" })).toBeVisible();
-    expect(mock.connections).toHaveLength(1);
-    expect(mock.connections[0]).toMatchObject({ apiToken: token, hostname: "demo.example.com", zoneId: "a".repeat(32) });
-    expect(mock.connections[0].config.routes.at(-1)).toEqual({ host: "demo.example.com", pathPrefix: "/", upstreams: ["172.30.36.2:80", "172.30.36.3:80"] });
-    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toHaveCount(0);
-    expect(await page.evaluate(token => JSON.stringify(localStorage).includes(token), token)).toBe(false);
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Routes", exact: true }).getByRole("status")).toHaveCount(0);
+    await create.click();
+    await expect(quickRow(page, "Public web").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    await expect(panel.getByLabel("Name", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
+    await addQuick(page, "Public API");
+    await panel.getByRole("checkbox", { name: "api · TCP 8080", exact: true }).check();
+    await create.click();
+    await expect(quickRow(page, "Public API").getByRole("link", { name: SECOND_QUICK_URL, exact: true })).toBeVisible();
+    expect(mock.quickSaves).toHaveLength(2);
+    expect(mock.quickSaves[0]).toMatchObject({ name: "Public web", target: { type: "apps", upstreams: ["172.30.36.2:80", "172.30.36.3:80"] } });
+    expect(mock.quickSaves[1]).toMatchObject({ name: "Public API", target: { type: "apps", upstreams: ["172.30.36.4:8080"] } });
+    expect(mock.quickSaves.every(value => !("config" in value))).toBe(true);
     expect(mock.writes).toHaveLength(0);
-  });
-
-  test("keeps connection inputs and existing routes when DNS setup is rejected", async ({ page }) => {
-    const mock = await open(page, { cloudflareFailure: "A DNS record already uses this hostname; choose an unused subdomain" });
-    const panel = page.getByRole("region", { name: "Connect Cloudflare", exact: true });
-    await panel.getByLabel("Cloudflare API token", { exact: true }).fill("scoped-cloudflare-token-01234567890123456789");
-    await panel.getByRole("button", { name: "Load domains", exact: true }).click();
-    await panel.getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
-    await panel.getByRole("button", { name: "Connect and publish", exact: true }).click();
-    await expect(panel.getByRole("alert")).toContainText("choose an unused subdomain");
-    await expect(panel.getByLabel("Subdomain", { exact: true })).toHaveValue("app");
+    await page.screenshot({ path: info.outputPath("quick-tunnels-desktop.png"), fullPage: true });
+    await page.reload();
+    await expect(quickRow(page, "Public web").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    await expect(quickRow(page, "Public API").getByRole("link", { name: SECOND_QUICK_URL, exact: true })).toBeVisible();
     await expect(page.getByRole("region", { name: "Routes", exact: true })).toContainText("app.example.com");
-    await expect(panel.getByRole("link", { name: "https://app.example.com" })).toHaveCount(0);
+    expect(mock.quickSaves).toHaveLength(2);
+  });
+
+  test("edits a tunnel and copies its URL without changing another tunnel", async ({ page }) => {
+    const mock = await open(page, { quickTunnels: [webTunnel, apiTunnel] });
+    await (await quickMenu(page, "Public web")).getByRole("menuitem", { name: "Edit", exact: true }).click();
+    const panel = quickPanel(page);
+    await expect(panel.getByLabel("Name", { exact: true })).toHaveValue("Public web");
+    await expect(panel.getByRole("checkbox", { name: "web-a · TCP 80", exact: true })).toBeChecked();
+    await panel.getByLabel("Name", { exact: true }).fill("Shared website");
+    await panel.getByRole("checkbox", { name: "web-b · TCP 80", exact: true }).check();
+    await panel.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(quickRow(page, "Shared website").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    await expect(quickRow(page, "Public API").getByRole("link", { name: SECOND_QUICK_URL, exact: true })).toBeVisible();
+    expect(mock.quickSaves).toEqual([{ id: QUICK_ID, name: "Shared website", target: { type: "apps", upstreams: ["172.30.36.2:80", "172.30.36.3:80"] } }]);
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await quickRow(page, "Shared website").getByRole("button", { name: "Copy URL", exact: true }).click();
+    await expect(quickRow(page, "Shared website").getByRole("button", { name: "Copy URL", exact: true })).toHaveAttribute("title", "Copied");
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(QUICK_URL);
     expect(mock.writes).toHaveLength(0);
   });
 
-  test("shows Korean token instructions and domain setup without mobile overflow", async ({ page }, info) => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    await open(page, { locale: "ko" });
-    const panel = page.getByRole("region", { name: "Cloudflare 연결", exact: true });
-    await panel.getByText("API 토큰 발급 방법", { exact: true }).click();
-    await panel.getByLabel("Cloudflare API token", { exact: true }).fill("scoped-cloudflare-token-01234567890123456789");
-    await panel.getByRole("button", { name: "도메인 불러오기", exact: true }).click();
-    await expect(panel.getByLabel("Cloudflare 도메인", { exact: true })).toBeVisible();
-    await panel.getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
-    await panel.getByRole("checkbox", { name: "web-b · TCP 80", exact: true }).check();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await panel.getByRole("group", { name: "공개할 앱 선택", exact: true }).screenshot({ path: info.outputPath("cloudflare-app-picker-mobile-ko.png") });
-    await page.screenshot({ path: info.outputPath("cloudflare-guided-mobile-ko.png"), fullPage: true });
+  test("retains an existing app target when its VM stops and allows a name edit", async ({ page }) => {
+    const vms = appVms.map(vm => vm.name === "web-a" ? { ...vm, state: "stopped" as const } : vm);
+    const mock = await open(page, { quickTunnels: [webTunnel], vms });
+    await (await quickMenu(page, "Public web")).getByRole("menuitem", { name: "Edit", exact: true }).click();
+    const panel = quickPanel(page);
+    await expect(panel.getByRole("checkbox", { name: "web-a · TCP 80", exact: true })).toBeChecked();
+    await expect(panel.getByRole("checkbox", { name: "stopped-app · TCP 80", exact: true })).toBeDisabled();
+    await panel.getByLabel("Name", { exact: true }).fill("Saved web target");
+    await panel.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(quickRow(page, "Saved web target").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    expect(mock.quickSaves).toEqual([{ id: QUICK_ID, name: "Saved web target", target: { type: "apps", upstreams: ["172.30.36.2:80"] } }]);
   });
 
-  test("keeps setup visible while connection verification is pending across a status poll", async ({ page }) => {
-    await page.clock.install();
-    const mock = await open(page, { holdConnection: true });
-    const panel = page.getByRole("region", { name: "Connect Cloudflare", exact: true });
-    await panel.getByLabel("Cloudflare API token", { exact: true }).fill("scoped-cloudflare-token-01234567890123456789");
-    await panel.getByRole("button", { name: "Load domains", exact: true }).click();
+  test("disables route and Nginx saves when saved Quick Tunnels have no connector", async ({ page }) => {
+    const mock = await open(page, { quickTunnels: [webTunnel], missingConnector: true });
+    const routes = page.getByRole("region", { name: "Routes", exact: true });
+    await routes.getByRole("button", { name: "Edit", exact: true }).click();
+    await routes.getByLabel("Domain", { exact: true }).fill("edited.example.com");
+    await expect(routes.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+    await editNginx(page);
+    const settings = page.getByRole("form", { name: "Nginx settings", exact: true });
+    await settings.getByLabel("Listen address", { exact: true }).fill("127.0.0.1:8081");
+    await expect(settings.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+    expect(mock.writes).toHaveLength(0);
+  });
+
+  test("publishes one saved Nginx domain with all of its paths", async ({ page }) => {
+    const mock = await open(page, { savedRoutes: groupedRoutes });
+    const panel = await addQuick(page, "Website and API");
+    await panel.getByLabel("Target", { exact: true }).selectOption({ label: "Nginx routes" });
+    const domains = panel.getByLabel("Route domain", { exact: true });
+    await expect(domains.getByRole("option", { name: "app.example.com", exact: true })).toHaveCount(1);
+    await expect(domains.getByRole("option", { name: "other.example.com", exact: true })).toHaveCount(1);
+    await domains.selectOption("app.example.com");
+    await expect(panel).toContainText("/api");
+    await expect(panel.getByRole("group", { name: "Public apps", exact: true })).toHaveCount(0);
+    await panel.getByRole("button", { name: "Create temporary URL", exact: true }).click();
+    await expect(quickRow(page, "Website and API").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    expect(mock.quickSaves[0]).toMatchObject({ name: "Website and API", target: { type: "routes", host: "app.example.com" } });
+    expect(mock.writes).toHaveLength(0);
+    await expect(page.getByRole("region", { name: "Routes", exact: true }).getByRole("row").filter({ hasText: "app.example.com" })).toHaveCount(2);
+    await addQuick(page, "API paths only");
+    await panel.getByLabel("Target", { exact: true }).selectOption({ label: "Nginx routes" });
+    await panel.getByLabel("Route domain", { exact: true }).selectOption("api-only.example.com");
+    await panel.getByRole("button", { name: "Create temporary URL", exact: true }).click();
+    await expect(quickRow(page, "API paths only")).toContainText("/api");
+    await expect(quickRow(page, "API paths only").getByRole("link", { name: SECOND_QUICK_URL, exact: true })).toHaveAttribute("href", SECOND_QUICK_URL);
+    expect(mock.quickSaves[1]).toMatchObject({ name: "API paths only", target: { type: "routes", host: "api-only.example.com" } });
+  });
+
+  test("preserves pending route removal and listener edits through tunnel save and delete", async ({ page }) => {
+    const mock = await open(page);
+    const routes = page.getByRole("region", { name: "Routes", exact: true });
+    await routes.getByRole("button", { name: "Remove", exact: true }).click();
+    await editNginx(page);
+    const listen = page.getByRole("form", { name: "Nginx settings", exact: true }).getByLabel("Listen address", { exact: true });
+    await listen.fill("127.0.0.1:8081");
+    const panel = await addQuick(page, "Public web");
     await panel.getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
-    await panel.getByRole("button", { name: "Connect and publish", exact: true }).click();
-    await expect.poll(() => mock.connections.length).toBe(1);
+    await panel.getByRole("button", { name: "Create temporary URL", exact: true }).click();
+    await expect(quickRow(page, "Public web").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    expect(mock.quickSaves[0]).toMatchObject({ name: "Public web", target: { type: "apps", upstreams: ["172.30.36.2:80"] } });
+    expect(mock.quickSaves[0]).not.toHaveProperty("config");
+    expect(mock.writes).toHaveLength(0);
+    await expect(routes).toContainText("No routes.");
+    await expect(listen).toHaveValue("127.0.0.1:8081");
+    await expect(routes.getByRole("status")).toHaveCount(0);
+    await (await quickMenu(page, "Public web")).getByRole("menuitem", { name: "Delete", exact: true }).click();
+    await expect(quickRow(page, "Public web")).toHaveCount(0);
+    expect(mock.quickDeletes).toEqual([QUICK_ID]);
+    await expect(routes).toContainText("No routes.");
+    await expect(listen).toHaveValue("127.0.0.1:8081");
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
+  });
+
+  test("keeps tunnel form choices and route inputs when saving fails", async ({ page }) => {
+    const mock = await open(page, { quickFailure: "Quick Tunnel is unavailable; retry later" });
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await page.getByLabel("Domain", { exact: true }).fill("unfinished.example.com");
+    const panel = await addQuick(page, "Retry web");
+    const selected = panel.getByRole("checkbox", { name: "web-a · TCP 80", exact: true });
+    await selected.check();
+    await panel.getByRole("button", { name: "Create temporary URL", exact: true }).click();
+    await expect(panel.getByRole("alert")).toContainText("Quick Tunnel is unavailable");
+    await expect(panel.getByLabel("Name", { exact: true })).toHaveValue("Retry web");
+    await expect(selected).toBeChecked();
+    await expect(panel.getByRole("button", { name: "Create temporary URL", exact: true })).toBeEnabled();
+    await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("unfinished.example.com");
+    expect(mock.quickSaves).toHaveLength(1);
+    expect(mock.writes).toHaveLength(0);
+  });
+
+  test("deletes only the selected tunnel and keeps the deletion after refresh", async ({ page }) => {
+    const mock = await open(page, { quickTunnels: [webTunnel, apiTunnel] });
+    await (await quickMenu(page, "Public web")).getByRole("menuitem", { name: "Delete", exact: true }).click();
+    await expect(quickRow(page, "Public web")).toHaveCount(0);
+    await expect(quickRow(page, "Public API").getByRole("link", { name: SECOND_QUICK_URL, exact: true })).toBeVisible();
+    await page.reload();
+    await expect(quickRow(page, "Public web")).toHaveCount(0);
+    await expect(quickRow(page, "Public API")).toHaveCount(1);
+    expect(mock.quickDeletes).toEqual([QUICK_ID]);
+    expect(mock.writes).toHaveLength(0);
+  });
+
+  test("keeps a tunnel visible when deletion fails", async ({ page }) => {
+    const mock = await open(page, { quickTunnels: [webTunnel], quickDeleteFailure: "Could not stop the connector" });
+    await (await quickMenu(page, "Public web")).getByRole("menuitem", { name: "Delete", exact: true }).click();
+    await expect(quickPanel(page).getByRole("alert")).toContainText("Could not stop the connector");
+    await expect(quickRow(page, "Public web").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    expect(mock.quickDeletes).toEqual([QUICK_ID]);
+  });
+
+  test("starts stops and restarts two tunnels independently", async ({ page }) => {
+    const mock = await open(page, { quickTunnels: [webTunnel, apiTunnel] });
+    await (await quickMenu(page, "Public web")).getByRole("menuitem", { name: "Stop", exact: true }).click();
+    await expect(quickRow(page, "Public web").getByRole("cell", { name: "inactive", exact: true })).toBeVisible();
+    await expect(quickRow(page, "Public web").getByRole("link")).toHaveCount(0);
+    await expect(quickRow(page, "Public API").getByRole("link", { name: SECOND_QUICK_URL, exact: true })).toBeVisible();
+    await (await quickMenu(page, "Public web")).getByRole("menuitem", { name: "Start", exact: true }).click();
+    await expect(quickRow(page, "Public web").getByRole("link", { name: "https://restarted-1.trycloudflare.com", exact: true })).toBeVisible();
+    await (await quickMenu(page, "Public API")).getByRole("menuitem", { name: "Restart", exact: true }).click();
+    await expect(quickRow(page, "Public API").getByRole("link", { name: "https://restarted-2.trycloudflare.com", exact: true })).toBeVisible();
+    await expect(quickRow(page, "Public web").getByRole("link", { name: "https://restarted-1.trycloudflare.com", exact: true })).toBeVisible();
+    expect(mock.quickActions).toEqual([{ id: QUICK_ID, action: "stop" }, { id: QUICK_ID, action: "start" }, { id: SECOND_QUICK_ID, action: "restart" }]);
+    expect(mock.quickSaves).toHaveLength(0);
+    expect(mock.writes).toHaveLength(0);
+  });
+
+  test("keeps the form while creation is pending and polls a newly issued URL", async ({ page }) => {
+    await page.clock.install();
+    const mock = await open(page, { holdConnection: true, quickUrlPending: true });
+    const panel = await addQuick(page, "Public web");
+    await panel.getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
+    await panel.getByRole("button", { name: "Create temporary URL", exact: true }).click();
+    await expect.poll(() => mock.quickSaves.length).toBe(1);
     await page.clock.runFor(8_100);
-    await expect(panel.getByRole("button", { name: "Connecting…", exact: true })).toBeDisabled();
-    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toBeVisible();
-    await expect(panel.getByRole("link", { name: "https://app.example.com" })).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: "Saving…", exact: true })).toBeDisabled();
     mock.finishConnection();
-    await expect(panel.getByRole("link", { name: "https://app.example.com" })).toBeVisible();
+    await expect(quickRow(page, "Public web")).toBeVisible();
+    await expect(quickRow(page, "Public web").getByRole("link")).toHaveCount(0);
+    mock.publishQuickUrl();
+    await page.clock.runFor(8_100);
+    await expect(quickRow(page, "Public web").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    expect(mock.quickSaves).toHaveLength(1);
+  });
+
+  test("preserves edited tunnel choices across polling and hides a failed URL", async ({ page }) => {
+    await page.clock.install();
+    const mock = await open(page, { quickTunnels: [webTunnel] });
+    await (await quickMenu(page, "Public web")).getByRole("menuitem", { name: "Edit", exact: true }).click();
+    const panel = quickPanel(page);
+    await panel.getByLabel("Name", { exact: true }).fill("New public name");
+    await panel.getByRole("checkbox", { name: "web-b · TCP 80", exact: true }).check();
+    await page.clock.runFor(8_100);
+    await expect(panel.getByLabel("Name", { exact: true })).toHaveValue("New public name");
+    await expect(panel.getByRole("checkbox", { name: "web-b · TCP 80", exact: true })).toBeChecked();
+    mock.failTunnel();
+    await page.clock.runFor(8_100);
+    await expect(quickRow(page, "Public web").getByRole("link")).toHaveCount(0);
+    await expect(panel.getByLabel("Name", { exact: true })).toHaveValue("New public name");
+    expect(mock.quickSaves).toHaveLength(0);
+  });
+
+  test("shows Korean multi-tunnel creation without mobile overflow", async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mock = await open(page, { locale: "ko" });
+    const panel = quickPanel(page);
+    await panel.getByRole("button", { name: "터널 추가", exact: true }).click();
+    await panel.getByLabel("이름", { exact: true }).fill("공개 웹");
+    await panel.getByLabel("공개 대상", { exact: true }).selectOption({ label: "VM 앱" });
+    await panel.getByRole("group", { name: "공개할 앱 선택", exact: true }).getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
+    await panel.getByRole("button", { name: "임시 주소 만들기", exact: true }).click();
+    await expect(quickRow(page, "공개 웹").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath("quick-tunnels-mobile-ko.png"), fullPage: true });
+    expect(mock.quickSaves[0]).toMatchObject({ name: "공개 웹", target: { type: "apps", upstreams: ["172.30.36.2:80"] } });
+  });
+
+  test("requires a name and target and cancels without creating a tunnel", async ({ page }) => {
+    const mock = await open(page, { savedRoutes: [] });
+    const panel = quickPanel(page);
+    await panel.getByRole("button", { name: "Add tunnel", exact: true }).click();
+    const create = panel.getByRole("button", { name: "Create temporary URL", exact: true });
+    await panel.getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
+    await expect(create).toBeDisabled();
+    await panel.getByLabel("Name", { exact: true }).fill("My web");
+    await expect(create).toBeEnabled();
+    await panel.getByLabel("Target", { exact: true }).selectOption({ label: "Nginx routes" });
+    await expect(create).toBeDisabled();
+    await panel.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(panel.getByLabel("Name", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
+    expect(mock.quickSaves).toHaveLength(0);
+  });
+
+  for (const unavailable of [false, true]) test(`prevents tunnel app creation with ${unavailable ? "unavailable" : "empty"} VMs`, async ({ page }) => {
+    const mock = await open(page, { vms: [], vmsUnavailable: unavailable });
+    const panel = await addQuick(page, "No app");
+    await expect(panel.getByRole("group", { name: "Public apps", exact: true })).toContainText(unavailable ? "VMs are unavailable." : "No VMs.");
+    await expect(panel.getByRole("button", { name: "Create temporary URL", exact: true })).toBeDisabled();
+    expect(mock.quickSaves).toHaveLength(0);
+  });
+
+  test("keeps a referenced route domain until its tunnel is changed or deleted", async ({ page }) => {
+    const routesTunnel: QuickEntry = { id: QUICK_ID, name: "Routed web", target: { type: "routes", host: "app.example.com" } };
+    const mock = await open(page, { quickTunnels: [routesTunnel] });
+    const routes = page.getByRole("region", { name: "Routes", exact: true });
+    await routes.getByRole("button", { name: "Remove", exact: true }).click();
+    await routes.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("This domain is used by a Quick Tunnel");
+    await expect(quickRow(page, "Routed web").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    await expect(routes).toContainText("No routes.");
+    expect(mock.writes).toHaveLength(1);
+    await (await quickMenu(page, "Routed web")).getByRole("menuitem", { name: "Delete", exact: true }).click();
+    await routes.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => mock.writes.length).toBe(2);
+    await expect(routes.getByRole("status")).toHaveCount(0);
+    expect(mock.quickDeletes).toEqual([QUICK_ID]);
+  });
+
+  test("displays and migrates an existing single Quick Tunnel through the list", async ({ page }) => {
+    const mock = await open(page, { configuredLegacyQuick: true });
+    await expect(quickRow(page, "Quick Tunnel").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Pipe", exact: true }).getByRole("button", { name: "Cloudflare Tunnel actions", exact: true })).toHaveCount(0);
+    await (await quickMenu(page, "Quick Tunnel")).getByRole("menuitem", { name: "Edit", exact: true }).click();
+    const panel = quickPanel(page);
+    await panel.getByLabel("Name", { exact: true }).fill("Migrated web");
+    await panel.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(quickRow(page, "Migrated web").getByRole("link")).toBeVisible();
+    expect(mock.quickSaves[0]).toMatchObject({ id: LEGACY_QUICK_ID, name: "Migrated web", target: { type: "apps", upstreams: ["172.30.36.2:80"] } });
+    await page.reload();
+    await expect(quickRow(page, "Quick Tunnel")).toHaveCount(0);
+    await expect(quickRow(page, "Migrated web")).toHaveCount(1);
+  });
+});
+
+test.describe("Named Cloudflare Tunnel @dashboard", () => {
+  const token = "test-api-token-01234567890123456789";
+  async function configure(page: Page) {
+    const panel = page.getByRole("region", { name: "Cloudflare Tunnel", exact: true });
+    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toBeVisible();
+    await panel.getByLabel("Cloudflare API token", { exact: true }).fill(token);
+    await panel.getByRole("button", { name: "Load domains", exact: true }).click();
+    await panel.getByLabel("Route domain", { exact: true }).selectOption("app.example.com");
+    return panel;
+  }
+  test("connects a stable domain alongside Quick Tunnels and copies it with an icon", async ({ page }, info) => {
+    const mock = await open(page, { quickTunnels: [webTunnel], savedRoutes: groupedRoutes });
+    const panel = await configure(page);
+    await expect(panel).toContainText("/, /api");
+    await panel.screenshot({ path: info.outputPath("named-tunnel-form-desktop.png") });
+    await panel.getByRole("button", { name: "Connect and publish", exact: true }).click();
+    await expect(panel.getByRole("link", { name: "https://app.example.com", exact: true })).toBeVisible();
+    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toHaveCount(0);
+    expect(mock.zoneRequests).toEqual([token]);
+    expect(mock.namedConnections[0]).toMatchObject({ apiToken: token, hostname: "app.example.com", config: { quickTunnels: [webTunnel], routes: groupedRoutes } });
+    await expect(quickRow(page, "Public web").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const copy = panel.getByRole("button", { name: "Copy URL", exact: true });
+    await expect(copy).toHaveText("");
+    await copy.click();
+    await expect(copy).toHaveAttribute("title", "Copied");
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("https://app.example.com");
+    await page.reload();
+    await expect(panel.getByRole("link", { name: "https://app.example.com", exact: true })).toBeVisible();
+    await (await serviceMenu(page, "Cloudflare Tunnel")).getByRole("menuitem", { name: "Restart", exact: true }).click();
+    await expect(panel.getByRole("link", { name: "https://app.example.com", exact: true })).toBeVisible();
+    await panel.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toHaveValue("");
+    expect(mock.namedDisconnects).toBe(1);
+    await expect(quickRow(page, "Public web").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    expect(mock.writes).toHaveLength(0);
+  });
+  test("keeps route and listener drafts during named setup and disconnect without an unsaved notice", async ({ page }) => {
+    const mock = await open(page, { savedRoutes: groupedRoutes });
+    const routes = page.getByRole("region", { name: "Routes", exact: true });
+    await routes.getByRole("row").filter({ hasText: "other.example.com" }).getByRole("button", { name: "Remove", exact: true }).click();
+    await editNginx(page);
+    await page.getByLabel("Listen address", { exact: true }).fill("127.0.0.1:8081");
+    const panel = await configure(page);
+    await panel.getByRole("button", { name: "Connect and publish", exact: true }).click();
+    await expect(panel.getByRole("button", { name: "Disconnect", exact: true })).toBeVisible();
+    expect(mock.namedConnections[0].config.listen).toBe("127.0.0.1:8080");
+    expect(mock.namedConnections[0].config.routes).toEqual(groupedRoutes);
+    await panel.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await expect(page.getByLabel("Listen address", { exact: true })).toHaveValue("127.0.0.1:8081");
+    await expect(routes.getByRole("row").filter({ hasText: "other.example.com" })).toHaveCount(0);
+    await expect(routes.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+    await expect(page.getByText(/unsaved changes/i)).toHaveCount(0);
+    expect(mock.writes).toHaveLength(0);
+  });
+  test("clears a rejected API token without hiding the setup form", async ({ page }) => {
+    const mock = await open(page, { configuredLegacyQuick: true, zonesFailure: true });
+    const panel = page.getByRole("region", { name: "Cloudflare Tunnel", exact: true });
+    const input = panel.getByLabel("Cloudflare API token", { exact: true });
+    await input.fill(token);
+    await panel.getByRole("button", { name: "Load domains", exact: true }).click();
+    await expect(panel.getByRole("alert")).toContainText("Cloudflare rejected the API token");
+    await expect(input).toHaveValue(token);
+    await panel.getByRole("button", { name: "Clear input", exact: true }).click();
+    await expect(input).toBeVisible();
+    await expect(input).toHaveValue("");
+    await expect(panel.getByRole("alert")).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: "Load domains", exact: true })).toBeDisabled();
+    expect(mock.zoneRequests).toEqual([token]);
+    expect(mock.namedConnections).toHaveLength(0);
+    expect(mock.quickSaves).toHaveLength(0);
+  });
+  test("retains token and route choices when named setup fails", async ({ page }) => {
+    const mock = await open(page, { namedFailure: "Cloudflare rejected the API token" });
+    const panel = await configure(page);
+    await panel.getByRole("button", { name: "Connect and publish", exact: true }).click();
+    await expect(panel.getByRole("alert")).toContainText("Cloudflare rejected");
+    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toHaveValue(token);
+    await expect(panel.getByLabel("Route domain", { exact: true })).toHaveValue("app.example.com");
+    await expect(panel.getByRole("button", { name: "Connect and publish", exact: true })).toBeEnabled();
+    expect(mock.namedConnections).toHaveLength(1);
+  });
+  test("provides token instructions and route selection without mobile overflow", async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open(page, { locale: "ko", quickTunnels: [webTunnel], savedRoutes: groupedRoutes });
+    const panel = page.getByRole("region", { name: "Cloudflare Tunnel", exact: true });
+    await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toBeVisible();
+    await panel.getByText("API 토큰 발급 방법", { exact: true }).click();
+    await expect(panel).toContainText("Cloudflare Tunnel / Edit");
+    await panel.getByLabel("Cloudflare API token", { exact: true }).fill(token);
+    await panel.getByRole("button", { name: "도메인 불러오기", exact: true }).click();
+    await panel.getByLabel("라우트 도메인", { exact: true }).selectOption("app.example.com");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await panel.screenshot({ path: info.outputPath("named-tunnel-form-mobile-ko.png") });
+    await expect(page.getByText("저장하지 않은 변경", { exact: true })).toHaveCount(0);
+    const copy = quickRow(page, "Public web").getByRole("button", { name: "주소 복사", exact: true });
+    await copy.scrollIntoViewIfNeeded();
+    await expect(copy).toBeVisible();
+    await expect(copy).toHaveText("");
+  });
+});
+
+
+test("shows API token input with an existing Quick Tunnel and preserves it through manual migration @dashboard", async ({ page }, info) => {
+  const token = "test-api-token-01234567890123456789";
+  const mock = await open(page, { configuredLegacyQuick: true });
+  const named = page.getByRole("region", { name: "Cloudflare Tunnel", exact: true });
+  const input = named.getByLabel("Cloudflare API token", { exact: true });
+  await expect(input).toBeVisible();
+  await expect(input).toHaveAttribute("type", "password");
+  await expect(input).toHaveAttribute("autocomplete", "off");
+  await expect(named.getByRole("button", { name: "Load domains", exact: true })).toBeDisabled();
+  await input.fill(token);
+  await named.getByRole("button", { name: "Load domains", exact: true }).click();
+  await named.getByLabel("Route domain", { exact: true }).selectOption("app.example.com");
+  const publish = named.getByRole("button", { name: "Connect and publish", exact: true });
+  await expect(publish).toBeDisabled();
+  await expect(publish).toHaveAccessibleDescription(/temporary URL changes once/);
+  await input.press("Enter");
+  await expect(quickRow(page, "Quick Tunnel").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+  expect(mock.zoneRequests).toEqual([token]);
+  expect(mock.namedConnections).toHaveLength(0);
+  expect(mock.quickSaves).toHaveLength(0);
+  expect(mock.actions).toHaveLength(0);
+  await named.screenshot({ path: info.outputPath("named-tunnel-existing-quick-desktop.png") });
+  await (await quickMenu(page, "Quick Tunnel")).getByRole("menuitem", { name: "Edit", exact: true }).click();
+  const quick = quickPanel(page);
+  await expect(quick).toContainText("temporary URL changes once");
+  await expect(quick.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  await quick.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(publish).toBeEnabled();
+  await expect(input).toHaveValue(token);
+  await expect(named.getByLabel("Route domain", { exact: true })).toHaveValue("app.example.com");
+  expect(mock.quickSaves[0]).toMatchObject({ id: LEGACY_QUICK_ID, name: "Quick Tunnel" });
+  await publish.click();
+  await expect(named.getByRole("link", { name: "https://app.example.com", exact: true })).toBeVisible();
+  expect(mock.namedConnections).toHaveLength(1);
+});
+
+
+test.describe("Public address → Nginx → VM apps @dashboard", () => {
+  const hostname = "my-app.firecrab.dev";
+  const publicRoutes = [
+    { host: hostname, pathPrefix: "/", upstreams: ["172.30.36.2:80", "172.30.36.3:80"] },
+    { host: hostname, pathPrefix: "/api", upstreams: ["172.30.36.4:8080"] },
+  ];
+  function recordMutations(page: Page) {
+    const requests: string[] = [];
+    page.on("request", request => {
+      if (request.method() !== "GET" && new URL(request.url()).pathname.startsWith("/api/")) {
+        requests.push(request.method() + " " + new URL(request.url()).pathname);
+      }
+    });
+    return requests;
+  }
+  test("saves a real domain as an Nginx route without a registration server or Firecrab token", async ({ page }, info) => {
+    const mutations = recordMutations(page);
+    const mock = await open(page, { savedRoutes: [], quickTunnels: [webTunnel] });
+    await expect(page.getByRole("region", { name: "Firecrab Tunnel", exact: true })).toHaveCount(0);
+    await expect(page.getByLabel("Registration server URL", { exact: true })).toHaveCount(0);
+    await expect(page.getByLabel("Firecrab connection token", { exact: true })).toHaveCount(0);
+    const routes = page.getByRole("region", { name: "Routes", exact: true });
+    await routes.getByRole("button", { name: "Add route", exact: true }).click();
+    await routes.getByLabel("Domain", { exact: true }).fill(hostname);
+    await routes.getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
+    await routes.getByRole("checkbox", { name: "web-b · TCP 80", exact: true }).check();
+    await routes.screenshot({ path: info.outputPath("public-domain-route-desktop.png") });
+    await routes.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => mock.writes.length).toBe(1);
+    expect(mock.writes[0].config.routes).toEqual([publicRoutes[0]]);
+    expect(mock.writes[0].config.quickTunnels).toEqual([webTunnel]);
+    expect(mock.zoneRequests).toHaveLength(0);
+    expect(mock.namedConnections).toHaveLength(0);
+    expect(mutations).toEqual(["PUT /api/pipe"]);
+    await page.reload();
+    await expect(routes.getByRole("cell", { name: hostname, exact: true })).toBeVisible();
+  });
+  test("publishes the saved public domain paths through a Quick Tunnel with one target selection", async ({ page }) => {
+    const mutations = recordMutations(page);
+    const mock = await open(page, { savedRoutes: publicRoutes });
+    const quick = await addQuick(page, "Public Nginx");
+    await quick.getByLabel("Target", { exact: true }).selectOption("routes");
+    await quick.getByLabel("Route domain", { exact: true }).selectOption(hostname);
+    await expect(quick).toContainText("/, /api");
+    await quick.getByRole("button", { name: "Create temporary URL", exact: true }).click();
+    await expect(quickRow(page, "Public Nginx").getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    expect(mock.quickSaves).toEqual([{ id: null, name: "Public Nginx", target: { type: "routes", host: hostname } }]);
+    expect(mock.writes).toHaveLength(0);
+    expect(mock.zoneRequests).toHaveLength(0);
+    expect(mutations).toEqual(["POST /api/pipe/quick-tunnels"]);
+  });
+  test("connects the real public hostname using Cloudflare credentials only", async ({ page }) => {
+    const mutations = recordMutations(page);
+    const mock = await open(page, { savedRoutes: publicRoutes, zoneName: "firecrab.dev" });
+    const named = page.getByRole("region", { name: "Cloudflare Tunnel", exact: true });
+    await named.getByLabel("Cloudflare API token", { exact: true }).fill("test-cloudflare-api-token-0123456789");
+    await named.getByRole("button", { name: "Load domains", exact: true }).click();
+    await named.getByLabel("Route domain", { exact: true }).selectOption(hostname);
+    await expect(named).toContainText("/, /api");
+    await named.getByRole("button", { name: "Connect and publish", exact: true }).click();
+    await expect(named.getByRole("link", { name: "https://" + hostname, exact: true })).toBeVisible();
+    expect(mock.namedConnections[0]).toMatchObject({ hostname, config: { routes: publicRoutes } });
+    expect(mutations).toEqual(["POST /api/pipe/cloudflare/zones", "POST /api/pipe/cloudflare/connect"]);
+  });
+  test("keeps public-domain setup usable on Korean mobile screens", async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open(page, { locale: "ko", savedRoutes: publicRoutes });
+    const quick = page.getByRole("region", { name: "Quick Tunnel", exact: true });
+    await quick.getByRole("button", { name: "터널 추가", exact: true }).click();
+    await quick.getByLabel("이름", { exact: true }).fill("Nginx 공개 주소");
+    await quick.getByLabel("공개 대상", { exact: true }).selectOption("routes");
+    await quick.getByLabel("라우트 도메인", { exact: true }).selectOption(hostname);
+    await expect(quick).toContainText("/, /api");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await quick.screenshot({ path: info.outputPath("public-nginx-quick-mobile-ko.png") });
+    await expect(page.getByLabel("등록 서버 URL", { exact: true })).toHaveCount(0);
+    await expect(page.getByLabel("Firecrab 연결 토큰", { exact: true })).toHaveCount(0);
   });
 });

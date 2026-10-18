@@ -8,6 +8,10 @@ mod engines;
 mod guest;
 #[cfg(target_os = "linux")]
 pub(crate) mod host;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod quick;
+#[cfg(any(target_os = "linux", test))]
+mod status;
 
 use std::path::PathBuf;
 
@@ -39,16 +43,28 @@ pub enum Command {
         #[arg(long)]
         cloudflared: Option<PathBuf>,
     },
-    /// Inspect both data-plane units, without contacting firecrab-api.
+    /// Inspect ingress and all connector units, without contacting firecrab-api.
     Status,
-    /// Disable and stop the tunnel and ingress units (root).
+    /// Disable and stop ingress and all connector units (root).
     Disable,
     #[cfg(target_os = "linux")]
     #[command(hide = true)]
     Inspect,
     #[cfg(target_os = "linux")]
     #[command(hide = true)]
+    Control,
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
     CloudflareConnect,
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    CloudflareDisconnect,
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    QuickConnect,
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    QuickManage,
     #[cfg(target_os = "linux")]
     #[command(hide = true)]
     ApplyManaged,
@@ -67,7 +83,15 @@ pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(target_os = "linux")]
         Command::CloudflareConnect => cloudflare::connect(),
         #[cfg(target_os = "linux")]
+        Command::CloudflareDisconnect => cloudflare::disconnect(),
+        #[cfg(target_os = "linux")]
+        Command::QuickConnect => quick::connect(),
+        #[cfg(target_os = "linux")]
+        Command::QuickManage => quick::manage(),
+        #[cfg(target_os = "linux")]
         Command::Inspect => host::inspect(),
+        #[cfg(target_os = "linux")]
+        Command::Control => host::control(),
         #[cfg(target_os = "linux")]
         Command::ApplyManaged => host::apply_managed(),
         #[cfg(target_os = "linux")]

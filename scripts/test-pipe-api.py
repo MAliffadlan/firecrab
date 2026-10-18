@@ -107,6 +107,41 @@ def main(args):
             snapshot = json.loads(request("GET", "/api/pipe")[1])
             assert snapshot["units"][0]["mainPid"] == original and snapshot["config"] == config
             print("PASS real API stop/restart preserves ingress PID, traffic and saved routes", flush=True)
+            def wait_unit(state, previous_pid=None):
+                for _ in range(100):
+                    current = json.loads(request("GET", "/api/pipe")[1])
+                    ingress = current["units"][0]
+                    assert current["config"] == config, "service control changed saved routes"
+                    if ingress["activeState"] == state and (state != "active" or ingress["mainPid"] > 0) and (previous_pid is None or ingress["mainPid"] != previous_pid):
+                        return ingress["mainPid"]
+                    time.sleep(.1)
+                raise AssertionError(f"ingress did not become {state}")
+
+            def wait_traffic():
+                for _ in range(100):
+                    try:
+                        if request("GET", "/", ingress=True) == (200, b"ready"): return
+                    except OSError:
+                        pass
+                    time.sleep(.1)
+                raise AssertionError("ingress traffic did not resume")
+
+            for action in ["stop", "start", "restart"]:
+                previous_pid = json.loads(request("GET", "/api/pipe")[1])["units"][0]["mainPid"]
+                status, body = request("POST", "/api/pipe/service", {"service": "ingress", "action": action})
+                assert status == 200, body
+                wait_unit("inactive" if action == "stop" else "active", previous_pid if action == "restart" else None)
+                if action == "stop":
+                    try:
+                        request("GET", "/", ingress=True)
+                    except OSError:
+                        pass
+                    else:
+                        raise AssertionError("stopped ingress still accepts requests")
+                else:
+                    wait_traffic()
+            print("PASS API starts, stops and restarts ingress without changing saved routes", flush=True)
+
             status, body = request("POST", "/api/pipe/disable")
             assert status == 200 and json.loads(body)["units"][0]["mainPid"] == 0, body
             print("PASS API disable controls the independent unit", flush=True)

@@ -1,35 +1,40 @@
 //! Dashboard controls use the privileged helper and retain systemd ownership.
 
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
-use firecrab_helper_protocol::pipe::{ApplyRequest, Operation, Snapshot};
+use firecrab_helper_protocol::pipe::{
+    ApplyRequest, Operation, QuickConnectRequest, QuickTunnelRequest, QuickTunnelSaveRequest,
+    ServiceAction, ServiceRequest, Snapshot,
+};
 
 use crate::error::AppError;
 use crate::network::NetworkClient;
 use crate::server::RequestId;
+use crate::state::AppState;
 
 /// Send a fixed Pipe operation to the helper and hide internal errors from clients.
-async fn call(operation: Operation, request_id: RequestId) -> Result<Json<Snapshot>, AppError> {
-    NetworkClient::from_env()
-        .pipe(operation)
-        .await
-        .map(Json)
-        .map_err(|error| {
-            tracing::warn!(%error, "pipe helper command failed");
-            AppError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "pipe_unavailable",
-                "Pipe operation failed; check the helper and installed engines",
-                request_id.0,
-            )
-        })
+pub(super) async fn call(
+    client: &NetworkClient,
+    operation: Operation,
+    request_id: RequestId,
+) -> Result<Json<Snapshot>, AppError> {
+    client.pipe(operation).await.map(Json).map_err(|error| {
+        tracing::warn!(%error, "pipe helper command failed");
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "pipe_unavailable",
+            "Pipe operation failed; check the helper and installed engines",
+            request_id.0,
+        )
+    })
 }
 
 /// Return the persisted manifest and live independent-unit states.
 pub async fn inspect(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<Snapshot>, AppError> {
-    call(Operation::Inspect, request_id).await
+    call(&NetworkClient::from_env(), Operation::Inspect, request_id).await
 }
 
 /// Validate manifest and replacement credentials before requesting a privileged apply.
@@ -63,14 +68,120 @@ pub async fn apply(
             request_id.0,
         ));
     }
-    call(Operation::Apply { request }, request_id).await
+    call(
+        &NetworkClient::from_env(),
+        Operation::Apply { request },
+        request_id,
+    )
+    .await
 }
 
-/// Stop both data-plane units through the helper while retaining configuration.
+/// Validate anonymous app selection before installing and starting its connector.
+pub async fn connect_quick_tunnel(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    Json(request): Json<QuickConnectRequest>,
+) -> Result<Json<Snapshot>, AppError> {
+    request.validate().map_err(|error| {
+        AppError::validation(
+            std::collections::BTreeMap::from([("quickTunnel".into(), error.to_string())]),
+            request_id.0,
+        )
+    })?;
+    call(
+        &state.network,
+        Operation::ConnectQuickTunnel { request },
+        request_id,
+    )
+    .await
+}
+
+/// One fixed runtime action for a connector selected by its resource path.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickTunnelServiceRequest {
+    /// Requested lifecycle operation; service identifiers cannot be supplied.
+    action: ServiceAction,
+}
+
+async fn manage_quick_tunnel(
+    state: AppState,
+    request_id: RequestId,
+    request: QuickTunnelRequest,
+) -> Result<Json<Snapshot>, AppError> {
+    request.validate().map_err(|error| {
+        AppError::validation(
+            std::collections::BTreeMap::from([("quickTunnel".into(), error.to_string())]),
+            request_id.0,
+        )
+    })?;
+    call(
+        &state.network,
+        Operation::ManageQuickTunnel { request },
+        request_id,
+    )
+    .await
+}
+
+/// Save one connector against the helper's latest configuration.
+pub async fn save_quick_tunnel(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    Json(request): Json<QuickTunnelSaveRequest>,
+) -> Result<Json<Snapshot>, AppError> {
+    manage_quick_tunnel(
+        state,
+        request_id,
+        QuickTunnelRequest::Save {
+            id: request.id,
+            name: request.name,
+            target: request.target,
+        },
+    )
+    .await
+}
+
+/// Remove one connector without submitting or overwriting unrelated Pipe routes.
+pub async fn delete_quick_tunnel(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<Snapshot>, AppError> {
+    manage_quick_tunnel(state, request_id, QuickTunnelRequest::Delete { id }).await
+}
+
+/// Queue a fixed lifecycle action for one connector.
+pub async fn control_quick_tunnel(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Extension(request_id): Extension<RequestId>,
+    Json(request): Json<QuickTunnelServiceRequest>,
+) -> Result<Json<Snapshot>, AppError> {
+    manage_quick_tunnel(
+        state,
+        request_id,
+        QuickTunnelRequest::Control {
+            id,
+            service_action: request.action,
+        },
+    )
+    .await
+}
+
+/// Request one fixed systemd service action while retaining configuration.
+pub async fn control(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    Json(request): Json<ServiceRequest>,
+) -> Result<Json<Snapshot>, AppError> {
+    call(&state.network, Operation::Control { request }, request_id).await
+}
+
+/// Stop all data-plane units through the helper while retaining configuration.
 pub async fn disable(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<Snapshot>, AppError> {
-    call(Operation::Disable, request_id).await
+    call(&NetworkClient::from_env(), Operation::Disable, request_id).await
 }
 
 #[cfg(test)]
