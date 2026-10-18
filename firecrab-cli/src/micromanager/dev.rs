@@ -5,6 +5,9 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub(super) mod dashboard;
+pub(super) mod session;
+
 pub(super) const GUEST_SCRIPT: &str =
     include_str!("../../../scripts/micromanager/dev-macos-guest.sh");
 // Include the workspace manifests and compile-time resources, not the whole
@@ -20,14 +23,20 @@ const SOURCE_INPUTS: &[&str] = &[
     "firecrab-helper",
     "scripts/firecracker-menual",
     "scripts/micromanager/dev-macos-guest.sh",
+    "scripts/micromanager/dev-session.sh",
     "assets/firecrab-motd",
     "packaging/m2images.json",
+    "packaging/pipe-engines.json",
+    "packaging/systemd/firecrab-ingress.service",
+    "packaging/systemd/firecrab-tunnel.service",
 ];
 // Older checkouts predate the manifest and remain valid development sources.
 const OPTIONAL_SOURCE_INPUTS: &[&str] = &["packaging/micromanager.toml"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Dashboard(#[from] dashboard::Error),
     #[cfg(target_os = "macos")]
     #[error(transparent)]
     Manifest(#[from] super::manifest::Error),
@@ -49,6 +58,9 @@ pub enum Error {
         "management VM SSH at {ip} is not ready: {detail}; inspect `firecrab service debug --logs` before retrying (source upload was not attempted)"
     )]
     GuestSshUnavailable { ip: IpAddr, detail: String },
+    #[cfg(target_os = "macos")]
+    #[error("management VM filesystem is unhealthy: {0}; inspect `firecrab service debug --logs`")]
+    GuestFilesystemUnhealthy(String),
     #[cfg(target_os = "macos")]
     #[error("management SSH failed during {0}; inspect `firecrab service debug --logs`")]
     GuestSshInterrupted(&'static str),
@@ -131,7 +143,7 @@ fn validate_checkout(root: &Path) -> Result<String, Error> {
         .and_then(|workspace| workspace.get("members"))
         .and_then(toml::Value::as_array)
         .ok_or_else(|| checkout_error(root, "workspace members are missing"))?;
-    // Cargo resolves every member's manifest even when only two packages build.
+    // Cargo resolves every member's manifest even when only selected packages build.
     for required in SOURCE_INPUTS
         .iter()
         .filter(|input| input.starts_with("firecrab-"))
@@ -294,6 +306,31 @@ members = ["firecrab-api", "firecrab-api-types", "firecrab-cli", "firecrab-helpe
             .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"edited local source");
+    }
+
+    #[test]
+    fn source_archive_preserves_pipe_compile_time_resources() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let checkout = Checkout::prepare(root).unwrap();
+        let unpacked = tempfile::tempdir().unwrap();
+        let status = Command::new(tar_program())
+            .args(["-xf", "-"])
+            .current_dir(unpacked.path())
+            .stdin(Stdio::from(checkout.archive.reopen().unwrap()))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        for input in [
+            "packaging/pipe-engines.json",
+            "packaging/systemd/firecrab-ingress.service",
+            "packaging/systemd/firecrab-tunnel.service",
+        ] {
+            assert_eq!(
+                fs::read(unpacked.path().join(input)).expect(input),
+                fs::read(root.join(input)).unwrap(),
+                "source archive changed {input}"
+            );
+        }
     }
 
     #[test]

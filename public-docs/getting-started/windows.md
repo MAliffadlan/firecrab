@@ -3,6 +3,9 @@
 microManager runs Firecrab in the managed `firecrab-debian` WSL2 distribution.
 The dashboard and API are available at `http://127.0.0.1:5523/`.
 
+Change CPU, RAM, disk, or networking through the [resource CLI or Host screen](../guides/micromanager-resources.md).
+CPU, RAM, and networking settings affect all WSL2 distributions.
+
 ## Requirements
 
 - x86_64 or ARM64 Windows with Microsoft Store WSL2; `wsl --version` must work.
@@ -60,7 +63,8 @@ Source lab passes do not establish stock-release or physical-Windows compatibili
 | `firecrab service uninstall` | Remove the task; retain distribution and data |
 | `firecrab service uninstall --purge` | Also unregister the distribution and delete managed data |
 
-The scheduled task `\Firecrab\microManager` holds WSL open with `wslg.exe -- sleep infinity`.
+The scheduled task `\Firecrab\microManager` runs the native resource controller in a hidden window.
+The controller holds WSL open with a windowless `wsl.exe --exec sleep infinity` child and serves resource controls on loopback port 5524.
 It starts at logon and, by default, retries every minute without creating duplicate holders.
 The installed `micromanager.toml` accepts `runtime.auto_restart` to disable periodic relaunch.
 See [runtime settings](../reference/micromanager-manifest.md#runtime-settings).

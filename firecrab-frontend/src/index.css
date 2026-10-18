@@ -1036,9 +1036,9 @@ a.options-menu-item {
 .vm-table .vm-state-cell { width: 5.8rem; }
 .vm-state-labels { display: inline-flex; align-items: center; gap: 0.65rem; }
 .state-label { display: inline-block; padding: 0.2rem 0; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 700; line-height: 1.2; letter-spacing: 0.04em; color: var(--dim); cursor: help; border-radius: 2px; }
-.vm-status-label.running, .api-status-label.reconnected { color: var(--ready); }
-.vm-status-label.starting, .vm-status-label.stopping, .api-status-label.mismatched, .api-status-label.interrupted { color: var(--amber); }
-.vm-status-label.error, .api-status-label.networkFailed { color: var(--error); }
+.vm-status-label.running { color: var(--ready); }
+.vm-status-label.starting, .vm-status-label.stopping { color: var(--amber); }
+.vm-status-label.error { color: var(--error); }
 
 .status-tooltip {
   position: fixed;
@@ -1059,8 +1059,6 @@ a.options-menu-item {
 .status-tooltip dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.5rem 0.85rem; margin: 0; }
 .status-tooltip dt { color: var(--shell); font-family: var(--font-mono); font-size: 0.7rem; }
 .status-tooltip dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
-.status-tooltip .api-status-service code { display: block; margin-left: 0; }
-.status-tooltip .reconciliation-detail .reconciliation-badge { font-size: 0.8rem; }
 
 .reconciliation-badge {
   display: block;
@@ -1994,6 +1992,18 @@ table.image-table .image-package-url a:hover {
 .host-platform-name { font-size: 1.05rem; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
 .host-platform-version { font-weight: 400; color: var(--shell); }
 .host-platform-details { font-size: 0.78rem; color: var(--shell); overflow-wrap: anywhere; }
+.manager-resources { border-top: 1px solid var(--line); margin-top: 1.5rem; padding-top: 1.2rem; }
+.manager-resources-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; }
+.manager-resources-heading h3 { margin: 0; font-size: 1rem; }
+.manager-resource-state { color: var(--shell); font-size: 0.75rem; }
+.manager-resource-note { color: var(--shell); font-size: 0.8rem; line-height: 1.6; overflow-wrap: anywhere; }
+.manager-resource-scope { color: var(--ink); border-left: 2px solid var(--ember); padding-left: 0.8rem; }
+.manager-resource-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.85rem; }
+.manager-resource-actions { display: flex; flex-wrap: wrap; gap: 0.65rem; grid-column: 1 / -1; }
+@media (max-width: 560px) {
+  .manager-resource-grid { grid-template-columns: minmax(0, 1fr); }
+  .manager-resource-actions .btn { flex: 1 1 auto; }
+}
 
 .detail-edit-input {
   font-family: var(--font-mono);
@@ -2098,3 +2108,37 @@ table.image-table .image-package-url a:hover {
   .update-stage.is-active .update-stage-mark { animation: none; }
   .gauge-fill { transition: none; }
 }
+
+/* Pipe uses the existing panels, tables and field tokens. */
+.pipe-controls { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; margin-top: 1rem; }
+.pipe-unsaved { padding: .75rem 1rem; margin-bottom: 1rem; border: 1px solid var(--error); border-radius: 8px; background: color-mix(in srgb, var(--error) 5%, var(--bg-panel)); color: var(--error); font-size: .85rem; line-height: 1.5; }
+.pipe-description { margin: 0 0 1rem; color: var(--ink); font-size: .85rem; line-height: 1.6; }
+.cloudflare-help { margin-top: 1rem; }
+.cloudflare-help summary { cursor: pointer; padding-block: .4rem; }
+.cloudflare-help ol { padding-left: 1.4rem; line-height: 1.7; }
+.cloudflare-help p { line-height: 1.6; overflow-wrap: anywhere; }
+.cloudflare-connect .field > span:first-child { color: var(--shell); font-family: var(--font-mono); font-size: .75rem; }
+.pipe-controls .field { min-width: min(100%, 15rem); }
+.pipe-controls .field > span { color: var(--shell); font-family: var(--font-mono); font-size: .75rem; }
+.pipe-route-form { margin-bottom: 1rem; }
+.pipe-route-form .pipe-targets { grid-column: span 2; }
+.pipe-app-picker { min-width: 0; margin: 0; padding: 0; border: 0; }
+.pipe-app-picker legend { padding: 0; margin-bottom: .35rem; color: var(--shell); font: .72rem var(--font-mono); letter-spacing: .1em; }
+.pipe-app-list { max-height: 18rem; overflow-y: auto; border: 1px solid var(--line); border-radius: 3px; }
+.field .pipe-app-option { display: flex; gap: .65rem; padding: .65rem .75rem; margin: 0; align-items: start; text-transform: none; letter-spacing: normal; cursor: pointer; }
+.pipe-app-option + .pipe-app-option { border-top: 1px solid var(--line); }
+.pipe-app-option:hover { background: var(--bg); }
+.pipe-app-option:has(input:disabled) { cursor: default; }
+.pipe-app-option input[type="checkbox"] { width: 1rem; height: 1rem; padding: 0; margin: .1rem 0 0; flex: none; accent-color: var(--shell); }
+.pipe-app-option > span { display: grid; min-width: 0; gap: .25rem; }
+.pipe-app-name { font-size: .8rem; color: var(--ink); overflow-wrap: anywhere; }
+.pipe-app-address, .pipe-app-reason { font-size: .72rem; color: var(--dim); overflow-wrap: anywhere; }
+.pipe-tunnel-fields > .pipe-app-picker { grid-column: 1 / -1; }
+.pipe-route-table { min-width: 38rem; }
+.pipe-status-table { min-width: 0; }
+.pipe-addresses { white-space: nowrap; }
+.pipe-row-actions { display: flex; gap: .35rem; }
+.pipe-tunnel-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 1rem; margin-top: 1rem; }
+.pipe-credentials { min-height: 7rem; resize: vertical; width: 100%; padding: .55rem .65rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 3px; font-family: var(--font-mono); }
+@media (max-width: 1000px) { .pipe-route-form .pipe-targets { grid-column: 1 / -1; } }
+@media (max-width: 560px) { .pipe-tunnel-fields { grid-template-columns: minmax(0, 1fr); } .pipe-controls .field { width: 100%; } }

@@ -1,6 +1,7 @@
 # microManager development
 
 Build the CLI on the host and the Linux API/helper inside managed Debian.
+Install Node.js and npm on the host for the development dashboard.
 Run commands from the checkout root with the pinned Rust toolchain.
 See [Contributing](../../CONTRIBUTING.md#run-from-source) for native Linux development.
 
@@ -47,7 +48,20 @@ Sources and compiler caches persist under `/var/lib/firecrab/dev`.
 Local configuration, `.env` files, nested checkouts, and build output are excluded.
 
 After a successful build, deployment switches the two systemd executable overrides and checks guest and host API readiness.
-A build failure leaves services running; a deployment failure restores previous executables.
+It starts the source dashboard in the background at `http://localhost:8080`.
+The command returns only after the dashboard and its API proxy answer successfully.
+A build failure leaves services running; an ordinary deployment failure restores previous executables.
+Ctrl+C or a lost development-command connection cancels that command's guest build
+and compiler descendants. Cleanup releases its deployment lock before another build
+can proceed. Cancelling compilation preserves the running API/helper. Cancelling
+activation restores the previous executables. Compiler caches remain available for
+the next build. Do not delete `deploy.lock` to bypass a running deployment.
+Before uploading, starting, or deploying, macOS checks the guest's writable OS/data mounts and critical OS executables.
+The shared macOS/WSL deployment script repeats these checks after compilation and before reporting success.
+An HTTP response from `/api/host` alone does not establish that the guest filesystem is healthy.
+If the filesystem becomes unhealthy, deployment stops and preserves its archive and rollback files for recovery.
+Inspect `service debug --logs`, then run `service repair` before retrying.
+`service dev stop` skips the filesystem health check so services can still be stopped.
 Run `service dev` again after each edit; it does not watch files.
 Guest service restarts interrupt API/helper requests, so stop workloads before changing their runtime.
 
@@ -56,7 +70,7 @@ Guest service restarts interrupt API/helper requests, so stop workloads before c
 | `service dev --source PATH` | Select another checkout |
 | `service dev --release` | Optimize the source build |
 | `service dev --yes` | Skip pending-download confirmation |
-| `service dev start` / `stop` / `restart` | Control guest API/helper without rebuilding |
+| `service dev start` / `stop` / `restart` | Control guest API/helper and the development dashboard without rebuilding |
 | `service dev --restore` | Remove development overrides and restart installed release binaries |
 | `service shell` | Open a root shell in managed Debian |
 
@@ -68,17 +82,43 @@ Overrides persist across `service stop` and `start` until restored.
 
 ## Frontend
 
-The installed dashboard remains its release build.
-Run the frontend from source separately:
+`service dev` installs locked frontend dependencies with `npm ci` when needed.
+It launches the selected checkout's Vite server on `http://localhost:8080`.
+The server continues after the command exits. Repeated commands reuse a healthy server.
+Selecting another checkout replaces only the dashboard started by Firecrab.
+An unrelated server on port 8080 causes an error; Firecrab does not stop it or select another port.
+Stop a manually started Vite server before using `service dev`.
 
-```sh
-npm ci --prefix firecrab-frontend
-npm run dev --prefix firecrab-frontend
-```
-
-Open `http://localhost:8080`.
+`dev start` and `dev restart` use the last selected checkout, even from another directory.
+`dev stop`, `service stop`, and `service dev --restore` stop the development dashboard.
+Dashboard logs are stored at `runtime/dev-dashboard.log` in the managed home.
+The installed release dashboard remains available through the API's port 5523.
 Vite proxies `/api` and `/ws` to `127.0.0.1:5523` through the macOS SSH tunnel or WSL localhost forwarding.
 Use `localhost` for the configured browser origin.
+
+## macOS disk I/O
+
+The signed helper attaches writable Linux disks with host caching enabled and full synchronization for guest flush requests.
+This applies to provisioning, normal boots, and offline OS repair.
+It follows the filesystem corruption workaround adopted by [Lima](https://github.com/lima-vm/lima/pull/2026) and [UTM](https://github.com/utmapp/UTM/pull/5919).
+Matching symptoms do not establish that every guest I/O error has the same cause.
+After updating the helper, stop and start the management VM to apply the attachment policy.
+Repair an already damaged OS filesystem before resuming development.
+
+Run the deployment transaction regression tests without a VM:
+
+```sh
+python3 scripts/test-micromanager-dev.py
+```
+
+On a healthy installed macOS VM, verify that read-only OS, data, and executable mounts reject both start and build operations:
+
+```sh
+python3 scripts/ci-qa-macos-dev.py --cli ./target/debug/firecrab
+```
+
+The QA script injects failures in private mount namespaces.
+It requires the host mounts, API response, and running service PIDs to remain unchanged.
 
 ## Related
 

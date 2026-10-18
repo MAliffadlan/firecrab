@@ -13,6 +13,7 @@ mod info;
 mod micromanager;
 mod microservice;
 mod network;
+mod pipe;
 #[cfg(target_os = "linux")]
 mod service;
 #[cfg(target_os = "linux")]
@@ -44,6 +45,11 @@ enum Command {
     Microservice {
         #[command(subcommand)]
         command: microservice::Command,
+    },
+    /// Configure the independent ingress and Cloudflare Tunnel services.
+    Pipe {
+        #[command(subcommand)]
+        command: pipe::Command,
     },
     /// Diagnose host readiness for firecrab (KVM, nft, dnsmasq, UFW, ...).
     #[cfg(target_os = "linux")]
@@ -132,6 +138,13 @@ fn run(cli: Cli) -> i32 {
                 microservice::run(client, command)
             })
         }
+        Command::Pipe { command } => match pipe::run(command) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("[ERROR] {error}");
+                1
+            }
+        },
         #[cfg(target_os = "linux")]
         Command::Doctor { digest, json } => run_doctor(digest, json),
         #[cfg(target_os = "linux")]

@@ -955,11 +955,64 @@ pub enum HostOs {
     Windows,
 }
 
+/// Native microManager allocation. Changes take effect after an explicit apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ManagerResources {
+    pub cpu: u32,
+    pub memory_mib: u64,
+    pub disk_gib: u64,
+    pub network_mode: ManagerNetworkMode,
+    pub network_interface: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagerNetworkMode {
+    Nat,
+    Bridged,
+    Mirrored,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagerHostCapacity {
+    pub cpu: u32,
+    pub memory_mib: u64,
+    pub disk_available_gib: u64,
+    pub network_interfaces: Vec<String>,
+    pub network_modes: Vec<ManagerNetworkMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagerResourceOperation {
+    pub id: String,
+    /// `applying`, `complete`, or `failed`.
+    pub state: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagerResourceStatus {
+    pub controller_id: String,
+    pub os: HostOs,
+    pub settings: ManagerResources,
+    pub current: Option<ManagerResources>,
+    pub host: ManagerHostCapacity,
+    pub pending: bool,
+    pub shared_wsl: bool,
+    pub operation: Option<ManagerResourceOperation>,
+}
+
 /// What microManager records about the machine it runs on, so the API inside
 /// its Linux VM can report it. Written to [`HOST_PLATFORM_DESCRIPTOR_PATH`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostPlatformDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_id: Option<String>,
     /// `macos` or `windows`.
     pub os: HostOs,
     /// Product name, such as `Windows 11` or `macOS`.
@@ -979,6 +1032,9 @@ pub const HOST_PLATFORM_DESCRIPTOR_PATH: &str = "/etc/firecrab/host-platform.jso
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostPlatformResponse {
+    /// Matches this API to the native resource controller; absent on older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_id: Option<String>,
     /// The operating system of the machine behind the dashboard.
     pub os: HostOs,
     /// Its product name; on Linux, the distribution's `PRETTY_NAME`.
@@ -2178,6 +2234,7 @@ mod tests {
     #[test]
     fn host_platform_response_serializes_camel_case() {
         let platform = HostPlatformResponse {
+            controller_id: None,
             os: HostOs::Windows,
             name: "Windows 11".to_owned(),
             version: Some("10.0.26200.9457".to_owned()),

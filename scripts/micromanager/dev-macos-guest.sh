@@ -5,6 +5,38 @@ profile=${1:?build profile or service action is required}
 root=/var/lib/firecrab/dev
 bin_root=/usr/local/lib/firecrab-dev
 unit_root=/etc/systemd/system
+os_root=/
+phase=preflight
+trap 'echo "[FAIL] guest development phase=$phase exit=$?" >&2' ERR
+
+# Query the visible mount, including bind mounts that hide another mount at the
+# same path. /proc/mounts can contain both entries in an unspecified order.
+check_filesystems() {
+  local path existing flags
+  for path in "$os_root" "$root" "$bin_root" "$unit_root"; do
+    existing=$path
+    while [ ! -d "$existing" ] && [ "$existing" != / ]; do
+      existing=${existing%/*}
+      existing=${existing:-/}
+    done
+    if ! flags=$(findmnt --first-only --noheadings --output OPTIONS --target "$existing"); then
+      echo "[FAIL] cannot inspect guest filesystem for $path" >&2
+      return 74
+    fi
+    if [[ ",$flags," != *,rw,* ]] || [ ! -w "$existing" ]; then
+      echo "[FAIL] guest filesystem for $path is not writable (checked=$existing, options=$flags)" >&2
+      return 74
+    fi
+  done
+  local tool
+  for tool in bash chmod rm install; do
+    if ! "$tool" --version >/dev/null; then
+      echo "[FAIL] guest OS cannot execute $tool; check filesystem errors with firecrab service debug --logs" >&2
+      return 74
+    fi
+  done
+}
+
 case "$profile" in
   debug|release|restore)
     channel=${2:?Rust toolchain is required}
@@ -13,9 +45,14 @@ case "$profile" in
     [[ "$archive_name" != */* ]]
     [[ "$channel" =~ ^[a-zA-Z0-9.-]+$ ]]
     ;;
-  start|stop|restart) ;;
+  start|stop|restart|check) ;;
   *) echo 'invalid build profile or service action' >&2; exit 1 ;;
 esac
+
+if [ "$profile" != stop ]; then
+  check_filesystems || exit 74
+fi
+if [ "$profile" = check ]; then exit 0; fi
 
 install -d -m 0700 "$root"
 exec 9>"$root/deploy.lock"
@@ -50,6 +87,7 @@ case "$profile" in
     for _ in $(seq 1 60); do
       if systemctl is-active --quiet "$helper_unit" && systemctl is-active --quiet firecrab-api \
         && curl -fs --max-time 2 http://127.0.0.1:5523/api/host >/dev/null; then
+        check_filesystems || exit 74
         echo "[PASS] guest: API + helper $profile complete"
         exit 0
       fi
@@ -76,7 +114,13 @@ done
 finish() {
   rc=$?
   trap - EXIT
+  trap '' INT TERM HUP PIPE
   set +e
+  if [ "$rc" -ne 0 ] && ! check_filesystems; then
+    echo '[FAIL] guest OS filesystem is unhealthy; stop retrying the build and run firecrab service repair' >&2
+    echo "[PRESERVE] deployment backup: $backup; source archive: $root/$archive_name" >&2
+    exit 74
+  fi
   if [ "$rc" -ne 0 ] && [ "$deploying" -eq 1 ]; then
     echo '[ROLLBACK] restoring previous guest executables' >&2
     systemctl stop firecrab-api "$helper_unit"
@@ -98,8 +142,9 @@ finish() {
     systemctl start "$helper_unit"
     systemctl start firecrab-api
   fi
-  rm -f "$root/$archive_name" "$bin_root/bin.next"
-  rm -rf "$backup"
+  if ! rm -f "$root/$archive_name" "$bin_root/bin.next" || ! rm -rf "$backup"; then
+    echo '[WARN] guest deployment cleanup failed; inspect filesystem errors with firecrab service debug --logs' >&2
+  fi
   if [ "$rc" -ne 0 ] && [ -n "$binaries" ]; then rm -rf "$binaries"; fi
   exit "$rc"
 }
@@ -108,6 +153,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [ "$profile" != restore ]; then
+  phase=build
   case "$(uname -m)" in
     aarch64) target=aarch64-unknown-linux-gnu ;;
     x86_64) target=x86_64-unknown-linux-gnu ;;
@@ -152,13 +198,19 @@ if [ "$profile" != restore ]; then
   export CARGO_TARGET_DIR="$root/target"
   export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
   export CARGO_PROFILE_DEV_DEBUG=${CARGO_PROFILE_DEV_DEBUG:-1}
-  flags=(--locked --target "$target" -p firecrab-api -p firecrab-helper)
+  flags=(--locked --target "$target" -p firecrab-api -p firecrab-helper -p firecrab-cli)
   if [ "$profile" = release ]; then flags+=(--release); fi
-  rustup run "$channel" cargo build "${flags[@]}"
+  # Compilers must not retain the deployment lock after their owning shell exits.
+  rustup run "$channel" cargo build "${flags[@]}" 9>&-
 
+  # Compilation writes to the data disk. Check the OS disk again before staging
+  # executables or stopping the running services.
+  check_filesystems || exit 74
+
+  phase=stage
   binaries=$(mktemp -d "$bin_root/build.XXXXXX")
   chmod 0755 "$binaries"
-  for binary in firecrab-api firecrab-helper; do
+  for binary in firecrab-api firecrab-helper firecrab; do
     install -m 0755 "$CARGO_TARGET_DIR/$target/$profile/$binary" "$binaries/$binary"
   done
   # The API resolves these runtime tools next to its executable. The source
@@ -169,8 +221,9 @@ if [ "$profile" != restore ]; then
 fi
 
 # The packaged binaries, service accounts, permissions and working directories
-# remain installed. Only ExecStart changes, with a rollback if readiness fails.
+# remain installed. Helper write access also covers pipe config and unit files.
 deploying=1
+phase=activate
 systemctl stop firecrab-api "$helper_unit"
 if [ "$profile" = restore ]; then
   for unit in firecrab-api firecrab-helper firecrab-net-helper; do
@@ -188,6 +241,10 @@ else
     if [ "$unit" = "$helper_unit" ]; then binary=firecrab-helper; fi
     printf '[Service]\nExecStart=\nExecStart=%s/bin/%s\n' "$bin_root" "$binary" \
       >"$unit_root/$unit.service.d/90-firecrab-dev.conf"
+    if [ "$unit" = "$helper_unit" ]; then
+      printf 'ReadWritePaths=-/etc/firecrab -%s\n' "$unit_root" \
+        >>"$unit_root/$unit.service.d/90-firecrab-dev.conf"
+    fi
   done
 fi
 systemctl daemon-reload
@@ -198,9 +255,11 @@ for _ in $(seq 1 30); do
 done
 test -S /run/firecrab/net-helper.sock
 systemctl start firecrab-api
+phase=verify
 for _ in $(seq 1 60); do
   if systemctl is-active --quiet "$helper_unit" && systemctl is-active --quiet firecrab-api \
     && curl -fs --max-time 2 http://127.0.0.1:5523/api/host >/dev/null; then
+    check_filesystems || exit 74
     deploying=0
     if [ "$profile" = restore ]; then rm -f "$bin_root/bin"; fi
     case "$previous_bin" in
