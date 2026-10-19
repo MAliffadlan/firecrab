@@ -12,7 +12,10 @@ use crate::shell::{CommandRunner, RealCommandRunner};
 
 use super::config::Config;
 use super::{INGRESS_UNIT, TUNNEL_UNIT};
-use firecrab_helper_protocol::pipe::{ApplyRequest, Snapshot, UnitStatus};
+use firecrab_helper_protocol::pipe::{
+    ApplyRequest, LEGACY_QUICK_TUNNEL_ID, QuickTunnelSnapshot, QuickTunnelTarget, Service,
+    ServiceAction, ServiceRequest, Snapshot, UnitStatus, quick_tunnel_host, quick_tunnel_unit,
+};
 
 /// Host IO, engine validation and systemd transaction failures.
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -20,19 +23,22 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const INGRESS_TEMPLATE: &str = include_str!("../../../packaging/systemd/firecrab-ingress.service");
 /// Connector unit template that loads its secret through systemd credentials.
 const TUNNEL_TEMPLATE: &str = include_str!("../../../packaging/systemd/firecrab-tunnel.service");
+/// Anonymous connector, isolated from any host-wide cloudflared configuration.
+const QUICK_TUNNEL_TEMPLATE: &str =
+    include_str!("../../../packaging/systemd/firecrab-quick-tunnel.service");
 
 /// Reject mutations unless the caller is root on a running systemd host.
 pub(super) fn require_root() -> Result<()> {
     if !nix::unistd::geteuid().is_root() {
-        return Err("pipe apply/disable requires root; run this command with sudo".into());
+        return Err("pipe changes require root; run this command with sudo".into());
     }
     if !Path::new("/run/systemd/system").is_dir() {
-        return Err("pipe apply/disable requires a running Linux systemd host".into());
+        return Err("pipe changes require a running Linux systemd host".into());
     }
     Ok(())
 }
 
-/// Hold an exclusive nonblocking lock for the entire apply or disable transaction.
+/// Serialize configuration changes and service jobs with the same nonblocking lock.
 pub(super) fn lock() -> Result<fs::File> {
     let file = OpenOptions::new()
         .write(true)
@@ -41,12 +47,12 @@ pub(super) fn lock() -> Result<fs::File> {
         .mode(0o600)
         .open("/run/firecrab-pipe-apply.lock")?;
     file.try_lock_exclusive()
-        .map_err(|_| "another pipe apply/disable is running")?;
+        .map_err(|_| "another pipe change is running")?;
     Ok(file)
 }
 
 /// Accept absolute paths that can be inserted into unit and engine configs literally.
-fn unit_path(path: &Path) -> Result<&str> {
+pub(super) fn unit_path(path: &Path) -> Result<&str> {
     let text = path.to_str().ok_or("pipe paths must be UTF-8")?;
     if !path.is_absolute()
         || !text
@@ -72,7 +78,7 @@ fn executable(path: &Path) -> Result<PathBuf> {
 }
 
 /// Run a fixed engine or systemd command and preserve failure stderr for recovery.
-fn command(runner: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<()> {
+pub(super) fn command(runner: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<()> {
     let output = runner.run(program, args)?;
     if !output.status.success() {
         return Err(format!(
@@ -93,7 +99,7 @@ fn unit_state(runner: &dyn CommandRunner, verb: &str, unit: &str) -> bool {
 }
 
 /// Renaming a synced file prevents readers from seeing partial JSON or secrets.
-fn write_atomic(path: &Path, data: Option<&[u8]>, mode: u32) -> Result<()> {
+pub(super) fn write_atomic(path: &Path, data: Option<&[u8]>, mode: u32) -> Result<()> {
     let Some(data) = data else {
         match fs::remove_file(path) {
             Ok(()) => {}
@@ -211,6 +217,27 @@ pub(super) fn apply_locked(
     cloudflared: Option<&Path>,
     verify: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
+    apply_mode_locked(
+        config_file,
+        nginx,
+        cloudflared,
+        ApplyMode::Configuration,
+        verify,
+    )
+}
+
+/// Apply one anonymous connector intent without resuming other stopped services.
+pub(super) fn apply_quick_locked(config_file: &Path) -> Result<()> {
+    apply_mode_locked(config_file, None, None, ApplyMode::QuickTunnel, || Ok(()))
+}
+
+fn apply_mode_locked(
+    config_file: &Path,
+    nginx: Option<&Path>,
+    cloudflared: Option<&Path>,
+    mode: ApplyMode,
+    verify: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let config = Config::read(config_file)?;
     let env = ServiceEnv::from_process_env();
     let nginx_path = nginx.map(Path::to_path_buf).unwrap_or_else(|| {
@@ -225,7 +252,10 @@ pub(super) fn apply_locked(
             nginx_path.display()
         )
     })?;
-    let cloudflared = if config.tunnel.is_some() {
+    let cloudflared = if config.tunnel.is_some()
+        || config.quick_tunnel.is_some()
+        || !config.quick_tunnels.is_empty()
+    {
         executable(&cloudflared_path).map_err(|error| {
             format!(
                 "cloudflared is unavailable at {}: {error}; run pipe install or use --cloudflared",
@@ -237,18 +267,20 @@ pub(super) fn apply_locked(
     };
     apply_with(
         &RealCommandRunner,
-        &env.confdir,
-        &env.unitdir,
+        (&env.confdir, &env.unitdir),
         &config,
-        &nginx,
-        &cloudflared,
+        (&nginx, &cloudflared),
+        mode,
+        |generation| wait_generation(generation).map_err(Into::into),
         verify,
     )?;
     println!(
         "PipeIngress configured at {}; routes are owned by {INGRESS_UNIT}",
         config.listen
     );
-    if config.tunnel.is_some() {
+    if config.quick_tunnel.is_some() || !config.quick_tunnels.is_empty() {
+        println!("Quick Tunnel configuration saved; inspect Pipe for temporary addresses");
+    } else if config.tunnel.is_some() {
         println!(
             "PipeTunnel service started; configure each public DNS name to point at the tunnel"
         );
@@ -256,17 +288,36 @@ pub(super) fn apply_locked(
     Ok(())
 }
 
-/// Validate staged engine configs, install files, reload units and verify traffic.
-/// Restore previous files, enablement and running state if any step fails.
+/// Configuration applies retain the legacy start behavior; Quick intents preserve peers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApplyMode {
+    Configuration,
+    QuickTunnel,
+}
+
+/// Captured state and file location for one independent connector transaction.
+struct TunnelChange {
+    unit: String,
+    file: usize,
+    active: bool,
+    enabled: bool,
+    changed: bool,
+    resume: bool,
+    touched: std::cell::Cell<bool>,
+}
+
+/// Validate staged files and commit all connector units under one configuration lock.
 fn apply_with(
     runner: &dyn CommandRunner,
-    confdir: &Path,
-    unitdir: &Path,
+    directories: (&Path, &Path),
     config: &Config,
-    nginx: &Path,
-    cloudflared: &Path,
+    engines: (&Path, &Path),
+    mode: ApplyMode,
+    check_generation: impl Fn(&str) -> Result<()>,
     verify: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
+    let (confdir, unitdir) = directories;
+    let (nginx, cloudflared) = engines;
     let confdir_text = unit_path(confdir)?;
     unit_path(unitdir)?;
     let nginx_text = unit_path(nginx)?;
@@ -274,24 +325,35 @@ fn apply_with(
     let ingress_unit = INGRESS_TEMPLATE
         .replace("@NGINX@", nginx_text)
         .replace("@CONFDIR@", confdir_text);
-    let tunnel_unit = config.tunnel.as_ref().map(|_| {
-        TUNNEL_TEMPLATE
+    let quick_unit = |host: &str| {
+        QUICK_TUNNEL_TEMPLATE
             .replace("@CLOUDFLARED@", cloudflared_text)
             .replace("@CONFDIR@", confdir_text)
-    });
-    let ingress = config.nginx().into_bytes();
+            .replace("@LISTEN@", &config.listen.to_string())
+            .replace("@QUICK_HOST@", host)
+    };
+    let legacy_unit = if config.quick_tunnel.is_some() {
+        Some(quick_unit(
+            firecrab_helper_protocol::pipe::QUICK_TUNNEL_HOST,
+        ))
+    } else {
+        config.tunnel.as_ref().map(|_| {
+            TUNNEL_TEMPLATE
+                .replace("@CLOUDFLARED@", cloudflared_text)
+                .replace("@CONFDIR@", confdir_text)
+        })
+    };
     let mut manifest = config.clone();
     if let Some(tunnel) = &mut manifest.tunnel {
         tunnel.credentials_file = confdir.join("pipe/secrets/tunnel-credentials.json");
     }
     let manifest = serde_json::to_vec_pretty(&manifest)?;
-    let tunnel = config
+    let named_config = config
         .tunnel_config()
         .map(|value| serde_json::to_vec_pretty(&value))
         .transpose()?;
     let credentials = credentials(config)?;
 
-    // Validate with the engines before changing the last working config.
     let staging = tempfile::tempdir()?;
     let staged_ingress = staging.path().join("ingress.conf");
     fs::write(
@@ -312,9 +374,9 @@ fn apply_with(
             unit_path(&staged_ingress)?,
         ],
     )?;
-    if let Some(tunnel) = &tunnel {
+    if let Some(named_config) = &named_config {
         let staged_tunnel = staging.path().join("tunnel.json");
-        fs::write(&staged_tunnel, tunnel)?;
+        fs::write(&staged_tunnel, named_config)?;
         command(
             runner,
             cloudflared_text,
@@ -331,117 +393,213 @@ fn apply_with(
     let directory = confdir.join("pipe");
     fs::create_dir_all(&directory)?;
     fs::create_dir_all(unitdir)?;
-    // Nginx reads this non-secret config again after HUP. Secrets stay private.
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))?;
     let secrets = directory.join("secrets");
     fs::create_dir_all(&secrets)?;
     fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))?;
-    let files = [
-        FileChange::new(directory.join("ingress.conf"), Some(ingress), 0o644)?,
+    let uses_quick = config.quick_tunnel.is_some() || !config.quick_tunnels.is_empty();
+    let mut files = vec![
+        FileChange::new(
+            directory.join("ingress.conf"),
+            Some(config.nginx().into_bytes()),
+            0o644,
+        )?,
         FileChange::new(
             unitdir.join(INGRESS_UNIT),
             Some(ingress_unit.into_bytes()),
             0o644,
         )?,
-        FileChange::new(directory.join("tunnel.json"), tunnel, 0o600)?,
+        FileChange::new(directory.join("tunnel.json"), named_config, 0o600)?,
+        FileChange::new(
+            directory.join("quick-tunnel.json"),
+            uses_quick.then(|| b"{}\n".to_vec()),
+            0o600,
+        )?,
         FileChange::new(secrets.join("tunnel-credentials.json"), credentials, 0o600)?,
         FileChange::new(
             unitdir.join(TUNNEL_UNIT),
-            tunnel_unit.map(String::into_bytes),
+            legacy_unit.map(String::into_bytes),
             0o644,
         )?,
         FileChange::new(directory.join("manifest.json"), Some(manifest), 0o600)?,
     ];
-    let [
-        _ingress_file,
-        ingress_unit_file,
-        tunnel_file,
-        credential_file,
-        tunnel_unit_file,
-        manifest_file,
-    ] = &files;
+    let previous: Option<Config> = files[6]
+        .previous
+        .as_ref()
+        .map(|bytes| serde_json::from_slice(bytes))
+        .transpose()?;
+    let mut ids: std::collections::BTreeSet<_> =
+        config.quick_tunnels.iter().map(|entry| entry.id).collect();
+    if let Some(previous) = &previous {
+        ids.extend(previous.quick_tunnels.iter().map(|entry| entry.id));
+    }
+    let mut tunnel_files = vec![(TUNNEL_UNIT.to_owned(), 5, mode == ApplyMode::Configuration)];
+    for id in ids {
+        let definition = config
+            .quick_tunnels
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|_| quick_unit(&quick_tunnel_host(id)).into_bytes());
+        let unit = quick_tunnel_unit(id);
+        let index = files.len();
+        files.push(FileChange::new(unitdir.join(&unit), definition, 0o644)?);
+        tunnel_files.push((unit, index, false));
+    }
+    let mut tunnels = Vec::new();
+    for (unit, file, resume) in tunnel_files {
+        if files[file].previous.is_none() && files[file].next.is_none() {
+            continue;
+        }
+        let changed = files[file].changed()
+            || (unit == TUNNEL_UNIT && [2, 3, 4].iter().any(|&index| files[index].changed()));
+        tunnels.push(TunnelChange {
+            active: unit_state(runner, "is-active", &unit),
+            enabled: unit_state(runner, "is-enabled", &unit),
+            unit,
+            file,
+            changed,
+            resume,
+            touched: std::cell::Cell::new(false),
+        });
+    }
     let ingress_active = unit_state(runner, "is-active", INGRESS_UNIT);
-    let tunnel_active = unit_state(runner, "is-active", TUNNEL_UNIT);
-    let enabled = [INGRESS_UNIT, TUNNEL_UNIT].map(|unit| unit_state(runner, "is-enabled", unit));
+    let ingress_enabled = unit_state(runner, "is-enabled", INGRESS_UNIT);
+    let ingress_unit_file = &files[1];
     if ingress_active && ingress_unit_file.changed() {
         return Err(
             "disable the pipe before changing its Nginx executable or config directory".into(),
         );
     }
-    let tunnel_changed = [tunnel_file, credential_file, tunnel_unit_file]
-        .into_iter()
-        .any(FileChange::changed);
-    let tunnel_touched = std::cell::Cell::new(false);
+    let connector_will_start = tunnels.iter().any(|tunnel| {
+        files[tunnel.file].next.is_some()
+            && ((!tunnel.active && (files[tunnel.file].previous.is_none() || tunnel.resume))
+                || (tunnel.active && tunnel.changed))
+    });
+    let run_ingress = ingress_active
+        || ingress_unit_file.previous.is_none()
+        || mode == ApplyMode::Configuration
+        || connector_will_start;
     let apply = || -> Result<()> {
-        if config.tunnel.is_none() && tunnel_unit_file.previous.is_some() {
-            // Disable while the unit file still exists, before daemon-reload.
-            tunnel_touched.set(true);
-            command(runner, "systemctl", &["disable", "--now", TUNNEL_UNIT])?;
+        for tunnel in &tunnels {
+            if files[tunnel.file].next.is_none() && files[tunnel.file].previous.is_some() {
+                tunnel.touched.set(true);
+                command(runner, "systemctl", &["disable", "--now", &tunnel.unit])?;
+            }
         }
         for file in &files {
             write_atomic(&file.path, file.next.as_deref(), file.mode)?;
         }
         command(runner, "systemctl", &["daemon-reload"])?;
-        command(runner, "systemctl", &["enable", INGRESS_UNIT])?;
-        let verb = if ingress_active { "reload" } else { "start" };
-        command(runner, "systemctl", &[verb, INGRESS_UNIT])?;
-        wait_generation(&config.generation())?;
-        if config.tunnel.is_some() {
-            command(runner, "systemctl", &["enable", TUNNEL_UNIT])?;
-            if !tunnel_active || tunnel_changed {
-                let verb = if tunnel_active { "restart" } else { "start" };
-                tunnel_touched.set(true);
-                command(runner, "systemctl", &[verb, TUNNEL_UNIT])?;
+        if ingress_unit_file.previous.is_none() || mode == ApplyMode::Configuration {
+            command(runner, "systemctl", &["enable", INGRESS_UNIT])?;
+        }
+        if run_ingress {
+            command(
+                runner,
+                "systemctl",
+                &[
+                    if ingress_active { "reload" } else { "start" },
+                    INGRESS_UNIT,
+                ],
+            )?;
+            check_generation(&config.generation())?;
+        }
+        for tunnel in &tunnels {
+            let file = &files[tunnel.file];
+            if file.next.is_none() {
+                continue;
+            }
+            if file.previous.is_none() || tunnel.resume {
+                tunnel.touched.set(true);
+                command(runner, "systemctl", &["enable", &tunnel.unit])?;
+            }
+            let start = !tunnel.active && (file.previous.is_none() || tunnel.resume);
+            if start || (tunnel.active && tunnel.changed) {
+                tunnel.touched.set(true);
+                command(
+                    runner,
+                    "systemctl",
+                    &[
+                        if tunnel.active { "restart" } else { "start" },
+                        &tunnel.unit,
+                    ],
+                )?;
             }
         }
         verify()
     };
     if let Err(error) = apply() {
-        let rollback = || -> Result<()> {
-            for file in &files {
-                if file.changed() {
-                    write_atomic(&file.path, file.previous.as_deref(), file.mode)?;
-                }
+        // Continue restoring peers even when one rollback operation fails.
+        let mut failures = Vec::new();
+        for file in &files {
+            if file.changed()
+                && let Err(error) = write_atomic(&file.path, file.previous.as_deref(), file.mode)
+            {
+                failures.push(error.to_string());
             }
-            command(runner, "systemctl", &["daemon-reload"])?;
-            if ingress_active {
-                command(runner, "systemctl", &["reload", INGRESS_UNIT])?;
-                if let Some(previous) = &manifest_file.previous {
-                    let previous: Config = serde_json::from_slice(previous)?;
-                    wait_generation(&previous.generation())?;
+        }
+        if let Err(error) = command(runner, "systemctl", &["daemon-reload"]) {
+            failures.push(error.to_string());
+        }
+        if ingress_active {
+            let restored = command(runner, "systemctl", &["reload", INGRESS_UNIT]).and_then(|()| {
+                if let Some(previous) = &previous {
+                    check_generation(&previous.generation())
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = restored {
+                failures.push(error.to_string());
+            }
+        }
+        for tunnel in &tunnels {
+            if !tunnel.touched.get() {
+                continue;
+            }
+            if tunnel.active {
+                if let Err(error) = command(runner, "systemctl", &["restart", &tunnel.unit]) {
+                    failures.push(error.to_string());
                 }
             } else {
-                let _ = runner.run("systemctl", &["stop", INGRESS_UNIT]);
+                let _ = runner.run("systemctl", &["stop", &tunnel.unit]);
             }
-            if tunnel_touched.get() && tunnel_active {
-                command(runner, "systemctl", &["restart", TUNNEL_UNIT])?;
-            } else if tunnel_touched.get() && !tunnel_active {
-                let _ = runner.run("systemctl", &["stop", TUNNEL_UNIT]);
-            }
-            for ((unit, file), was_enabled) in [
-                (INGRESS_UNIT, ingress_unit_file),
-                (TUNNEL_UNIT, tunnel_unit_file),
-            ]
-            .into_iter()
-            .zip(enabled)
-            {
-                if file.previous.is_some() {
-                    command(
-                        runner,
-                        "systemctl",
-                        &[if was_enabled { "enable" } else { "disable" }, unit],
-                    )?;
-                } else {
-                    let _ = runner.run("systemctl", &["disable", unit]);
+            if files[tunnel.file].previous.is_some() {
+                if let Err(error) = command(
+                    runner,
+                    "systemctl",
+                    &[
+                        if tunnel.enabled { "enable" } else { "disable" },
+                        &tunnel.unit,
+                    ],
+                ) {
+                    failures.push(error.to_string());
                 }
+            } else {
+                let _ = runner.run("systemctl", &["disable", &tunnel.unit]);
             }
-            Ok(())
-        };
-        return match rollback() {
-            Ok(()) => Err(format!("{error}; previous pipe configuration restored").into()),
-            Err(restore_error) => {
-                Err(format!("{error}; rollback also failed: {restore_error}").into())
+        }
+        if !ingress_active {
+            let _ = runner.run("systemctl", &["stop", INGRESS_UNIT]);
+        }
+        if ingress_unit_file.previous.is_some() {
+            if let Err(error) = command(
+                runner,
+                "systemctl",
+                &[
+                    if ingress_enabled { "enable" } else { "disable" },
+                    INGRESS_UNIT,
+                ],
+            ) {
+                failures.push(error.to_string());
             }
+        } else {
+            let _ = runner.run("systemctl", &["disable", INGRESS_UNIT]);
+        }
+        return if failures.is_empty() {
+            Err(format!("{error}; previous pipe configuration restored").into())
+        } else {
+            Err(format!("{error}; rollback also failed: {}", failures.join("; ")).into())
         };
     }
     Ok(())
@@ -456,42 +614,94 @@ pub(super) fn snapshot(include_config: bool) -> Result<Snapshot> {
     } else {
         None
     };
-    let mut units = Vec::new();
-    for unit in [INGRESS_UNIT, TUNNEL_UNIT] {
-        let output = RealCommandRunner.run(
-            "systemctl",
-            &[
-                "show",
-                "--property=LoadState,ActiveState,SubState,MainPID",
-                unit,
-            ],
-        )?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let value = |key: &str| {
-            text.lines()
-                .find_map(|line| line.strip_prefix(&format!("{key}=")))
-                .unwrap_or("unknown")
-                .to_owned()
-        };
-        units.push(UnitStatus {
+    snapshot_with(
+        &RealCommandRunner,
+        config,
+        super::engines::nginx_binary().is_some(),
+        super::engines::managed_binary(&env.libdir, "cloudflared").is_file(),
+    )
+}
+
+fn unit_snapshot(runner: &dyn CommandRunner, unit: &str) -> Result<(UnitStatus, String)> {
+    let output = runner.run(
+        "systemctl",
+        &[
+            "show",
+            "--property=LoadState,ActiveState,SubState,MainPID,InvocationID",
+            unit,
+        ],
+    )?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let value = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")))
+            .unwrap_or("unknown")
+            .to_owned()
+    };
+    Ok((
+        UnitStatus {
             unit: unit.into(),
             load_state: value("LoadState"),
             active_state: value("ActiveState"),
             sub_state: value("SubState"),
             main_pid: value("MainPID").parse().unwrap_or(0),
+        },
+        value("InvocationID"),
+    ))
+}
+
+fn snapshot_with(
+    runner: &dyn CommandRunner,
+    config: Option<Config>,
+    nginx_available: bool,
+    cloudflared_available: bool,
+) -> Result<Snapshot> {
+    let (ingress, _) = unit_snapshot(runner, INGRESS_UNIT)?;
+    let (legacy, invocation) = unit_snapshot(runner, TUNNEL_UNIT)?;
+    let mut quick_tunnels = Vec::new();
+    let quick_tunnel = config
+        .as_ref()
+        .and_then(|config| config.quick_tunnel.as_ref())
+        .map(|quick| {
+            let public_url = super::quick::public_url(runner, &legacy, &invocation);
+            quick_tunnels.push(QuickTunnelSnapshot {
+                id: LEGACY_QUICK_TUNNEL_ID,
+                name: "Quick Tunnel".into(),
+                target: QuickTunnelTarget::Apps {
+                    upstreams: quick.upstreams.clone(),
+                },
+                unit: legacy.clone(),
+                public_url: public_url.clone(),
+            });
+            firecrab_helper_protocol::pipe::QuickTunnelStatus { public_url }
         });
+    if let Some(config) = &config {
+        for entry in &config.quick_tunnels {
+            let (unit, invocation) = unit_snapshot(runner, &quick_tunnel_unit(entry.id))?;
+            let public_url = super::quick::public_url(runner, &unit, &invocation);
+            quick_tunnels.push(QuickTunnelSnapshot {
+                id: entry.id,
+                name: entry.name.clone(),
+                target: entry.target.clone(),
+                unit,
+                public_url,
+            });
+        }
     }
     Ok(Snapshot {
         config,
-        units,
-        nginx_available: super::engines::nginx_binary().is_some(),
-        cloudflared_available: super::engines::managed_binary(&env.libdir, "cloudflared").is_file(),
+        units: vec![ingress, legacy],
+        quick_tunnel,
+        quick_tunnels,
+        nginx_available,
+        cloudflared_available,
     })
 }
 
-/// Print live unit state as JSON without reading the saved manifest.
+/// Show all known services without contacting the API; corrupt manifests retain basic status.
 pub(super) fn status() -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&snapshot(false)?)?);
+    let snapshot = snapshot(true).or_else(|_| snapshot(false))?;
+    print!("{}", super::status::format(&snapshot));
     Ok(())
 }
 
@@ -535,19 +745,200 @@ pub(super) fn apply_managed() -> Result<()> {
     apply(&path, None, None)
 }
 
+/// Queue one fixed service job without changing configuration or boot enablement.
+/// The caller polls unit state because Nginx can drain requests for several minutes.
+pub(super) fn control() -> Result<()> {
+    use std::io::Read;
+    require_root()?;
+    let mut bytes = Vec::new();
+    std::io::stdin().take(1025).read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 {
+        return Err("pipe service request exceeds 1 KiB".into());
+    }
+    let request: ServiceRequest = serde_json::from_slice(&bytes)?;
+    let _lock = lock()?;
+    control_with(
+        &RealCommandRunner,
+        &ServiceEnv::from_process_env().confdir,
+        &request,
+    )
+}
+
+/// Validate the installed target before enqueuing exactly one systemd operation.
+fn control_with(
+    runner: &dyn CommandRunner,
+    confdir: &Path,
+    request: &ServiceRequest,
+) -> Result<()> {
+    let (unit, name) = match request.service {
+        Service::Ingress => (INGRESS_UNIT, "Nginx"),
+        Service::Tunnel => (TUNNEL_UNIT, "Cloudflare Tunnel"),
+    };
+    if request.action != ServiceAction::Stop {
+        let directory = confdir.join("pipe");
+        let manifest = directory.join("manifest.json");
+        if !manifest.is_file() {
+            return Err(format!("{name} is not configured; save Pipe settings first").into());
+        }
+        let config = Config::read(&manifest)?;
+        let files = match request.service {
+            Service::Ingress => vec![directory.join("ingress.conf")],
+            Service::Tunnel => {
+                if config.quick_tunnel.is_some() {
+                    vec![
+                        directory.join("quick-tunnel.json"),
+                        directory.join("ingress.conf"),
+                    ]
+                } else {
+                    let tunnel = config
+                        .tunnel
+                        .as_ref()
+                        .ok_or("Cloudflare Tunnel is not configured; connect it first")?;
+                    vec![
+                        directory.join("tunnel.json"),
+                        tunnel.credentials_file.clone(),
+                    ]
+                }
+            }
+        };
+        for path in files {
+            if !path.is_file() {
+                return Err(format!(
+                    "{name} configuration is incomplete; save Pipe settings again"
+                )
+                .into());
+            }
+        }
+    }
+    queue_unit(runner, unit, name, request.action)
+}
+
+fn queue_unit(
+    runner: &dyn CommandRunner,
+    unit: &str,
+    name: &str,
+    action: ServiceAction,
+) -> Result<()> {
+    let load = runner.run(
+        "systemctl",
+        &["show", "--property=LoadState", "--value", unit],
+    )?;
+    let state = String::from_utf8_lossy(&load.stdout);
+    if state.trim() == "not-found" && action == ServiceAction::Stop {
+        return Ok(());
+    }
+    if !load.status.success() || state.trim() != "loaded" {
+        return Err(format!("{name} unit is not loaded; save Pipe settings first").into());
+    }
+    let verb = match action {
+        ServiceAction::Start => "start",
+        ServiceAction::Stop => "stop",
+        ServiceAction::Restart => "restart",
+    };
+    command(runner, "systemctl", &["--no-block", verb, unit])
+}
+
+/// The caller holds the Pipe lock and has loaded the current manifest.
+pub(super) fn control_quick_locked(
+    config: &Config,
+    id: uuid::Uuid,
+    action: ServiceAction,
+) -> Result<()> {
+    control_quick_with(
+        &RealCommandRunner,
+        &ServiceEnv::from_process_env().confdir,
+        config,
+        id,
+        action,
+    )
+}
+
+fn control_quick_with(
+    runner: &dyn CommandRunner,
+    confdir: &Path,
+    config: &Config,
+    id: uuid::Uuid,
+    action: ServiceAction,
+) -> Result<()> {
+    if id == LEGACY_QUICK_TUNNEL_ID && config.quick_tunnel.is_some() {
+        return control_with(
+            runner,
+            confdir,
+            &ServiceRequest {
+                service: Service::Tunnel,
+                action,
+            },
+        );
+    }
+    let entry = config
+        .quick_tunnels
+        .iter()
+        .find(|entry| entry.id == id)
+        .ok_or("Quick Tunnel was not found")?;
+    if action != ServiceAction::Stop
+        && ["quick-tunnel.json", "ingress.conf"]
+            .iter()
+            .any(|file| !confdir.join("pipe").join(file).is_file())
+    {
+        return Err("Quick Tunnel configuration is incomplete; save it again".into());
+    }
+    queue_unit(runner, &quick_tunnel_unit(id), &entry.name, action)
+}
+
 /// Stop and disable installed Pipe units under the transaction lock.
 pub(super) fn disable() -> Result<()> {
     require_root()?;
     let _lock = lock()?;
-    for unit in [TUNNEL_UNIT, INGRESS_UNIT] {
-        let load = RealCommandRunner.run(
+    let env = ServiceEnv::from_process_env();
+    disable_with(&RealCommandRunner, &env.confdir, &env.unitdir)
+}
+
+// Stop remains usable when a saved manifest has broken routes or invalid JSON.
+fn disable_with(runner: &dyn CommandRunner, confdir: &Path, unitdir: &Path) -> Result<()> {
+    let manifest = fs::read(confdir.join("pipe/manifest.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok());
+    let mut units: std::collections::BTreeSet<String> = manifest
+        .into_iter()
+        .flat_map(|config| config.quick_tunnels)
+        .filter(|entry| !entry.id.is_nil())
+        .map(|entry| quick_tunnel_unit(entry.id))
+        .collect();
+    if let Ok(entries) = fs::read_dir(unitdir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let id = name
+                .strip_prefix("firecrab-quick-tunnel-")
+                .and_then(|value| value.strip_suffix(".service"))
+                .and_then(|value| uuid::Uuid::parse_str(value).ok());
+            if let Some(id) = id
+                && !id.is_nil()
+                && name == quick_tunnel_unit(id)
+            {
+                units.insert(name.to_owned());
+            }
+        }
+    }
+    let mut units = units.into_iter().collect::<Vec<_>>();
+    units.extend([TUNNEL_UNIT.into(), INGRESS_UNIT.into()]);
+    let mut failures = Vec::new();
+    for unit in &units {
+        let load = runner.run(
             "systemctl",
             &["show", "--property=LoadState", "--value", unit],
-        )?;
-        if String::from_utf8_lossy(&load.stdout).trim() == "not-found" {
+        );
+        if load.is_ok_and(|load| String::from_utf8_lossy(&load.stdout).trim() == "not-found") {
             continue;
         }
-        command(&RealCommandRunner, "systemctl", &["disable", "--now", unit])?;
+        if let Err(error) = command(runner, "systemctl", &["disable", "--now", unit]) {
+            failures.push(error.to_string());
+        }
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("; ").into());
     }
     Ok(())
 }

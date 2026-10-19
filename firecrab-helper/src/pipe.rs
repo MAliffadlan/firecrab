@@ -50,7 +50,8 @@ async fn execute(
     action: &str,
     input: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, HelperFailure> {
-    let mut child = Command::new(cli)
+    let mut command = Command::new(cli);
+    command
         .args(["pipe", action])
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -59,9 +60,24 @@ async fn execute(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(failure)?;
+        .kill_on_drop(true);
+    // Parallel tests can fork while another test writes its stub CLI. The child
+    // briefly inherits that writer, so Linux rejects exec with ETXTBSY. Match
+    // the API's bounded test-only retry; installed binaries keep failing fast.
+    let mut attempt = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Err(error)
+                if cfg!(test)
+                    && error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && attempt < 8 =>
+            {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(10 * attempt)).await;
+            }
+            result => break result.map_err(failure)?,
+        }
+    };
     let task = async {
         if let Some(input) = input {
             child
@@ -78,10 +94,10 @@ async fn execute(
         }
         Ok(output.stdout)
     };
-    let timeout = if action == "cloudflare-connect" {
-        420
-    } else {
-        220
+    let timeout = match action {
+        "quick-connect" | "quick-manage" => 450,
+        "cloudflare-connect" => 420,
+        _ => 220,
     };
     tokio::time::timeout(Duration::from_secs(timeout), task)
         .await
@@ -90,18 +106,59 @@ async fn execute(
 
 /// Validate a helper operation, execute its fixed CLI action and inspect the result.
 pub(super) async fn run(request: Operation) -> Result<Snapshot, HelperFailure> {
-    let cli = cli()?;
+    run_with_cli(&cli()?, request).await
+}
+
+/// Keep command execution separate from trusted executable discovery for isolated tests.
+async fn run_with_cli(cli: &Path, request: Operation) -> Result<Snapshot, HelperFailure> {
     match request {
         Operation::Inspect => {}
+        Operation::DisconnectCloudflare => {
+            execute(cli, "cloudflare-disconnect", None).await?;
+        }
         Operation::Disable => {
-            execute(&cli, "disable", None).await?;
+            execute(cli, "disable", None).await?;
+        }
+        Operation::Control { request } => {
+            execute(
+                cli,
+                "control",
+                Some(serde_json::to_vec(&request).map_err(failure)?),
+            )
+            .await?;
+        }
+        Operation::ManageQuickTunnel { request } => {
+            request
+                .validate()
+                .map_err(|error| HelperFailure::InvalidRequest {
+                    detail: error.to_string(),
+                })?;
+            execute(
+                cli,
+                "quick-manage",
+                Some(serde_json::to_vec(&request).map_err(failure)?),
+            )
+            .await?;
+        }
+        Operation::ConnectQuickTunnel { request } => {
+            request
+                .validate()
+                .map_err(|error| HelperFailure::InvalidRequest {
+                    detail: error.to_string(),
+                })?;
+            execute(
+                cli,
+                "quick-connect",
+                Some(serde_json::to_vec(&request).map_err(failure)?),
+            )
+            .await?;
         }
         Operation::ConnectCloudflare { request } => {
             request
                 .validate()
                 .map_err(|detail| HelperFailure::InvalidRequest { detail })?;
             execute(
-                &cli,
+                cli,
                 "cloudflare-connect",
                 Some(serde_json::to_vec(&request).map_err(failure)?),
             )
@@ -128,8 +185,244 @@ pub(super) async fn run(request: Operation) -> Result<Snapshot, HelperFailure> {
                     detail: "pipe request exceeds 48 KiB".into(),
                 });
             }
-            execute(&cli, "apply-managed", Some(bytes)).await?;
+            execute(cli, "apply-managed", Some(bytes)).await?;
         }
     }
-    serde_json::from_slice(&execute(&cli, "inspect", None).await?).map_err(failure)
+    serde_json::from_slice(&execute(cli, "inspect", None).await?).map_err(failure)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use firecrab_helper_protocol::pipe::{Service, ServiceAction, ServiceRequest};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_busy_cli_is_retried_without_losing_stdin_or_running_twice() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = directory.path().join("firecrab");
+        std::fs::write(
+            &cli,
+            "#!/bin/sh\nprintf 'run\\n' >> \"${0%/*}/runs\"\ncat\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&cli).unwrap();
+        assert_eq!(
+            std::process::Command::new(&cli)
+                .status()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::ExecutableFileBusy
+        );
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            drop(writer);
+        });
+
+        let input = b"private request".to_vec();
+        let output = execute(&cli, "quick-manage", Some(input.clone())).await;
+        releaser.join().unwrap();
+
+        assert_eq!(output.unwrap(), input);
+        assert_eq!(
+            std::fs::read(directory.path().join("runs")).unwrap(),
+            b"run\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cli_that_stays_busy_returns_the_spawn_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = directory.path().join("firecrab");
+        std::fs::write(&cli, "#!/bin/sh\nprintf run > \"${0%/*}/runs\"\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _writer = std::fs::OpenOptions::new().write(true).open(&cli).unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(2), execute(&cli, "inspect", None))
+            .await
+            .expect("busy retries must be bounded")
+            .unwrap_err();
+
+        let expected = std::io::Error::from_raw_os_error(libc::ETXTBSY).to_string();
+        assert!(matches!(error, HelperFailure::Internal { detail } if detail == expected));
+        assert!(!directory.path().join("runs").exists());
+    }
+
+    #[tokio::test]
+    async fn controls_only_the_fixed_cli_action_and_returns_a_fresh_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = directory.path().join("firecrab");
+        std::fs::write(
+            &cli,
+            r#"#!/bin/sh
+location="${0%/*}"
+case "$1:$2" in
+  pipe:control) cat > "$location/control.json" ;;
+  pipe:inspect) cat "$location/snapshot.json" ;;
+  *) exit 23 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let expected: Snapshot = serde_json::from_value(serde_json::json!({
+            "config": null,
+            "units": [{ "unit": "firecrab-ingress.service", "loadState": "loaded", "activeState": "deactivating", "subState": "stop-sigterm", "mainPid": 42 }],
+            "nginxAvailable": true,
+            "cloudflaredAvailable": false
+        })).unwrap();
+        std::fs::write(
+            directory.path().join("snapshot.json"),
+            serde_json::to_vec(&expected).unwrap(),
+        )
+        .unwrap();
+        let request = ServiceRequest {
+            service: Service::Ingress,
+            action: ServiceAction::Stop,
+        };
+        let actual = run_with_cli(
+            &cli,
+            Operation::Control {
+                request: request.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let received: ServiceRequest =
+            serde_json::from_slice(&std::fs::read(directory.path().join("control.json")).unwrap())
+                .unwrap();
+        assert_eq!(received, request);
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn rejected_service_jobs_preserve_the_command_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = directory.path().join("firecrab");
+        std::fs::write(
+            &cli,
+            "#!/bin/sh\ncat >/dev/null\nprintf 'Cloudflare Tunnel is not configured' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let failure = run_with_cli(
+            &cli,
+            Operation::Control {
+                request: ServiceRequest {
+                    service: Service::Tunnel,
+                    action: ServiceAction::Start,
+                },
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(failure, HelperFailure::Internal { detail } if detail.contains("Cloudflare Tunnel is not configured"))
+        );
+    }
+
+    #[tokio::test]
+    async fn quick_connections_use_the_fixed_action_and_return_only_runtime_urls() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = directory.path().join("firecrab");
+        std::fs::write(
+            &cli,
+            r#"#!/bin/sh
+location="${0%/*}"
+case "$1:$2" in
+  pipe:quick-connect) cat > "$location/quick.json" ;;
+  pipe:inspect) cat "$location/snapshot.json" ;;
+  *) exit 23 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let request: firecrab_helper_protocol::pipe::QuickConnectRequest = serde_json::from_value(serde_json::json!({
+            "config": { "routes": [], "tunnel": null, "quickTunnel": { "upstreams": ["127.0.0.1:9000"] } }
+        })).unwrap();
+        let expected: Snapshot = serde_json::from_value(serde_json::json!({
+            "config": request.config.clone(), "units": [], "nginxAvailable": true,
+            "cloudflaredAvailable": true, "quickTunnel": { "publicUrl": "https://new-crab.trycloudflare.com" }
+        })).unwrap();
+        std::fs::write(
+            directory.path().join("snapshot.json"),
+            serde_json::to_vec(&expected).unwrap(),
+        )
+        .unwrap();
+        let actual = run_with_cli(
+            &cli,
+            Operation::ConnectQuickTunnel {
+                request: request.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let bytes = std::fs::read(directory.path().join("quick.json")).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<firecrab_helper_protocol::pipe::QuickConnectRequest>(&bytes)
+                .unwrap(),
+            request
+        );
+        assert!(
+            !String::from_utf8(bytes)
+                .unwrap()
+                .contains("trycloudflare.com")
+        );
+        assert_eq!(actual, expected);
+    }
+    #[tokio::test]
+    async fn list_intents_and_named_disconnect_use_fixed_cli_actions() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = directory.path().join("firecrab");
+        std::fs::write(
+            &cli,
+            r#"#!/bin/sh
+location="${0%/*}"
+case "$1:$2" in
+pipe:quick-manage) test "$#" -eq 2 || exit 24; cat > "$location/intent.json" ;;
+pipe:cloudflare-disconnect) printf done > "$location/disconnected" ;;
+pipe:inspect) cat "$location/snapshot.json" ;;
+*) exit 23 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let expected: Snapshot = serde_json::from_value(serde_json::json!({"config":null,"units":[],"nginxAvailable":true,"cloudflaredAvailable":true})).unwrap();
+        std::fs::write(
+            directory.path().join("snapshot.json"),
+            serde_json::to_vec(&expected).unwrap(),
+        )
+        .unwrap();
+        let request: firecrab_helper_protocol::pipe::QuickTunnelRequest = serde_json::from_value(serde_json::json!({"action":"save","name":"Web","target":{"type":"apps","upstreams":["127.0.0.1:9000"]}})).unwrap();
+        assert_eq!(
+            run_with_cli(
+                &cli,
+                Operation::ManageQuickTunnel {
+                    request: request.clone()
+                }
+            )
+            .await
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            serde_json::from_slice::<firecrab_helper_protocol::pipe::QuickTunnelRequest>(
+                &std::fs::read(directory.path().join("intent.json")).unwrap()
+            )
+            .unwrap(),
+            request
+        );
+        assert_eq!(
+            run_with_cli(&cli, Operation::DisconnectCloudflare)
+                .await
+                .unwrap(),
+            expected
+        );
+        assert!(directory.path().join("disconnected").exists());
+    }
 }

@@ -136,3 +136,23 @@ pub async fn connect(
 #[cfg(test)]
 #[path = "cloudflare_tests.rs"]
 mod tests;
+
+/// Disconnect the local named connector without deleting provider DNS resources.
+pub async fn disconnect(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<Snapshot>, AppError> {
+    state
+        .network
+        .pipe(Operation::DisconnectCloudflare)
+        .await
+        .map(Json)
+        .map_err(|_| {
+            AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cloudflare_disconnect_unavailable",
+                "Could not disconnect the Cloudflare connector; check the helper",
+                request_id.0,
+            )
+        })
+}

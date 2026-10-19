@@ -4,13 +4,13 @@ The data-plane slice of [#335](https://github.com/SteelCrab/firecrab/issues/335)
 adds independent Nginx PipeIngress and cloudflared PipeTunnel systemd units.
 
 ```text
-Public request → Cloudflare → firecrab-tunnel.service
-               → firecrab-ingress.service (Nginx) → app in a MicroVM
+Public domain or Quick Tunnel URL → Cloudflare connector / public ingress
+  → firecrab-ingress.service (Nginx) → app in a MicroVM
 ```
 
-The API manages configuration. systemd owns both traffic processes. API
-stop/restart does not stop either unit. Both units start at boot after an explicit
-apply and restart after failure. Neither has an API `PartOf`, `BindsTo`, or
+The API manages configuration. systemd owns Nginx and each tunnel connector. API
+stop/restart does not stop those units. They start at boot after an explicit
+apply and restart after failure. They have no API `PartOf`, `BindsTo`, or
 `Requires` dependency. Stopping the whole host or management VM interrupts traffic.
 
 VM continuity still requires a compatible VM shim protocol from #123. Startup
@@ -19,7 +19,17 @@ incompatible VM protocol upgrades.
 
 This slice routes to existing reachable app addresses. The MicroService model,
 app deployment automation, secret store, and automatic VM replacement are separate
-#335 work. Guided Cloudflare setup creates DNS for one chosen public hostname.
+#335 work. The dashboard can publish VM app pools or saved Nginx domain/path groups through
+multiple independent Cloudflare Quick Tunnels.
+
+## Public address connections
+
+An existing public domain or a generated Quick Tunnel URL connects to the local
+Nginx ingress. Nginx applies the saved domain/path routes and app pools.
+[Public address setup](public-addresses.md) covers direct DNS with an existing
+public ingress and real Cloudflare Tunnel setup for the private listener.
+There is no Firecrab subdomain-registration service or proprietary connection
+token in this scope.
 
 ## Requirements
 
@@ -29,8 +39,10 @@ app deployment automation, secret store, and automatic VM replacement are separa
   `/usr/bin/nginx`, then PATH. `apply --nginx` accepts an external executable.
 - Reachable app ports. Existing VM port forwards can provide loopback upstreams
   such as `127.0.0.1:18081`.
-- For advanced manual public access, a locally managed named Cloudflare Tunnel and its JSON
-  credentials. Omit `tunnel` for ingress-only operation.
+- For temporary public access, a reachable Cloudflare Quick Tunnel connection.
+  A Cloudflare account, API token, and domain are not required.
+- Existing locally managed named tunnels remain compatible through CLI manifests.
+  Omit `tunnel` and `quickTunnel`, and leave `quickTunnels` empty, for ingress-only operation.
 
 The listener is HTTP on loopback, on port >= 1024. Public TLS terminates at
 Cloudflare. Direct public HTTPS and MicroNetwork listeners are subsequent work.
@@ -76,41 +88,90 @@ reads the manifest and credential file, then streams them through stdin to the
 managed guest over SSH or WSL. Executable overrides refer to guest paths.
 `firecrab service dev` builds and installs the matching guest CLI.
 
+`pipe status` shows a table with the Nginx and Cloudflare Tunnel runtime states,
+PIDs, and executable availability. An installed connector can be available while
+its tunnel is not configured. Status works without the API and does not read
+the protected manifest. View saved routes in the Pipe dashboard.
+
 ## Dashboard
 
 Select **Pipe** in the existing dashboard menu. The page uses the dashboard's
 shared panels, form fields, tables, service badges, colors, fonts, and navigation.
 
-1. Enter the domain, path prefix, and comma-separated app `IP:port` addresses.
-2. Add or edit the route in the draft table.
-3. Select **Save and apply** to validate and apply the whole draft.
-4. Select **Stop** to stop the traffic units while keeping saved routes.
+Open **⋯** in the Nginx row and select **Edit** to expand **Nginx settings**
+directly below that row. Its listen address, **Save**, and **Cancel** are grouped
+inside the editor. Select **Save** to apply or **Cancel** to discard the address
+change. Either action closes the editor. Cancelling preserves pending route edits.
+The listen address stays hidden when the editor is closed.
 
-Removing the last route and saving produces HTTP 404 for all external requests.
-Editing routes does not apply them until Save and apply. Polling preserves local
-edits. API connection failure clears stale service badges.
+1. Select **Add route** to show the domain, path prefix, and VM app choices.
+2. Enter the domain and path, then select one or more registered TCP app ports.
+3. Select **Save** once to validate and apply the route. The editor closes on success.
 
-Cloudflare Tunnel is optional. Use **Connect Cloudflare Tunnel** for guided setup:
-follow the token issuance instructions, load domains, choose a hostname and app
-addresses, then select **Connect and publish**. Firecrab creates the tunnel and
-DNS and installs the connector if missing. The setup API token is not saved.
-See [Cloudflare token setup and connection](cloudflare-tunnel.md).
+Use each service row's **⋯** menu for **Start**, **Stop**, and **Restart**. These
+controls use the saved configuration. They do not save unfinished address, route,
+or tunnel changes. The page reports that the request was accepted, then polls the
+unit state. A start or restart may take a few seconds.
 
-**Advanced tunnel configuration** retains the UUID and credential JSON flow.
-Leave credentials blank to retain the saved credential. The input clears after
-saving. GET responses never include credentials. Manual tunnels and additional
-hostnames require their own Cloudflare DNS records.
+Stopping Nginx stops request routing. Stopping Cloudflare Tunnel stops public
+access while keeping Nginx available for local requests. Starting or restarting
+the tunnel can also start Nginx because its unit depends on the ingress service.
+Stopping Nginx does not stop a running tunnel connector, but public requests need
+Nginx to succeed. Stop the tunnel first when pausing both services.
 
-The API uses the authenticated helper socket for apply, inspect, and disable.
+Start and restart are unavailable until the service has saved configuration and
+its executable is installed. Start is unavailable while already active. Stop is
+unavailable while inactive. Lifecycle actions are unavailable during a transition.
+The service controls retain saved routes and tunnel credentials.
+
+Removing the last explicit route removes that domain/path forwarding. App-target
+Quick Tunnels retain their separate app pools. A domain referenced by a
+route-target tunnel must retain at least one route.
+Select **Edit** on an existing row to open its editor, or **Cancel** to discard
+the editor's inputs. Removed routes stay in the local draft until **Save**.
+Polling preserves local edits. API connection failure clears stale service badges.
+
+Cloudflare is optional. In **Cloudflare Quick Tunnel**, select **Add tunnel**,
+enter a name, and choose **VM apps** or **Nginx routes**. App mode selects one or
+more registered VM TCP ports. Route mode selects a saved domain and publishes
+all of its saved paths. Select **Create temporary URL** to add the entry.
+
+The list keeps each tunnel's name, target, URL, and service state. Its **⋯** menu
+provides **Edit**, **Start**, **Stop**, **Restart**, and **Delete**. The copy icon
+beside each address copies its current URL.
+Editing or deleting one entry keeps other tunnels and saved Nginx routes.
+Save/delete operations retain unfinished route and listen-address drafts.
+Quick Tunnels require no domain, API token, UUID, or credential JSON.
+
+The public link and copied URL are base addresses. Append the desired saved
+path when using a route group. If the selected domain has `/api` but no `/`, the
+base address returns 404 while `/api` reaches the API app.
+
+Refreshing restores each running connector's current URL. Inactive or failed
+entries hide their old links. Starting or restarting one connector creates a
+new address for that entry. Updating its target reloads Nginx and keeps its URL.
+
+See [Publish apps and Nginx routes with Quick Tunnels](cloudflare-tunnel.md).
+Existing single Quick Tunnel definitions appear in the list and remain compatible.
+The **Cloudflare Tunnel** panel also connects an owned Cloudflare domain using
+a scoped API token and a saved Nginx route. It creates DNS and retains a stable
+public address. Its regular connector runs alongside the Quick Tunnel list.
+Existing named tunnel manifests remain compatible with the CLI.
+
+The API uses the authenticated helper socket for apply, inspect, service control, and disable.
 It does not accept executable paths or arbitrary commands from dashboard requests.
 The helper invokes the matching root-owned CLI. This keeps the CLI and dashboard
 on the same validation, persistence, reload, and rollback path.
 
 | Endpoint | Action |
 | --- | --- |
-| `GET /api/pipe` | Saved manifest, engine availability, and live unit states |
+| `GET /api/pipe` | Saved manifest, engine availability, unit states, and Quick Tunnel list with current URLs |
 | `PUT /api/pipe` | Apply `{config, credentials}`; null credentials retains the saved file |
-| `POST /api/pipe/disable` | Stop both units and retain saved config |
+| `POST /api/pipe/quick-tunnels` | Create or edit `{id, name, target}` while retaining other definitions |
+| `DELETE /api/pipe/quick-tunnels/{id}` | Stop and remove one Quick Tunnel |
+| `POST /api/pipe/quick-tunnels/{id}/service` | Start, stop, or restart one Quick Tunnel |
+| `POST /api/pipe/service` | Request `{service: "ingress" or "tunnel", action: "start", "stop" or "restart"}` for one unit |
+| `POST /api/pipe/disable` | Stop traffic units and retain saved config |
 
 Manifests and dashboard requests are limited to 48 KiB for the helper's bounded protocol frames.
 
@@ -135,10 +196,11 @@ that the new generation was accepted. A failed apply restores persisted config
 and enabled states. The CLI reports any rollback failure. Old workers have a
 five-minute shutdown limit for long-lived connections.
 
-Changing only app addresses or routes under existing tunnel hostnames keeps the
-connector PID. Changing hostnames, listener address, tunnel UUID, or credentials
-restarts the connector and can interrupt its connections. Removing `tunnel`
-disables the connector and deletes managed credentials. Disable first before
+Changing only app addresses or routes under existing named tunnel hostnames keeps
+the connector PID. Updating a Quick Tunnel target or its referenced paths reloads
+Nginx without changing that connector's URL. Each list entry uses its own systemd
+unit. Removing an entry stops only that connector. Listener or connector changes
+can interrupt connections. Named tunnel credentials remain managed separately. Disable first before
 changing the Nginx executable path or config directory of an active pipe.
 
 ## Credentials and operations
@@ -152,8 +214,8 @@ is searchable but cannot be modified by other users. Nginx temporary files remai
 private. A directory bind gives Nginx read-only access to its route config while
 retaining the installed config directory permissions. Apply and disable share a host lock.
 
-For a locally managed tunnel, create account credentials and DNS routes before
-applying the pipe:
+For an existing locally managed named tunnel, the CLI still accepts account
+credentials and DNS routes prepared outside the dashboard:
 
 ```sh
 cloudflared tunnel login
@@ -172,17 +234,21 @@ executables are not removed.
 ## Validation
 
 - `test-pipe-runtime.py`: real Nginx domain/path boundaries, request distribution,
-  passive failure exclusion, in-flight requests across reload, and rejected config.
+  passive failure exclusion, multiple isolated Quick hosts, cloned route paths,
+  target update/removal, public Host/HTTPS forwarding, and in-flight reloads.
 - `test-pipe-cli.py`: real systemd apply, stdin bundles, rollback, connector lifetime,
   private credentials, tunnel removal, and disable. Tunnel connections use a fixture.
 - `test-pipe-api.py`: real unprivileged API → helper → CLI → Nginx, traffic and stable
-  ingress PID across actual API stop/restart, persisted routes, and API disable.
-- `firecrab-e2e/tests/pipe.spec.ts`: desktop/mobile dashboard editing, save, stop,
-  rejected changes, credential clearing, and stale-state handling with API fixtures.
+  ingress PID across actual API stop/restart, persisted routes, individual ingress
+  stop/start/restart, and API disable.
+- `firecrab-e2e/tests/pipe.spec.ts`: desktop/mobile dashboard editing, local saves,
+  independent service menus, disabled states, rejected requests, draft preservation,
+  Quick Tunnel CRUD, independent URL lifecycle, app/route targets, domain removal
+  guards, and stale-state handling with API fixtures.
 
 The privileged scripts refuse existing Firecrab traffic units and require a
-disposable host. Actual public Cloudflare connectivity still needs acceptance
-with real account credentials. These tests do not claim that external connection.
+disposable host. Actual public Quick Tunnel connectivity still needs acceptance with external
+HTTPS requests. These local tests do not claim that external connection.
 
 References: [Nginx reload](https://nginx.org/en/docs/control.html),
 [Nginx upstreams](https://nginx.org/en/docs/http/ngx_http_upstream_module.html),
