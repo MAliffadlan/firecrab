@@ -56,6 +56,7 @@ export default function MicroServices() {
     try {
       await deleteMicroService(service.id);
       if (editor?.id === service.id) setEditor(undefined);
+      if (runtime?.id === service.id) setRuntime(null);
       await refresh();
     } catch (failure) {
       setError((failure as Error).message);

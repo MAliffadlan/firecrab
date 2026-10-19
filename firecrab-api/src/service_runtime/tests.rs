@@ -217,3 +217,41 @@ async fn live_status_does_not_claim_a_missing_vm_is_running() {
     assert_eq!(record.instances[0].state, VmState::Stopped);
     assert!(!record.instances[0].healthy);
 }
+
+#[tokio::test]
+async fn stop_does_not_wait_for_another_deployment_permit() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path()).await;
+    let id = Uuid::new_v4();
+    let deployment = MicroServiceDeployment {
+        id: Uuid::new_v4(),
+        service_id: id,
+        spec: spec(),
+        request: DeployMicroServiceRequest {
+            micro_network_id: None,
+            host_port: 30100,
+        },
+        phase: ServicePhase::Failed,
+        digest: None,
+        instances: vec![],
+        log: vec![],
+        error: None,
+    };
+    save(&state, &deployment).await.unwrap();
+    let _other_deployment = state.service_deploy_permits.acquire().await.unwrap();
+    let (status, _) = stop(
+        State(state.clone()),
+        Extension(RequestId(Uuid::new_v4())),
+        Path(id.to_string()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state.store.service_deployment(id).unwrap().unwrap().phase != ServicePhase::Stopped {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stop must finish while another deployment holds the permit");
+}

@@ -126,9 +126,6 @@ pub async fn stop(
     let task_state = state.clone();
     let mut task_deployment = deployment.clone();
     tokio::spawn(async move {
-        let Ok(_permit) = task_state.service_deploy_permits.acquire().await else {
-            return;
-        };
         match cleanup(&task_state, &mut task_deployment).await {
             Ok(()) => {
                 task_deployment.phase = ServicePhase::Stopped;
