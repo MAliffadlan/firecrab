@@ -60,11 +60,10 @@ const groupedRoutes = [
 ];
 
 const CONNECTION_TOKEN = "a".repeat(64);
-async function expectExistingQuickChoice(page: Page, name: string, id: string) {
-  const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
-  await panel.getByRole("button", { name: "Add fixed address", exact: true }).click();
-  await expect(panel.getByLabel("Connection target", { exact: true }).locator(`option[value="${id}"]`)).toHaveText(name === "Quick Tunnel" ? name : "Quick Tunnel · " + name);
-  await panel.getByRole("button", { name: "Cancel", exact: true }).click();
+async function expectExistingQuickTunnel(page: Page, name: string) {
+  const panel = page.getByRole("region", { name: "Quick Tunnel", exact: true });
+  await expect(panel.getByRole("cell", { name, exact: true })).toBeVisible();
+  await expect(panel.getByRole("button", { name: name + " actions", exact: true })).toBeVisible();
 }
 
 async function open(page: Page, options: { unavailable?: boolean; firecrabFailure?: boolean; firecrabPending?: boolean; locale?: string; reject?: boolean; quickFailure?: string; quickDeleteFailure?: string; namedFailure?: string; zonesFailure?: boolean; zoneName?: string; missingConnector?: boolean; missingNginx?: boolean; holdConnection?: boolean; quickUrlPending?: boolean; vms?: VmResponse[]; savedAddresses?: string[]; savedRoutes?: PipeConfig["routes"]; vmsUnavailable?: boolean; configuredTunnel?: boolean; configuredLegacyQuick?: boolean; quickTunnels?: QuickEntry[]; ingressState?: string; tunnelState?: string; serviceFailure?: string; unconfiguredIngress?: boolean } = {}) {
@@ -201,7 +200,7 @@ async function open(page: Page, options: { unavailable?: boolean; firecrabFailur
 
 test.describe("Pipe dashboard @dashboard", () => {
   test.describe.configure({ timeout: 45_000 });
-  test("connects a dashboard token to an existing Quick Tunnel and retargets it to Nginx", async ({ page }, info) => {
+  test("connects a dashboard token to VM apps and retargets it to Nginx", async ({ page }, info) => {
     const mock = await open(page, { quickTunnels: [webTunnel], savedRoutes: groupedRoutes });
     const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
     await panel.getByRole("button", { name: "Add fixed address" }).click();
@@ -211,7 +210,10 @@ test.describe("Pipe dashboard @dashboard", () => {
     await expect(panel.getByRole("link", { name: "Get a token from the dashboard", exact: true })).toHaveAttribute("href", "https://firecrab.dev/dashboard/");
     await expect(panel.getByLabel("Connection token", { exact: true })).toHaveAttribute("type", "password");
     await panel.getByLabel("Connection token", { exact: true }).fill(CONNECTION_TOKEN);
-    await panel.getByLabel("Connection target", { exact: true }).selectOption(QUICK_ID);
+    await expect(panel.getByLabel("Connection target").locator("option")).toHaveText(["VM apps", "Nginx routes"]);
+    const apps = panel.getByRole("group", { name: "Public apps", exact: true });
+    await apps.getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
+    await apps.getByRole("checkbox", { name: "web-b · TCP 80", exact: true }).check();
     await panel.getByRole("button", { name: "Connect address", exact: true }).click();
     const url = "https://my-app.firecrab.dev";
     await expect(panel.getByRole("link", { name: url, exact: true })).toBeVisible();
@@ -222,7 +224,7 @@ test.describe("Pipe dashboard @dashboard", () => {
     await panel.getByLabel("Connection target", { exact: true }).selectOption("nginx");
     await panel.getByLabel("Nginx route domain", { exact: true }).selectOption("app.example.com");
     await panel.getByRole("button", { name: "Connect address", exact: true }).click();
-    expect(mock.firecrabSaves).toEqual([{ token: CONNECTION_TOKEN, target: { type: "quick_tunnel", id: QUICK_ID } }, { subdomain: "my-app", target: { type: "nginx", host: "app.example.com" } }]);
+    expect(mock.firecrabSaves).toEqual([{ token: CONNECTION_TOKEN, target: { type: "apps", upstreams: ["172.30.36.2:80", "172.30.36.3:80"] } }, { subdomain: "my-app", target: { type: "nginx", host: "app.example.com" } }]);
     expect(mock.writes).toHaveLength(0);
     expect(mock.quickSaves).toHaveLength(0);
     await page.reload();
@@ -237,7 +239,7 @@ test.describe("Pipe dashboard @dashboard", () => {
     await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
     await expect(panel.getByRole("link", { name: url, exact: true })).toHaveCount(0);
     expect(mock.firecrabDeletes).toEqual(["my-app"]);
-    await expectExistingQuickChoice(page, "Public web", QUICK_ID);
+    await expectExistingQuickTunnel(page, "Public web");
   });
 
   test("connects saved Nginx routes without requiring a pre-existing Quick Tunnel", async ({ page }) => {
@@ -261,7 +263,7 @@ test.describe("Pipe dashboard @dashboard", () => {
     const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
     await panel.getByRole("button", { name: "Add fixed address" }).click();
     await panel.getByLabel("Connection token", { exact: true }).fill(CONNECTION_TOKEN);
-    await panel.getByLabel("Connection target", { exact: true }).selectOption(QUICK_ID);
+    await panel.getByRole("group", { name: "Public apps", exact: true }).getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
     await panel.getByRole("button", { name: "Connect address", exact: true }).click();
     await expect(panel.getByRole("alert")).toContainText("Connection token is invalid or revoked");
     await expect(panel.getByLabel("Connection token", { exact: true })).toHaveValue(CONNECTION_TOKEN);
@@ -737,10 +739,10 @@ test.describe("Pipe dashboard @dashboard", () => {
     expect(mock.writes).toHaveLength(0);
   });
 
-  test("keeps Cloudflare Quick Tunnel controls and the Firecrab target choice", async ({ page }) => {
+  test("keeps Cloudflare Quick Tunnel controls independently of Firecrab app targets", async ({ page }) => {
     const mock = await open(page, { configuredLegacyQuick: true });
     await expect(page.getByRole("region", { name: "Quick Tunnel", exact: true }).getByRole("button", { name: "Add tunnel", exact: true })).toBeVisible();
-    await expectExistingQuickChoice(page, "Quick Tunnel", LEGACY_QUICK_ID);
+    await expectExistingQuickTunnel(page, "Quick Tunnel");
     expect(mock.quickSaves).toHaveLength(0);
     expect(mock.quickDeletes).toHaveLength(0);
   });
@@ -756,12 +758,12 @@ test.describe("Pipe dashboard @dashboard", () => {
     expect(mock.writes).toHaveLength(1);
   });
 
-  test("requires a token and retains both target choices when there are no saved Quick Tunnels", async ({ page }) => {
+  test("requires a token and offers apps and Nginx without saved Quick Tunnels", async ({ page }) => {
     await open(page, { savedRoutes: groupedRoutes });
     const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
     await panel.getByRole("button", { name: "Add fixed address" }).click();
-    await expect(panel.getByLabel("Connection target").locator("option")).toHaveText(["Select a target", "Quick Tunnel", "Nginx routes"]);
-    await expect(panel.getByRole("option", { name: "Quick Tunnel", exact: true })).toBeDisabled();
+    await expect(panel.getByLabel("Connection target").locator("option")).toHaveText(["VM apps", "Nginx routes"]);
+    await expect(panel.getByRole("option", { name: "Quick Tunnel", exact: true })).toHaveCount(0);
     await expect(panel.getByLabel("Quick Tunnel", { exact: true })).toHaveCount(0);
     await panel.getByLabel("Connection target").selectOption("nginx");
     await panel.getByLabel("Nginx route domain").selectOption("app.example.com");
@@ -792,7 +794,7 @@ test.describe("Named Cloudflare Tunnel @dashboard", () => {
     await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toHaveCount(0);
     expect(mock.zoneRequests).toEqual([token]);
     expect(mock.namedConnections[0]).toMatchObject({ apiToken: token, hostname: "app.example.com", config: { quickTunnels: [webTunnel], routes: groupedRoutes } });
-    await expectExistingQuickChoice(page, "Public web", QUICK_ID);
+    await expectExistingQuickTunnel(page, "Public web");
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     const copy = panel.getByRole("button", { name: "Copy URL", exact: true });
     await expect(copy).toHaveText("");
@@ -806,7 +808,7 @@ test.describe("Named Cloudflare Tunnel @dashboard", () => {
     await panel.getByRole("button", { name: "Disconnect", exact: true }).click();
     await expect(panel.getByLabel("Cloudflare API token", { exact: true })).toHaveValue("");
     expect(mock.namedDisconnects).toBe(1);
-    await expectExistingQuickChoice(page, "Public web", QUICK_ID);
+    await expectExistingQuickTunnel(page, "Public web");
     expect(mock.writes).toHaveLength(0);
   });
   test("keeps route and listener drafts during named setup and disconnect without an unsaved notice", async ({ page }) => {
@@ -874,7 +876,7 @@ test.describe("Named Cloudflare Tunnel @dashboard", () => {
 
 test("preserves an existing legacy connector in both tunnel panels @dashboard", async ({ page }) => {
   const mock = await open(page, { configuredLegacyQuick: true, savedRoutes: groupedRoutes });
-  await expectExistingQuickChoice(page, "Quick Tunnel", LEGACY_QUICK_ID);
+  await expectExistingQuickTunnel(page, "Quick Tunnel");
   await expect(page.getByRole("region", { name: "Quick Tunnel", exact: true })).toBeVisible();
   expect(mock.quickSaves).toHaveLength(0);
   expect(mock.quickDeletes).toHaveLength(0);

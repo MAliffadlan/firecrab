@@ -128,7 +128,7 @@ fn path(path: &str) -> bool {
 }
 
 /// Apply the same literal app-address rules to saved routes and anonymous access.
-fn validate_upstreams(
+pub(crate) fn validate_upstreams(
     upstreams: &[SocketAddr],
     listen: Option<SocketAddr>,
     host: &str,

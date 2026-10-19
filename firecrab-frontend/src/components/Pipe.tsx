@@ -173,7 +173,7 @@ export default function Pipe({ vms, vmsLoading, vmsUnavailable, onUnsavedChange 
       {snapshot && !snapshot.nginxAvailable && <p className="field-error">{t("Install Nginx on this host before applying routes.", "라우트를 적용하기 전에 이 호스트에 Nginx를 설치한다.")}</p>}
     </section>
 
-    <FirecrabTunnel snapshot={snapshot} busy={busy}
+    <FirecrabTunnel snapshot={snapshot} busy={busy} apps={apps} vmsLoading={vmsLoading} vmsUnavailable={vmsUnavailable}
       onBusy={value => { mutating.current = value; setBusy(value); revision.current++; }} onUnsavedChange={setFirecrabDirty}
       onConnected={next => {
         setSnapshot(next);

@@ -19,11 +19,11 @@ export interface PipeSnapshot {
   quickTunnels?: QuickTunnelSnapshot[];
 }
 
-export type FirecrabTarget = { type: "quick_tunnel"; id: string } | { type: "nginx"; host: string };
+export type FirecrabTarget = { type: "apps"; upstreams: string[] } | { type: "nginx"; host: string };
 export interface FirecrabAddress {
   subdomain: string;
   publicUrl: string;
-  target: FirecrabTarget;
+  target: FirecrabTarget | { type: "quick_tunnel"; id: string };
   connectorId: string;
   connected: boolean;
   error: string | null;

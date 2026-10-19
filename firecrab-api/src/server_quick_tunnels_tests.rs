@@ -378,8 +378,8 @@ async fn firecrab_address_forwards_only_local_intent_and_keeps_origin_protection
         for expected in [
             AddressRequest::Connect {
                 token: firecrab_helper_protocol::firecrab_tunnel::ConnectionToken("a".repeat(64)),
-                target: Target::Nginx {
-                    host: "app.test".into(),
+                target: Target::Apps {
+                    upstreams: vec!["172.30.36.2:80".parse().unwrap()],
                 },
             },
             AddressRequest::Save {
@@ -410,7 +410,7 @@ async fn firecrab_address_forwards_only_local_intent_and_keeps_origin_protection
             .oneshot(request(
                 Method::POST,
                 "/api/pipe/firecrab-tunnels",
-                json!({"token":"a".repeat(64),"target":{"type":"nginx","host":"app.test"}}),
+                json!({"token":"a".repeat(64),"target":{"type":"apps","upstreams":["172.30.36.2:80"]}}),
                 "http://localhost:3000"
             ))
             .await

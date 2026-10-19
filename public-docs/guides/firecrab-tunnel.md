@@ -1,7 +1,7 @@
 # Firecrab Tunnel
 
-Firecrab Tunnel connects a fixed `*.firecrab.dev` address to an existing Quick
-Tunnel or saved Nginx routes. Get a connection token from
+Firecrab Tunnel connects a fixed `*.firecrab.dev` address to selected VM apps
+or saved Nginx routes. Get a connection token from
 [the connection dashboard](https://firecrab.dev/dashboard/), then paste it into
 the Firecrab app. There is no subdomain input in the Firecrab app.
 
@@ -32,21 +32,21 @@ the connection. The address remains owned by the dashboard account.
 1. Open **Pipe → Firecrab Tunnel → Add fixed address**.
 2. Paste the dashboard token into **Connection token**.
 3. Select one of the two connection targets:
-   - **Quick Tunnel**: select the existing connector directly in **Connection target**.
+   - **VM apps**: select one or more running VM apps and registered TCP ports.
    - **Nginx routes**: select a saved route domain.
 4. Select **Connect address**. The host verifies the token with the connection
    service before changing local routes or saving its ownership secret.
 5. Wait for **Connected**, then open the returned public address and app paths.
 
-The **Cloudflare Quick Tunnel** panel creates and manages temporary connectors.
-Firecrab Tunnel has no separate Quick Tunnel input; its **Connection target**
-list includes each existing connector, including legacy single Quick Tunnels.
-If there are no connectors, create one in **Cloudflare Quick Tunnel** or select
-Nginx routes.
+The **Cloudflare Quick Tunnel** panel independently creates and manages temporary
+URLs. Firecrab Tunnel's **Connection target** offers only VM apps and Nginx routes.
+It does not require an existing Quick Tunnel. A previously saved connector
+reference remains readable; editing it selects its existing apps or Nginx domain.
 
 Nginx mode publishes every saved path and app pool for its hostname. It manages
-a dedicated private connector automatically. Quick Tunnel mode reuses the
-selected connector. Switching targets keeps the same fixed address and preserves
+a dedicated private connector automatically. VM app mode manages its own
+connector and distributes requests across the selected app pool. Switching
+targets keeps the same fixed address and preserves
 unrelated routes and connectors. **Edit** uses the secret already saved on the
 host; it never reloads the token into the browser.
 
@@ -82,7 +82,7 @@ Read the token from a private file so it never appears in process arguments.
 Linux requires root. macOS/Windows forward the intent into the managed guest.
 
 ```sh
-firecrab pipe address connect --token-file /private/token.txt --quick <connector-uuid>
+firecrab pipe address connect --token-file /private/token.txt --app 172.30.36.2:80 --app 172.30.36.3:80
 firecrab pipe address connect --token-file /private/token.txt --nginx app.internal
 # Edit an existing local connection without resubmitting its saved token.
 firecrab pipe address connect <saved-address-label> --nginx app.internal
@@ -98,7 +98,7 @@ firecrab pipe address delete <saved-address-label>
 | `POST https://tunnel.firecrab.dev/v1/register` | Bearer token and `{}` resolve `{name, url, heartbeat_url, suspended}` |
 | `POST https://{name}.firecrab.dev/__firecrab/heartbeat` | Bearer token and `{tunnel_url}` refresh the current connector URL |
 
-Targets remain `{type: "quick_tunnel", id: "<uuid>"}` and
+Targets are `{type: "apps", upstreams: ["<IP:port>"]}` and
 `{type: "nginx", host: "<saved-hostname>"}`. Supply exactly one of `token` and
 `subdomain`; a subdomain can only edit an address already saved on this host.
 Server URLs, executable paths and arbitrary commands are not accepted.

@@ -95,16 +95,22 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum AddressCommand {
-    /// Connect an existing Quick Tunnel or all saved paths of an Nginx hostname.
+    /// Connect VM app addresses or all saved paths of an Nginx hostname.
     Connect {
         #[arg(required_unless_present = "token_file", conflicts_with = "token_file")]
         subdomain: Option<String>,
         /// Read a dashboard token from a private file instead of process arguments.
         #[arg(long, value_name = "FILE")]
         token_file: Option<PathBuf>,
-        #[arg(long, conflicts_with = "nginx", required_unless_present = "nginx")]
-        quick: Option<uuid::Uuid>,
-        #[arg(long, conflicts_with = "quick", required_unless_present = "quick")]
+        /// VM app IP:port; repeat to distribute requests across apps.
+        #[arg(
+            long,
+            value_name = "IP:PORT",
+            conflicts_with = "nginx",
+            required_unless_present = "nginx"
+        )]
+        app: Vec<std::net::SocketAddr>,
+        #[arg(long, conflicts_with = "app", required_unless_present = "app")]
         nginx: Option<String>,
     },
     /// Remove the owned public address and its exclusively managed connector.
@@ -119,13 +125,13 @@ pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 AddressCommand::Connect {
                     subdomain,
                     token_file,
-                    quick,
+                    app,
                     nginx,
                 } => {
-                    let target = match (quick, nginx) {
-                        (Some(id), None) => Target::QuickTunnel { id },
-                        (None, Some(host)) => Target::Nginx { host },
-                        _ => return Err("Select either --quick or --nginx".into()),
+                    let target = match (app.is_empty(), nginx) {
+                        (false, None) => Target::Apps { upstreams: app },
+                        (true, Some(host)) => Target::Nginx { host },
+                        _ => return Err("Select either --app or --nginx".into()),
                     };
                     match (token_file, subdomain) {
                         (Some(path), None) => {

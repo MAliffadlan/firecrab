@@ -23,13 +23,13 @@ On macOS and Windows, the connector runs inside the managed Linux guest.
 Use **Pipe → Cloudflare Quick Tunnel** to create, edit and control temporary
 connectors. In **Pipe → Firecrab Tunnel**, paste a token
 from [the Firecrab dashboard](https://firecrab.dev/dashboard/) and select an
-existing **Quick Tunnel** or saved **Nginx routes**. See the
+**VM apps** or saved **Nginx routes**. See the
 [Firecrab Tunnel guide](firecrab-tunnel.md) for token issuance and revocation.
 
-Quick Tunnel selection reuses the existing connector's app pool or route group.
-Nginx selection automatically manages a dedicated connector for every saved path
-of its selected domain. A legacy single connector remains selectable. Choose the
-connector in **Connection target**; there is no separate Quick Tunnel input.
+VM app selection publishes the chosen running apps and TCP ports. Nginx selection
+publishes every saved path of its selected domain. Firecrab Tunnel manages its
+own connector for either target. Temporary Cloudflare Quick Tunnels remain
+independent of the fixed-address target selection.
 
 Use the API below to provision or manage independent Quick Tunnels. Each has a
 name, target, unit and temporary public URL. Saving an existing ID changes only

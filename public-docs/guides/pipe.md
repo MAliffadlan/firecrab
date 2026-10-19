@@ -19,7 +19,7 @@ incompatible VM protocol upgrades.
 
 This slice routes to existing reachable app addresses. The MicroService model,
 app deployment automation, secret store, and automatic VM replacement are separate
-#335 work. Firecrab Tunnel uses a dashboard token to connect existing Quick Tunnels
+#335 work. Firecrab Tunnel uses a dashboard token to connect VM apps
 or saved Nginx domain/path groups to a fixed public address.
 
 ## Public address connections
@@ -30,7 +30,7 @@ Nginx ingress. Nginx applies the saved domain/path routes and app pools.
 public ingress and real Cloudflare Tunnel setup for the private listener.
 [Firecrab Tunnel](firecrab-tunnel.md) provides fixed `*.firecrab.dev` subdomains
 through its separate registration/forwarding service. It supports both existing
-Quick Tunnels and saved Nginx routes. The operator must deploy that service.
+VM apps and saved Nginx routes. The operator must deploy that service.
 
 ## Requirements
 
@@ -133,14 +133,14 @@ the editor's inputs. Removed routes stay in the local draft until **Save**.
 Polling preserves local edits. API connection failure clears stale service badges.
 
 Open [the connection dashboard](https://firecrab.dev/dashboard/) to issue a token.
-Under **Firecrab Tunnel → Add fixed address**, paste it and select an existing
-**Quick Tunnel** or saved **Nginx routes** in **Connection target**. There is no
+Under **Firecrab Tunnel → Add fixed address**, paste it and select
+**VM apps** or saved **Nginx routes** in **Connection target**. There is no
 subdomain input or separate Quick Tunnel input in Firecrab Tunnel. Use the
 **Cloudflare Quick Tunnel** panel to create and manage temporary connectors.
 
 The public address is assigned by the token service. Appending a saved path uses
 that route group; if it has `/api` but no `/`, the base address can return 404.
-Saved legacy Quick Tunnels remain selectable. See
+Saved legacy Quick Tunnels remain available in their Cloudflare panel. See
 [Firecrab Tunnel](firecrab-tunnel.md) for issuance, revocation and continuity.
 The **Cloudflare Tunnel** panel also connects an owned Cloudflare domain using
 a scoped API token and a saved Nginx route. It creates DNS and retains a stable

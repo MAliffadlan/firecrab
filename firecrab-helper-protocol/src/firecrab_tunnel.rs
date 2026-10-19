@@ -39,11 +39,16 @@ pub fn subdomain(value: &str) -> bool {
         .contains(&value)
 }
 
-/// Existing anonymous connector or saved Nginx hostname to publish.
+/// VM app addresses or a saved Nginx hostname to publish.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Target {
-    /// Reuse a connector selected from the current Quick Tunnel list.
+    /// Publish the selected VM apps through an automatically managed connector.
+    Apps {
+        /// Distinct app IP:port addresses.
+        upstreams: Vec<std::net::SocketAddr>,
+    },
+    /// Read previously saved connector references without removing their connections.
     QuickTunnel {
         /// Stable connector identity.
         id: Uuid,
@@ -98,6 +103,9 @@ pub enum Request {
 impl Request {
     /// Validate bounded input before privileged work.
     pub fn validate(&self) -> Result<(), String> {
+        if serde_json::to_vec(self).map_or(true, |bytes| bytes.len() > 4096) {
+            return Err("Firecrab address request exceeds 4 KiB".into());
+        }
         let name = match self {
             Self::Save { subdomain, .. } | Self::Delete { subdomain } => Some(subdomain),
             Self::Connect { token, .. } => {
@@ -115,8 +123,12 @@ impl Request {
         }
         if let Self::Save { target, .. } | Self::Connect { target, .. } = self {
             match target {
-                Target::QuickTunnel { id } if id.is_nil() => {
-                    return Err("Select an existing Quick Tunnel".into());
+                Target::Apps { upstreams } => {
+                    super::pipe::validate_upstreams(upstreams, None, "Firecrab Tunnel")
+                        .map_err(|error| error.to_string())?;
+                }
+                Target::QuickTunnel { .. } => {
+                    return Err("Select VM apps or Nginx routes".into());
                 }
                 Target::Nginx { host } if !super::pipe::valid_route_hostname(host) => {
                     return Err("Select an existing Nginx hostname".into());
@@ -149,6 +161,38 @@ pub struct Address {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_targets_reject_empty_invalid_and_duplicate_pools() {
+        for values in [
+            vec![],
+            vec!["0.0.0.0:80"],
+            vec!["172.30.36.2:0"],
+            vec!["172.30.36.2:80", "172.30.36.2:80"],
+        ] {
+            let request = Request::Save {
+                subdomain: "my-app".into(),
+                target: Target::Apps {
+                    upstreams: values
+                        .into_iter()
+                        .map(|value| value.parse().unwrap())
+                        .collect(),
+                },
+            };
+            assert!(request.validate().is_err());
+        }
+        let legacy = Target::QuickTunnel {
+            id: Uuid::from_u128(2),
+        };
+        assert!(
+            Request::Save {
+                subdomain: "my-app".into(),
+                target: legacy
+            }
+            .validate()
+            .is_err()
+        );
+    }
     #[test]
     fn connection_tokens_are_bounded_and_redacted_from_debug_output() {
         let token = "a".repeat(64);
@@ -185,8 +229,8 @@ mod tests {
         let invalid = serde_json::json!({"action":"save","subdomain":"my-app","target":{"type":"nginx","host":"app.test"},"token":"secret"});
         assert!(serde_json::from_value::<Request>(invalid).is_err());
         for target in [
-            Target::QuickTunnel {
-                id: Uuid::from_u128(2),
+            Target::Apps {
+                upstreams: vec!["172.30.36.2:80".parse().unwrap()],
             },
             Target::Nginx {
                 host: "app.test".into(),

@@ -162,10 +162,22 @@ fn unit(enable: bool) -> Result<()> {
             }
         }
     }
-    let action = if enable { "enable" } else { "disable" };
-    let output = runner.run("systemctl", &[action, "--now", UNIT])?;
+    let output = if enable {
+        runner.run("systemctl", &["enable", UNIT])?
+    } else {
+        runner.run("systemctl", &["disable", "--now", UNIT])?
+    };
     if !output.status.success() {
         return Err("Cannot change the Firecrab address-updater service".into());
+    }
+    // Load the matching CLI after upgrades, even when the unit text is unchanged.
+    if enable
+        && !runner
+            .run("systemctl", &["restart", UNIT])?
+            .status
+            .success()
+    {
+        return Err("Cannot restart the Firecrab address-updater service".into());
     }
     Ok(())
 }
@@ -202,14 +214,14 @@ pub(super) fn require_unreferenced(id: Uuid) -> Result<()> {
     Ok(())
 }
 
-/// Keep generated Nginx connector targets under their stable address controller.
+/// Keep managed connector targets under their stable address controller.
 pub(super) fn require_editable(id: Uuid) -> Result<()> {
     if read()?
         .bindings
         .iter()
         .any(|b| b.connector_id == id && b.owned_connector)
     {
-        return Err("Edit the Firecrab address to change its managed Nginx connector".into());
+        return Err("Edit the Firecrab address to change its managed connector".into());
     }
     Ok(())
 }
@@ -333,8 +345,24 @@ fn save(store: &mut Store, subdomain: String, target: Target, token: Option<Stri
     let token = token
         .or_else(|| old.as_ref().map(|binding| binding.token.clone()))
         .ok_or("Use a dashboard connection token to add a new Firecrab address")?;
-    let owned = matches!(target, Target::Nginx { .. });
-    let connector_id = match &target {
+    let managed_id = || {
+        old.as_ref()
+            .filter(|b| {
+                b.owned_connector
+                    && !store.bindings.iter().any(|peer| {
+                        peer.subdomain != subdomain && peer.connector_id == b.connector_id
+                    })
+            })
+            .map(|b| b.connector_id)
+            .unwrap_or_else(Uuid::new_v4)
+    };
+    let (connector_id, connector_target) = match &target {
+        Target::Apps { upstreams } => (
+            managed_id(),
+            Some(QuickTunnelTarget::Apps {
+                upstreams: upstreams.clone(),
+            }),
+        ),
         Target::QuickTunnel { id } => {
             let exists = config.quick_tunnels.iter().any(|e| e.id == *id)
                 || (*id == firecrab_helper_protocol::pipe::LEGACY_QUICK_TUNNEL_ID
@@ -342,31 +370,29 @@ fn save(store: &mut Store, subdomain: String, target: Target, token: Option<Stri
             if !exists {
                 return Err("Selected Quick Tunnel no longer exists".into());
             }
-            *id
+            (*id, None)
         }
         Target::Nginx { host } => {
             if !config.routes.iter().any(|r| r.host == *host) {
                 return Err("Selected Nginx route no longer exists".into());
             }
-            let id = old
-                .as_ref()
-                .filter(|b| {
-                    b.owned_connector
-                        && !store.bindings.iter().any(|peer| {
-                            peer.subdomain != subdomain && peer.connector_id == b.connector_id
-                        })
-                })
-                .map(|b| b.connector_id)
-                .unwrap_or_else(Uuid::new_v4);
-            config.quick_tunnels.retain(|e| e.id != id);
-            config.quick_tunnels.push(QuickTunnelEntry {
-                id,
-                name: format!("Firecrab: {subdomain}"),
-                target: QuickTunnelTarget::Routes { host: host.clone() },
-            });
-            id
+            (
+                managed_id(),
+                Some(QuickTunnelTarget::Routes { host: host.clone() }),
+            )
         }
     };
+    let owned = connector_target.is_some();
+    if let Some(target) = connector_target {
+        config
+            .quick_tunnels
+            .retain(|entry| entry.id != connector_id);
+        config.quick_tunnels.push(QuickTunnelEntry {
+            id: connector_id,
+            name: format!("Firecrab: {subdomain}"),
+            target,
+        });
+    }
     if let Some(old) = &old
         && old.connector_id != connector_id
     {
