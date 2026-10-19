@@ -41,7 +41,7 @@ export default function FirecrabTunnel({ snapshot, busy, onBusy, onConnected, on
     return editor!.kind === "quick_tunnel" ? { type: "quick_tunnel", id: editor!.source } : { type: "nginx", host: editor!.source };
   }
   return <section className="panel" aria-label="Firecrab Tunnel">
-    <h2 className="panel-title"><span>Firecrab Tunnel</span><button className="btn" type="button" disabled={busy || !!editor || !snapshot || addresses.length >= 16} aria-expanded={!!editor} aria-controls="firecrab-address-editor" onClick={() => { setEditor({ original: null, token: "", kind: "quick_tunnel", source: "" }); setError(null); }}>{t("Add fixed address", "고정 주소 추가")}</button></h2>
+    <h2 className="panel-title"><span className="panel-title-with-icon"><img className="panel-brand-icon" src="/firecrab.png" alt="" width={28} height={28} />Firecrab Tunnel</span><button className="btn" type="button" disabled={busy || !!editor || !snapshot || addresses.length >= 16} aria-expanded={!!editor} aria-controls="firecrab-address-editor" onClick={() => { setEditor({ original: null, token: "", kind: "quick_tunnel", source: "" }); setError(null); }}>{t("Add fixed address", "고정 주소 추가")}</button></h2>
     <p className="pipe-description">{t("Use a dashboard token to connect an existing Quick Tunnel or saved Nginx routes to your fixed address.", "대시보드에서 발급한 토큰으로 기존 Quick Tunnel 또는 저장된 Nginx 라우트를 고정 주소에 연결한다.")}</p>
     <p className="pipe-description"><a href="https://firecrab.dev/dashboard/" target="_blank" rel="noreferrer">{t("Get a token from the dashboard", "대시보드에서 토큰 발급")}</a></p>
     {error && <div className="banner error" role="alert">{error}</div>}
