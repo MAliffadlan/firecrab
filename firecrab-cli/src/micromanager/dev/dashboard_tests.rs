@@ -1,4 +1,5 @@
 use super::*;
+use socket2::{Domain, Socket, Type};
 use std::net::TcpListener;
 
 const VITE: &str = r#"
@@ -140,16 +141,21 @@ fn switches_checkouts_by_stopping_only_the_previous_owned_server() {
     assert_eq!(first.state().source, second.source());
 }
 
-#[tokio::test]
-async fn port_probe_requires_a_listening_socket() {
-    let socket = tokio::net::TcpSocket::new_v4().unwrap();
-    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let url = format!("http://{}", socket.local_addr().unwrap());
-    // Keep ownership of the port so concurrent tests cannot reuse it.
-    assert!(!listening(&url));
-    let listener = socket.listen(1).unwrap();
-    assert!(listening(&url));
-    drop(listener.accept().await.unwrap());
+#[test]
+fn port_probe_distinguishes_listening_and_closed_ports() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    assert!(listening(&format!(
+        "http://{}",
+        listener.local_addr().unwrap()
+    )));
+    // A bound socket that never listens refuses connections and keeps its port
+    // from parallel tests; releasing and rebinding a port races with them.
+    let closed = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+    closed
+        .bind(&SocketAddr::from(([127, 0, 0, 1], 0)).into())
+        .unwrap();
+    let address = closed.local_addr().unwrap().as_socket().unwrap();
+    assert!(!listening(&format!("http://{address}")));
 }
 
 #[test]

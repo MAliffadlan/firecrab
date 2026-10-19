@@ -26,7 +26,8 @@ try:
     inherited_lock = True
 except OSError:
     inherited_lock = False
-child = subprocess.Popen(["sleep", "60"])
+# The sleep stub exits at once; only the real command holds the cancellation point.
+child = subprocess.Popen(["/bin/sleep", "60"])
 Path(os.environ["TEST_ROOT"], "blocked").write_text(
     f"{os.getpid()} {child.pid} {os.getpgrp()} {int(inherited_lock)}")
 child.wait()
