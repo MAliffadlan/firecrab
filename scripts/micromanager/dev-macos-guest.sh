@@ -184,7 +184,9 @@ if [ "$profile" != restore ]; then
   # local files cannot linger in the next build. Never copy host target artifacts.
   rm -rf "$root/source"
   install -d -m 0700 "$root/source"
-  tar -xf "$root/$archive_name" -C "$root/source"
+  # An older checkout can have source mtimes before another checkout's cached
+  # build. Use extraction times so Cargo rebuilds the uploaded workspace crates.
+  tar -xmf "$root/$archive_name" -C "$root/source"
   # Windows Git checkouts may use CRLF; include_str! also embeds guest fragments.
   # Avoid GNU-only sed -i and \r syntax so the deployment contract runs with
   # macOS BSD tools too. Writing back preserves each staged file's permissions.
