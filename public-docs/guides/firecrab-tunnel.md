@@ -1,120 +1,145 @@
 # Firecrab Tunnel
 
-Firecrab Tunnel connects `https://<subdomain>.firecrab.dev` to either an existing
-Quick Tunnel or saved Nginx routes. The connection service owns the public
-address. Nginx owns path routing and app request distribution.
+Firecrab Tunnel connects a fixed `*.firecrab.dev` address to an existing Quick
+Tunnel or saved Nginx routes. Get a connection token from
+[the connection dashboard](https://firecrab.dev/dashboard/), then paste it into
+the Firecrab app. There is no subdomain input in the app or token dashboard.
 
 ```text
-*.firecrab.dev → connection service → selected Quick Tunnel → VM apps / Nginx
-                                  → managed connector → saved Nginx routes → VM apps
+Connection dashboard → generated address + connection token
+Firecrab app → token verification → selected local target
+Fixed public address → connection service → Quick Tunnel → Nginx → apps
 ```
 
-The service is the standalone `firecrab-tunnel` binary. It stores subdomain
-ownership in SQLite and forwards HTTP streams and WebSockets to the current
-target. A DNS CNAME alone does not implement this forwarding service.
+The standalone `firecrab-tunnel` binary serves the token dashboard and forwards
+HTTP streams and WebSockets. DNS records alone do not implement this service.
+The operator must deploy it and route both the dashboard and public hostnames.
+
+## Get a token
+
+1. Open `https://firecrab.dev/dashboard/`.
+2. Select **Create connection token**.
+3. Copy the token and the server-assigned public address. The token is an opaque
+   64-character hexadecimal value. The server stores its SHA-256 digest.
+4. Keep the token privately. It is not saved in browser storage or recoverable
+   from the server. Refreshing or leaving the page clears the displayed token.
+
+Anyone holding a token can control its assigned address. To revoke it, paste it
+into **Revoke a token** on the same dashboard. Revocation disables its forwarding
+and permanently rejects future token verification and target refreshes. The
+address stays reserved. A new token receives a new address.
+
+Issuance permits 16 new addresses per client IP per hour and 10,000 stored
+addresses. There is no login, account recovery or address transfer UI. Operators
+must set an appropriate edge abuse policy before public rollout.
 
 ## Connect an address
 
 1. Open **Pipe → Firecrab Tunnel → Add fixed address**.
-2. Enter a subdomain with 3–48 lowercase letters, digits or hyphens.
-3. Select **Quick Tunnel** and an existing connector, or select **Nginx routes**
-   and a saved route domain.
-4. Select **Connect address**.
-5. Wait for **Connected**, then open the fixed HTTPS address and its app paths.
+2. Paste the dashboard token into **Connection token**.
+3. Select one of the two connection targets:
+   - **Quick Tunnel**: select an existing connector.
+   - **Nginx routes**: select a saved route domain.
+4. Select **Connect address**. The host verifies the token with the connection
+   service before changing local routes or saving its ownership secret.
+5. Wait for **Connected**, then open the returned public address and app paths.
 
-Nginx mode publishes every saved path and app pool for the selected hostname.
-It creates a dedicated private connector automatically. Quick Tunnel mode
-reuses the selected connector. Editing the address can switch between these
-modes without changing the public hostname. Unrelated routes and connectors
-are retained. Deleting an address removes its remote reservation and only an
-exclusively owned connector; a reused user connector remains available.
+The separate Quick Tunnel panel is removed. Existing connectors, management APIs
+and saved targets remain available. The Firecrab Tunnel selector includes legacy
+single Quick Tunnels. If there are no existing connectors, select Nginx routes
+or provision a connector using the [Quick Tunnel API](cloudflare-tunnel.md#api).
 
-Ownership credentials are generated automatically and stored in the managed
-host's root-only `pipe/firecrab-addresses.json` file. The dashboard and API never
-return them. There is no user-facing registration-server URL or token field.
-Keep this protected state when migrating a host: losing it loses the ability
-to update or remove the existing reservation.
+Nginx mode publishes every saved path and app pool for its hostname. It manages
+a dedicated private connector automatically. Quick Tunnel mode reuses the
+selected connector. Switching targets keeps the same fixed address and preserves
+unrelated routes and connectors. **Edit** uses the secret already saved on the
+host; it never reloads the token into the browser.
+
+Deleting a local Firecrab connection removes its exclusively owned connector.
+A reused user connector remains. Dashboard-issued addresses become offline but
+stay reserved to their token, so that token can reconnect later. Use dashboard
+revocation to permanently invalidate the token.
+
+## Ownership and continuity
+
+The managed host stores the endpoint and token in the root-owned 0600
+`pipe/firecrab-addresses.json` file. API inspection never returns token values.
+Retain this file when migrating a host. Existing installations can continue
+using saved legacy ownership tokens for existing reservations; new connections
+require a dashboard token. Unknown tokens cannot create new reservations through
+the target update API.
 
 The independent `firecrab-address-updater.service` refreshes target URLs every
-30 seconds. It continues when the API restarts. A service lease expires after
-180 seconds without refresh. Expired or stopped targets return HTTP 503, while
-the subdomain remains reserved. Unreachable service and name conflicts appear
-as pending/error states; saving a local entry alone is not public acceptance.
+30 seconds and continues while the API restarts. Its lease expires after 180
+seconds without refresh. Expired or stopped targets return HTTP 503. A saved
+local entry or running updater alone does not prove successful public access.
+
+Revoked tokens return HTTP 410. The client reports that status and can remove
+the local connection without trying to recreate the revoked reservation.
 
 ## CLI and API
 
+Read the token from a private file so it never appears in process arguments.
+Linux requires root. macOS/Windows forward the intent into the managed guest.
+
 ```sh
-# Linux requires root. macOS/Windows forward these commands into the managed guest.
-firecrab pipe address connect my-app --quick <connector-uuid>
-firecrab pipe address connect my-app --nginx app.internal
-firecrab pipe address delete my-app
+firecrab pipe address connect --token-file /private/token.txt --quick <connector-uuid>
+firecrab pipe address connect --token-file /private/token.txt --nginx app.internal
+# Edit an existing local connection without resubmitting its saved token.
+firecrab pipe address connect <saved-address-label> --nginx app.internal
+firecrab pipe address delete <saved-address-label>
 ```
 
 | Interface | Action |
 | --- | --- |
 | `GET /api/pipe` | Includes non-secret `firecrabTunnels` statuses |
-| `POST /api/pipe/firecrab-tunnels` | Save `{subdomain, target}` |
-| `DELETE /api/pipe/firecrab-tunnels/{subdomain}` | Remove one owned address |
+| `POST /api/pipe/firecrab-tunnels` | Connect with `{token, target}` |
+| `POST /api/pipe/firecrab-tunnels` | Edit a saved connection with `{subdomain, target}` |
+| `DELETE /api/pipe/firecrab-tunnels/{subdomain}` | Disconnect one saved address |
+| `POST /dashboard/tokens` | Same-origin JSON `{}` issues a token and public URL |
+| `POST /dashboard/revoke` | Same-origin JSON `{token}` permanently revokes it |
+| `GET /v1/token` | Bearer token resolves `{subdomain, publicUrl}` on the control hostname |
 
-Target shapes are `{type: "quick_tunnel", id: "<uuid>"}` and
-`{type: "nginx", host: "<saved-hostname>"}`. Requests do not accept server URLs,
-ownership credentials, executable paths or arbitrary commands.
+Targets remain `{type: "quick_tunnel", id: "<uuid>"}` and
+`{type: "nginx", host: "<saved-hostname>"}`. Supply exactly one of `token` and
+`subdomain`; a subdomain can only edit an address already saved on this host.
+Server URLs, executable paths and arbitrary commands are not accepted.
 
 ## Deploy the connection service
 
-This is an operator task for the owner of `firecrab.dev`. Building the client
-or saving an address does not deploy the public service or change DNS.
-
-1. Build `cargo build --release -p firecrab-tunnel --locked` and install its
-   binary as `/usr/local/bin/firecrab-tunnel` on a persistent Linux host.
-2. Create the system user `firecrab-tunnel` with no login shell.
+1. Build `cargo build --release -p firecrab-tunnel --locked` and install the binary
+   as `/usr/local/bin/firecrab-tunnel` on a persistent Linux host.
+2. Create the `firecrab-tunnel` system user with no login shell.
 3. Install [firecrab-connection.service](../../packaging/systemd/firecrab-connection.service)
-   in `/etc/systemd/system/`, then enable/start it. systemd creates the private
-   state directory. Retain its SQLite database and WAL files across upgrades.
-4. Create a locally managed Cloudflare Tunnel for this operator host. Adapt
-   [the connector example](../../packaging/firecrab-tunnel/cloudflared.yml.example)
-   with the actual tunnel UUID and protected credentials file.
-5. Add proxied CNAME records for `*` and `tunnel` under `firecrab.dev`, pointing
-   to the operator tunnel's `<uuid>.cfargotunnel.com` target. Existing explicit
-   records remain separate; inspect conflicts before changing DNS.
-6. Run cloudflared as its own persistent service with the adapted config.
-   Verify edge TLS covers `tunnel.firecrab.dev` and `*.firecrab.dev`.
-7. Check `https://tunnel.firecrab.dev/health` returns 204. Connect an isolated
-   canary address through the Firecrab dashboard before allowing normal use.
+   and enable it. Retain its SQLite database and WAL files across upgrades.
+4. Adapt [the connector example](../../packaging/firecrab-tunnel/cloudflared.yml.example)
+   with the operator tunnel UUID and protected credentials file.
+5. Route `firecrab.dev/dashboard/` and its assets/mutation paths to the service.
+   Preserve the existing apex website's other paths. If that website uses another
+   ingress, configure a path proxy there rather than replacing its DNS blindly.
+6. Route `tunnel.firecrab.dev` and `*.firecrab.dev` to the operator connector.
+   Verify wildcard DNS, edge TLS, and `https://tunnel.firecrab.dev/health` (204).
+7. Issue a canary token and verify both targets through their actual public URL.
 
-The operator connector forwards both the control hostname and public wildcard
-hostnames to loopback port 8790. The server's `--trust-cloudflare-proxy` option
-uses Cloudflare's client-IP header only for local connector connections.
-Registration is limited to 16 new names per client IP per hour and 10,000 stored
-names. Apply the operator's edge abuse policy before public rollout.
+The operator connector forwards to loopback port 8790. `--trust-cloudflare-proxy`
+uses the client-IP header only for connections from a local connector. Dashboard
+mutations require same-origin JSON; token responses are not cacheable. The token
+table is created alongside existing address records on startup.
 
-For an operator-approved directly reachable Nginx origin, use
-`--nginx-origin https://nginx.example.net`. Only explicitly allowlisted direct
-origins are accepted; arbitrary private URLs and metadata endpoints are rejected.
-Private management-VM Nginx uses the automatically managed connector instead.
+For operator-approved directly reachable Nginx origins, use
+`--nginx-origin https://nginx.example.net`. Only allowlisted direct origins are
+accepted. Private management-VM routes use their automatically managed connector.
+Operator-only `FIRECRAB_TUNNEL_ENDPOINT` selects an alternative HTTPS origin
+before the first local registration. HTTP loopback is supported for isolated QA.
 
-Operator-only `FIRECRAB_TUNNEL_ENDPOINT` can select an alternative HTTPS origin
-before the first local registration. The endpoint is persisted with the protected
-state. HTTP loopback origins are accepted only for isolated local QA.
+## Manual verification
 
-Cloudflare supports wildcard ingress rules and wildcard DNS records. Review the
-[configuration reference](https://developers.cloudflare.com/tunnel/features/locally-managed-tunnels/configuration-file/)
-and [wildcard DNS behavior](https://developers.cloudflare.com/dns/manage-dns-records/reference/wildcard-dns-records/)
-when configuring the operator tunnel and existing explicit hostnames.
+Verify dashboard issuance, masking/copy, refresh behavior and revocation. Connect
+both targets, switch between them, restart the API, stop/start the source and
+delete one connection while retaining a peer. Verify token omission in API
+inspection and logs. Verify that revocation survives a service restart and the
+updater cannot revive it. Repeat through actual wildcard DNS/TLS after deployment.
 
-## Verification
-
-`cargo test -p firecrab-tunnel --locked` covers durable ownership, conflicts,
-strict origin validation, real HTTP forwarding, offline leases and WebSockets.
-The workspace CI includes these tests. Pipe browser E2E covers both target types,
-retargeting, pending/error states, deletion isolation and mobile layout.
-
-On an isolated systemd host, verify both target modes and each saved path. Restart
-the selected connector: its temporary URL must change while the fixed hostname
-continues reaching the same app after updater reconciliation. Restart only the
-API and verify the updater/connector PIDs remain unchanged. Stop the target and
-verify 503. Delete one address and verify other addresses, routes and user-owned
-connectors remain. Test a second host's conflict without disclosing credentials.
-
-Repeat these checks through actual wildcard DNS/TLS after deployment. Local
-fixtures, a running updater or a saved address do not establish public HTTPS.
+Regression cases describe issuance quotas, origin checks, secret redaction,
+ownership, revocation, reconnects and forwarding. Compile checks alone do not
+establish working public HTTPS; verify the operator deployment separately.

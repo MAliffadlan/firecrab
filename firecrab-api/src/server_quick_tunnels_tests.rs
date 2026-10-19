@@ -325,10 +325,18 @@ async fn cloudflare_disconnect_keeps_origin_protection_and_its_service_deadline(
 }
 
 #[tokio::test]
-async fn firecrab_address_requests_validate_names_targets_and_reject_secrets() {
+async fn firecrab_address_requests_validate_tokens_targets_and_ownership_choice() {
     let directory = tempfile::tempdir().unwrap();
     let app = router(directory.path(), directory.path().join("missing.sock")).await;
     for (body, status) in [
+        (
+            json!({"token":"invalid","target":{"type":"nginx","host":"app.test"}}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"target":{"type":"nginx","host":"app.test"}}),
+            StatusCode::BAD_REQUEST,
+        ),
         (
             json!({"subdomain":"www","target":{"type":"nginx","host":"app.test"}}),
             StatusCode::BAD_REQUEST,
@@ -343,7 +351,7 @@ async fn firecrab_address_requests_validate_names_targets_and_reject_secrets() {
         ),
         (
             json!({"subdomain":"my-app","target":{"type":"nginx","host":"app.test"},"token":"secret"}),
-            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::BAD_REQUEST,
         ),
     ] {
         let response = app
@@ -368,6 +376,12 @@ async fn firecrab_address_forwards_only_local_intent_and_keeps_origin_protection
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let helper = tokio::spawn(async move {
         for expected in [
+            AddressRequest::Connect {
+                token: firecrab_helper_protocol::firecrab_tunnel::ConnectionToken("a".repeat(64)),
+                target: Target::Nginx {
+                    host: "app.test".into(),
+                },
+            },
             AddressRequest::Save {
                 subdomain: "my-app".into(),
                 target: Target::Nginx {
@@ -391,6 +405,19 @@ async fn firecrab_address_forwards_only_local_intent_and_keeps_origin_protection
     });
     let app = router(directory.path(), socket).await;
     let body = json!({"subdomain":"my-app","target":{"type":"nginx","host":"app.test"}});
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                "/api/pipe/firecrab-tunnels",
+                json!({"token":"a".repeat(64),"target":{"type":"nginx","host":"app.test"}}),
+                "http://localhost:3000"
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
     assert_eq!(
         app.clone()
             .oneshot(request(

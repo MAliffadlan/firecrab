@@ -26,6 +26,19 @@ fn target(url: &str) -> Option<Target> {
     })
 }
 
+/// A saved reservation created by an older release before dashboard token issuance.
+fn legacy_reservation(service: &Service) {
+    service
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO addresses(name,owner,target,enabled,seen) VALUES('my-app',?1,NULL,0,0)",
+            [Sha256::digest(OWNER.as_bytes()).to_vec()],
+        )
+        .unwrap();
+}
+
 #[tokio::test]
 async fn ownership_is_durable_idempotent_and_cannot_be_replaced_or_deleted_by_another_host() {
     let directory = tempfile::tempdir().unwrap();
@@ -36,6 +49,7 @@ async fn ownership_is_durable_idempotent_and_cannot_be_replaced_or_deleted_by_an
         vec!["https://nginx.example.com".into()],
     )
     .unwrap();
+    legacy_reservation(&service);
     let app = service.clone().router();
     for _ in 0..2 {
         assert_eq!(
@@ -222,6 +236,7 @@ async fn real_http_proxy_preserves_paths_body_headers_redirects_and_offline_leas
         vec![origin.clone()],
     )
     .unwrap();
+    legacy_reservation(&service);
     let app = service.clone().router();
     assert_eq!(
         app.clone()
@@ -324,6 +339,7 @@ async fn websocket_messages_cross_the_public_subdomain_proxy() {
         vec![origin.clone()],
     )
     .unwrap();
+    legacy_reservation(&service);
     let app = service.router();
     assert_eq!(
         app.clone()
@@ -372,4 +388,239 @@ async fn websocket_messages_cross_the_public_subdomain_proxy() {
     assert_eq!(frame.reason.as_str(), "policy");
     proxy_task.abort();
     backend_task.abort();
+}
+
+fn dashboard_request(path: &str, body: serde_json::Value, origin: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("host", "firecrab.dev")
+        .header("origin", origin)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn issued_token(app: &Router) -> (String, String) {
+    let response = app
+        .clone()
+        .oneshot(dashboard_request(
+            "/dashboard/tokens",
+            serde_json::json!({}),
+            "https://firecrab.dev",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    let token = value["token"].as_str().unwrap().to_owned();
+    let public = value["publicUrl"].as_str().unwrap();
+    let name = public
+        .strip_prefix("https://")
+        .unwrap()
+        .strip_suffix(".firecrab.dev")
+        .unwrap()
+        .to_owned();
+    assert!(firecrab_helper_protocol::firecrab_tunnel::valid_token(
+        &token
+    ));
+    (token, name)
+}
+
+#[tokio::test]
+async fn dashboard_rejects_cross_origin_issuance_and_applies_registration_quota() {
+    let directory = tempfile::tempdir().unwrap();
+    let service =
+        Service::open(&directory.path().join("db"), "firecrab.dev".into(), vec![]).unwrap();
+    let app = service.router();
+    for origin in ["https://evil.test", "https://firecrab.dev:8080", "null"] {
+        assert_eq!(
+            app.clone()
+                .oneshot(dashboard_request(
+                    "/dashboard/tokens",
+                    serde_json::json!({}),
+                    origin
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(dashboard_request(
+                "/dashboard/tokens",
+                serde_json::json!({"subdomain":"chosen"}),
+                "https://firecrab.dev"
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("PUT", "unissued-address", OWNER, None))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for _ in 0..16 {
+        issued_token(&app).await;
+    }
+    assert_eq!(
+        app.oneshot(dashboard_request(
+            "/dashboard/tokens",
+            serde_json::json!({}),
+            "https://firecrab.dev"
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn issued_tokens_resolve_disconnect_reconnect_and_cannot_revive_after_revocation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("db");
+    let service = Service::open(
+        &path,
+        "firecrab.dev".into(),
+        vec!["https://nginx.example.com".into()],
+    )
+    .unwrap();
+    let app = service.clone().router();
+    let (token, name) = issued_token(&app).await;
+    let lookup = || {
+        Request::builder()
+            .uri("/v1/token")
+            .header("host", "tunnel.firecrab.dev")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = app.clone().oneshot(lookup()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains(&token));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["subdomain"],
+        name
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "PUT",
+                &name,
+                &token,
+                target("https://nginx.example.com")
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "PUT",
+                "another-name",
+                &token,
+                target("https://nginx.example.com")
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("DELETE", &name, &token, None))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "PUT",
+                &name,
+                &"b".repeat(64),
+                target("https://nginx.example.com")
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "PUT",
+                &name,
+                &token,
+                target("https://nginx.example.com")
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(dashboard_request(
+                "/dashboard/revoke",
+                serde_json::json!({"token":token}),
+                "https://firecrab.dev"
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    drop(app);
+    drop(service);
+    let reopened = Service::open(&path, "firecrab.dev".into(), vec![])
+        .unwrap()
+        .router();
+    assert_eq!(
+        reopened.clone().oneshot(lookup()).await.unwrap().status(),
+        StatusCode::GONE
+    );
+    assert_eq!(
+        reopened
+            .clone()
+            .oneshot(request("PUT", &name, &token, None))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::GONE
+    );
+    let response = reopened
+        .oneshot(
+            Request::builder()
+                .header("host", format!("{name}.firecrab.dev"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let db = Connection::open(path).unwrap();
+    let stored: Vec<u8> = db
+        .query_row(
+            "SELECT owner FROM connection_tokens WHERE name=?1",
+            [&name],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, Sha256::digest(token.as_bytes()).to_vec());
+    assert_ne!(stored, token.as_bytes());
 }

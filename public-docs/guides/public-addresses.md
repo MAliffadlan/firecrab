@@ -35,19 +35,18 @@ real Cloudflare API for domain lookup, tunnel creation and DNS registration.
 Existing DNS records are preserved. A real account token and domain permissions
 are required for that provider-managed setup.
 
-## Use a Quick Tunnel URL
+## Connect an existing Quick Tunnel
 
-1. Save the domain/path routes that should be reachable together.
-2. Open **Cloudflare Quick Tunnel → Add tunnel**.
-3. Enter a name and choose **Nginx routes** as the target.
-4. Select the saved route domain and click **Create temporary URL**.
-5. Open the issued `https://….trycloudflare.com` URL with the saved paths.
+The standalone Quick Tunnel panel is removed. Existing connectors and their API
+remain available. Get a connection token from
+[the dashboard](https://firecrab.dev/dashboard/), then open **Pipe → Firecrab
+Tunnel → Add fixed address**. Paste the token and choose an existing **Quick
+Tunnel**, or choose **Nginx routes** to publish a saved domain/path group through
+an automatically managed connector.
 
-The saved route domain may be a local name such as `pipe.test`. It selects the
-Nginx route group; the generated temporary hostname provides public access.
-Quick Tunnel needs no user account, API token or personal DNS record. Restarting
-a connector changes its URL. The list provides copy, edit, start, stop, restart
-and delete actions for each connector.
+The token supplies the fixed public address; no subdomain input is required.
+See [Firecrab Tunnel](firecrab-tunnel.md) for issuance, connection and revocation,
+and the [Quick Tunnel API](cloudflare-tunnel.md#api) for existing connector controls.
 
 ## CLI and verification
 

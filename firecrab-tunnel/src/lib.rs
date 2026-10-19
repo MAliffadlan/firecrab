@@ -1,4 +1,5 @@
 //! Durable address ownership and HTTP/WebSocket forwarding for both supported source types.
+mod dashboard;
 mod proxy;
 
 use axum::{
@@ -120,6 +121,11 @@ impl Service {
                  target TEXT,
                  enabled INTEGER NOT NULL,
                  seen INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS connection_tokens (
+                 owner BLOB PRIMARY KEY,
+                 name TEXT NOT NULL UNIQUE,
+                 revoked INTEGER NOT NULL DEFAULT 0
              );",
         )?;
         let origins = nginx_origins
@@ -160,6 +166,53 @@ impl Service {
     pub fn with_cloudflare_proxy(mut self) -> Self {
         self.trusted_cloudflare_proxy = true;
         self
+    }
+
+    /// Identify the peer for registration quotas without trusting remote proxy headers.
+    fn peer(&self, request: &Request<Body>) -> String {
+        let socket_peer = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|p| p.0.ip());
+        let forwarded =
+            if self.trusted_cloudflare_proxy && socket_peer.is_some_and(|ip| ip.is_loopback()) {
+                request
+                    .headers()
+                    .get("cf-connecting-ip")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<std::net::IpAddr>().ok())
+            } else {
+                None
+            };
+        forwarded
+            .or(socket_peer)
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "local".into())
+    }
+
+    /// Bound new reservations by registry capacity and per-peer hourly quota.
+    fn registration_limit(&self, peer: &str, count: i64) -> Option<Response> {
+        if count >= 10000 {
+            return Some(error(StatusCode::SERVICE_UNAVAILABLE, "registry_full"));
+        }
+        let mut limits = self.registrations.lock().unwrap();
+        let hour = now() / 3600;
+        limits.retain(|_, v| v.0 == hour);
+        if limits.len() >= 10000 {
+            return Some(error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "registration_rate_limit",
+            ));
+        }
+        let quota = limits.entry(peer.to_owned()).or_insert((hour, 0));
+        if quota.1 >= 16 {
+            return Some(error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "registration_rate_limit",
+            ));
+        }
+        quota.1 += 1;
+        None
     }
 
     /// Load an address lease; malformed target JSON becomes an offline target.
@@ -219,6 +272,9 @@ impl Service {
         if request.uri().path() == "/health" && request.method() == "GET" {
             return StatusCode::NO_CONTENT.into_response();
         }
+        if request.uri().path() == "/v1/token" && request.method() == "GET" {
+            return self.token_info(&request);
+        }
         let Some(name) = request
             .uri()
             .path()
@@ -242,24 +298,6 @@ impl Service {
         };
         let digest = Sha256::digest(token.as_bytes()).to_vec();
         let deleting = request.method() == "DELETE";
-        let socket_peer = request
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|p| p.0.ip());
-        let forwarded =
-            if self.trusted_cloudflare_proxy && socket_peer.is_some_and(|ip| ip.is_loopback()) {
-                request
-                    .headers()
-                    .get("cf-connecting-ip")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<std::net::IpAddr>().ok())
-            } else {
-                None
-            };
-        let peer = forwarded
-            .or(socket_peer)
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "local".into());
         let publish = if deleting {
             None
         } else {
@@ -283,6 +321,10 @@ impl Service {
         let Ok(transaction) = db.transaction() else {
             return error(StatusCode::SERVICE_UNAVAILABLE, "registry_unavailable");
         };
+        let issued = match dashboard::authorize(&transaction, &digest, &name, deleting) {
+            Ok(issued) => issued,
+            Err(status) => return error(status, "connection_token_rejected"),
+        };
         let owner: Option<Vec<u8>> = match transaction
             .query_row("SELECT owner FROM addresses WHERE name=?1", [&name], |r| {
                 r.get(0)
@@ -300,33 +342,15 @@ impl Service {
             }
         }
         if deleting {
-            if transaction
-                .execute("DELETE FROM addresses WHERE name=?1", [name])
-                .is_err()
-                || transaction.commit().is_err()
-            {
+            let sql = if issued {
+                "UPDATE addresses SET target=NULL,enabled=0,seen=0 WHERE name=?1"
+            } else {
+                "DELETE FROM addresses WHERE name=?1"
+            };
+            if transaction.execute(sql, [name]).is_err() || transaction.commit().is_err() {
                 return error(StatusCode::SERVICE_UNAVAILABLE, "registry_unavailable");
             }
             return StatusCode::NO_CONTENT.into_response();
-        }
-        if owner.is_none() {
-            let count: i64 = transaction
-                .query_row("SELECT count(*) FROM addresses", [], |r| r.get(0))
-                .unwrap_or(i64::MAX);
-            if count >= 10000 {
-                return error(StatusCode::SERVICE_UNAVAILABLE, "registry_full");
-            }
-            let mut limits = self.registrations.lock().unwrap();
-            let hour = now() / 3600;
-            limits.retain(|_, v| v.0 == hour);
-            if limits.len() >= 10000 {
-                return error(StatusCode::TOO_MANY_REQUESTS, "registration_rate_limit");
-            }
-            let quota = limits.entry(peer).or_insert((hour, 0));
-            if quota.1 >= 16 {
-                return error(StatusCode::TOO_MANY_REQUESTS, "registration_rate_limit");
-            }
-            quota.1 += 1;
         }
         let value = publish.unwrap();
         let target = value.target.map(|t| serde_json::to_string(&t).unwrap());
@@ -356,6 +380,9 @@ impl Service {
 /// Route control requests and forward only enabled, unexpired tenant targets.
 async fn dispatch(State(service): State<Service>, request: Request<Body>) -> Response {
     let hostname = host(&request).unwrap_or("").to_ascii_lowercase();
+    if hostname == service.domain {
+        return service.dashboard(request).await;
+    }
     if hostname == format!("tunnel.{}", service.domain) {
         return service.control(request).await;
     }

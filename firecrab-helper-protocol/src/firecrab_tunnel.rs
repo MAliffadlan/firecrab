@@ -55,18 +55,41 @@ pub enum Target {
     },
 }
 
+/// Secret dashboard token. Debug output must never reveal its contents.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConnectionToken(pub String);
+
+impl std::fmt::Debug for ConnectionToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ConnectionToken([REDACTED])")
+    }
+}
+
+/// Accept only the opaque 64-character hexadecimal token format issued by the dashboard.
+pub fn valid_token(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// One address change, applied to the helper's latest saved state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
-    /// Reserve or change an owned address.
+    /// Connect a dashboard-issued address to a local resource.
+    Connect {
+        /// Ownership secret, stored only on the managed host.
+        token: ConnectionToken,
+        /// Selected local resource.
+        target: Target,
+    },
+    /// Change an address already saved on this host.
     Save {
         /// Public DNS label.
         subdomain: String,
         /// Selected local resource.
         target: Target,
     },
-    /// Remove the remote reservation and an exclusively owned connector.
+    /// Disconnect an address and release its exclusively owned connector.
     Delete {
         /// Public DNS label.
         subdomain: String,
@@ -76,15 +99,21 @@ impl Request {
     /// Validate bounded input before privileged work.
     pub fn validate(&self) -> Result<(), String> {
         let name = match self {
-            Self::Save { subdomain, .. } | Self::Delete { subdomain } => subdomain,
+            Self::Save { subdomain, .. } | Self::Delete { subdomain } => Some(subdomain),
+            Self::Connect { token, .. } => {
+                if !valid_token(&token.0) {
+                    return Err("Enter a valid connection token from the Firecrab dashboard".into());
+                }
+                None
+            }
         };
-        if !subdomain(name) {
+        if name.is_some_and(|name| !subdomain(name)) {
             return Err(
                 "Use 3–48 lowercase letters, digits or hyphens; infrastructure names are reserved"
                     .into(),
             );
         }
-        if let Self::Save { target, .. } = self {
+        if let Self::Save { target, .. } | Self::Connect { target, .. } = self {
             match target {
                 Target::QuickTunnel { id } if id.is_nil() => {
                     return Err("Select an existing Quick Tunnel".into());
@@ -120,6 +149,31 @@ pub struct Address {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn connection_tokens_are_bounded_and_redacted_from_debug_output() {
+        let token = "a".repeat(64);
+        let request = Request::Connect {
+            token: ConnectionToken(token.clone()),
+            target: Target::Nginx {
+                host: "app.test".into(),
+            },
+        };
+        request.validate().unwrap();
+        assert!(!format!("{request:?}").contains(&token));
+        for invalid in [String::new(), "x".repeat(64), "a".repeat(65)] {
+            assert!(
+                Request::Connect {
+                    token: ConnectionToken(invalid),
+                    target: Target::Nginx {
+                        host: "app.test".into()
+                    }
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn names_and_target_intents_are_bounded_and_reject_registration_credentials() {
         for name in ["my-app", "abc", "api-service"] {

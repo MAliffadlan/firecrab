@@ -97,7 +97,11 @@ pub enum Command {
 pub enum AddressCommand {
     /// Connect an existing Quick Tunnel or all saved paths of an Nginx hostname.
     Connect {
-        subdomain: String,
+        #[arg(required_unless_present = "token_file", conflicts_with = "token_file")]
+        subdomain: Option<String>,
+        /// Read a dashboard token from a private file instead of process arguments.
+        #[arg(long, value_name = "FILE")]
+        token_file: Option<PathBuf>,
         #[arg(long, conflicts_with = "nginx", required_unless_present = "nginx")]
         quick: Option<uuid::Uuid>,
         #[arg(long, conflicts_with = "quick", required_unless_present = "quick")]
@@ -114,16 +118,38 @@ pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             let request = match command {
                 AddressCommand::Connect {
                     subdomain,
+                    token_file,
                     quick,
                     nginx,
-                } => Request::Save {
-                    subdomain,
-                    target: match (quick, nginx) {
+                } => {
+                    let target = match (quick, nginx) {
                         (Some(id), None) => Target::QuickTunnel { id },
                         (None, Some(host)) => Target::Nginx { host },
                         _ => return Err("Select either --quick or --nginx".into()),
-                    },
-                },
+                    };
+                    match (token_file, subdomain) {
+                        (Some(path), None) => {
+                            use std::io::Read;
+                            let mut token = String::new();
+                            std::fs::File::open(path)?
+                                .take(4097)
+                                .read_to_string(&mut token)?;
+                            Request::Connect {
+                                token: firecrab_helper_protocol::firecrab_tunnel::ConnectionToken(
+                                    token.trim().to_owned(),
+                                ),
+                                target,
+                            }
+                        }
+                        (None, Some(subdomain)) => Request::Save { subdomain, target },
+                        _ => {
+                            return Err(
+                                "Provide --token-file to connect, or a saved address to edit"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
                 AddressCommand::Delete { subdomain } => Request::Delete { subdomain },
             };
             request.validate()?;

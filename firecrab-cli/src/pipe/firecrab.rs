@@ -258,93 +258,13 @@ pub(super) fn manage_request(request: Request) -> Result<()> {
     super::host::require_root()?;
     request.validate()?;
     let _address_lock = address_lock()?;
-    let pipe_lock = super::host::lock()?;
     let mut store = read()?;
     match request {
-        Request::Save { subdomain, target } => {
-            if store.bindings.len() >= MAX_ADDRESSES
-                && !store.bindings.iter().any(|b| b.subdomain == subdomain)
-            {
-                return Err("At most 16 Firecrab addresses can be saved on one host".into());
-            }
-            let mut config = config()?;
-            let old = store
-                .bindings
-                .iter()
-                .find(|b| b.subdomain == subdomain)
-                .cloned();
-            let owned = matches!(target, Target::Nginx { .. });
-            let connector_id = match &target {
-                Target::QuickTunnel { id } => {
-                    let exists = config.quick_tunnels.iter().any(|e| e.id == *id)
-                        || (*id == firecrab_helper_protocol::pipe::LEGACY_QUICK_TUNNEL_ID
-                            && config.quick_tunnel.is_some());
-                    if !exists {
-                        return Err("Selected Quick Tunnel no longer exists".into());
-                    }
-                    *id
-                }
-                Target::Nginx { host } => {
-                    if !config.routes.iter().any(|r| r.host == *host) {
-                        return Err("Selected Nginx route no longer exists".into());
-                    }
-                    let id = old
-                        .as_ref()
-                        .filter(|b| {
-                            b.owned_connector
-                                && !store.bindings.iter().any(|peer| {
-                                    peer.subdomain != subdomain
-                                        && peer.connector_id == b.connector_id
-                                })
-                        })
-                        .map(|b| b.connector_id)
-                        .unwrap_or_else(Uuid::new_v4);
-                    config.quick_tunnels.retain(|e| e.id != id);
-                    config.quick_tunnels.push(QuickTunnelEntry {
-                        id,
-                        name: format!("Firecrab: {subdomain}"),
-                        target: QuickTunnelTarget::Routes { host: host.clone() },
-                    });
-                    id
-                }
-            };
-            if let Some(old) = &old
-                && old.connector_id != connector_id
-            {
-                release(&mut store, &mut config, old);
-            }
-            config.validate()?;
-            if owned {
-                super::engines::install()?;
-            }
-            apply(&config)?;
-            let owned = owned
-                || old
-                    .as_ref()
-                    .is_some_and(|b| b.owned_connector && b.connector_id == connector_id);
-            let mut binding = old.unwrap_or_else(|| Binding {
-                subdomain: subdomain.clone(),
-                target: target.clone(),
-                connector_id,
-                owned_connector: owned,
-                token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-                registered: false,
-                connected: false,
-                last_success: 0,
-                error: None,
-            });
-            binding.target = target;
-            binding.connector_id = connector_id;
-            binding.owned_connector = owned;
-            binding.connected = false;
-            store.bindings.retain(|b| b.subdomain != subdomain);
-            store.bindings.push(binding);
-            // Persist ownership before the network request, including a lost response.
-            write(&store)?;
-            drop(pipe_lock);
-            unit(true)?;
-            sync_locked(&mut store)?;
+        Request::Connect { token, target } => {
+            let subdomain = resolve_token(&store.endpoint, &token.0)?;
+            save(&mut store, subdomain, target, Some(token.0))?;
         }
+        Request::Save { subdomain, target } => save(&mut store, subdomain, target, None)?,
         Request::Delete { subdomain } => {
             let binding = store
                 .bindings
@@ -362,12 +282,14 @@ pub(super) fn manage_request(request: Request) -> Result<()> {
                     "Cannot reach the Firecrab connection service; address ownership is retained"
                 })?;
             if !(response.status().is_success()
+                || response.status().as_u16() == 410
                 || (response.status().as_u16() == 409 && !binding.registered))
             {
                 return Err(
                     "Connection service rejected address removal; ownership is retained".into(),
                 );
             }
+            let _pipe_lock = super::host::lock()?;
             let mut config = config()?;
             release(&mut store, &mut config, &binding);
             apply(&config)?;
@@ -380,6 +302,130 @@ pub(super) fn manage_request(request: Request) -> Result<()> {
     }
     Ok(())
 }
+/// Change one local target after resolving its dashboard-issued ownership token.
+fn save(store: &mut Store, subdomain: String, target: Target, token: Option<String>) -> Result<()> {
+    let pipe_lock = super::host::lock()?;
+    if store.bindings.len() >= MAX_ADDRESSES
+        && !store.bindings.iter().any(|b| b.subdomain == subdomain)
+    {
+        return Err("At most 16 Firecrab addresses can be saved on one host".into());
+    }
+    let mut config = config()?;
+    let old = store
+        .bindings
+        .iter()
+        .find(|b| b.subdomain == subdomain)
+        .cloned();
+    let token = token
+        .or_else(|| old.as_ref().map(|binding| binding.token.clone()))
+        .ok_or("Use a dashboard connection token to add a new Firecrab address")?;
+    let owned = matches!(target, Target::Nginx { .. });
+    let connector_id = match &target {
+        Target::QuickTunnel { id } => {
+            let exists = config.quick_tunnels.iter().any(|e| e.id == *id)
+                || (*id == firecrab_helper_protocol::pipe::LEGACY_QUICK_TUNNEL_ID
+                    && config.quick_tunnel.is_some());
+            if !exists {
+                return Err("Selected Quick Tunnel no longer exists".into());
+            }
+            *id
+        }
+        Target::Nginx { host } => {
+            if !config.routes.iter().any(|r| r.host == *host) {
+                return Err("Selected Nginx route no longer exists".into());
+            }
+            let id = old
+                .as_ref()
+                .filter(|b| {
+                    b.owned_connector
+                        && !store.bindings.iter().any(|peer| {
+                            peer.subdomain != subdomain && peer.connector_id == b.connector_id
+                        })
+                })
+                .map(|b| b.connector_id)
+                .unwrap_or_else(Uuid::new_v4);
+            config.quick_tunnels.retain(|e| e.id != id);
+            config.quick_tunnels.push(QuickTunnelEntry {
+                id,
+                name: format!("Firecrab: {subdomain}"),
+                target: QuickTunnelTarget::Routes { host: host.clone() },
+            });
+            id
+        }
+    };
+    if let Some(old) = &old
+        && old.connector_id != connector_id
+    {
+        release(store, &mut config, old);
+    }
+    config.validate()?;
+    if owned {
+        super::engines::install()?;
+    }
+    apply(&config)?;
+    let owned = owned
+        || old
+            .as_ref()
+            .is_some_and(|b| b.owned_connector && b.connector_id == connector_id);
+    let mut binding = old.unwrap_or_else(|| Binding {
+        subdomain: subdomain.clone(),
+        target: target.clone(),
+        connector_id,
+        owned_connector: owned,
+        token: token.clone(),
+        registered: false,
+        connected: false,
+        last_success: 0,
+        error: None,
+    });
+    binding.token = token;
+    binding.target = target;
+    binding.connector_id = connector_id;
+    binding.owned_connector = owned;
+    binding.connected = false;
+    store.bindings.retain(|b| b.subdomain != subdomain);
+    store.bindings.push(binding);
+    // Persist ownership before the network request, including a lost response.
+    write(store)?;
+    drop(pipe_lock);
+    unit(true)?;
+    sync_locked(store)?;
+    Ok(())
+}
+
+/// Verify a token remotely before changing local routes or saving its secret.
+fn resolve_token(endpoint: &str, token: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Address {
+        subdomain: String,
+        public_url: String,
+    }
+    let response = client()?
+        .get(format!("{endpoint}/v1/token"))
+        .header("host", "tunnel.firecrab.dev")
+        .bearer_auth(token)
+        .send()
+        .map_err(|_| "Cannot verify the token with the Firecrab connection service")?;
+    if !response.status().is_success() {
+        return Err(match response.status().as_u16() {
+            401 | 404 | 410 => "The connection token is invalid or revoked",
+            429 => "Token verification is rate limited; retry later",
+            _ => "The Firecrab connection service could not verify the token",
+        }
+        .into());
+    }
+    let address: Address = response
+        .json()
+        .map_err(|_| "Invalid token verification response")?;
+    if !firecrab_helper_protocol::firecrab_tunnel::subdomain(&address.subdomain)
+        || address.public_url != format!("https://{}.{}", address.subdomain, DOMAIN)
+    {
+        return Err("Invalid token verification response".into());
+    }
+    Ok(address.subdomain)
+}
+
 fn client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -429,6 +475,7 @@ fn sync_locked(store: &mut Store) -> Result<()> {
             Ok(response) => {
                 binding.error = Some(
                     match response.status().as_u16() {
+                        401 | 410 => "The connection token is invalid or revoked",
                         409 => "This subdomain belongs to another host",
                         429 => "Address registration limit reached; retry later",
                         400 => "Connection service rejected the target",

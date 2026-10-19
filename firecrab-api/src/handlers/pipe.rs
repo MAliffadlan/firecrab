@@ -168,29 +168,44 @@ pub async fn control_quick_tunnel(
     .await
 }
 
-/// Dashboard input for one stable public address; no ownership secret is accepted.
+/// Connect with a dashboard token, or edit an address whose secret is already saved.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FirecrabSaveRequest {
-    subdomain: String,
+    #[serde(default)]
+    subdomain: Option<String>,
+    #[serde(default)]
+    token: Option<firecrab_helper_protocol::firecrab_tunnel::ConnectionToken>,
     target: firecrab_helper_protocol::firecrab_tunnel::Target,
 }
 
-/// Save one stable Firecrab address without accepting ownership tokens or server URLs.
+/// Forward the connection secret only to the privileged helper; never return it.
 pub async fn save_firecrab_tunnel(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
     Json(request): Json<FirecrabSaveRequest>,
 ) -> Result<Json<Snapshot>, AppError> {
-    firecrab_request(
-        state,
-        request_id,
-        firecrab_helper_protocol::firecrab_tunnel::Request::Save {
-            subdomain: request.subdomain,
+    use firecrab_helper_protocol::firecrab_tunnel::Request;
+    let intent = match (request.token, request.subdomain) {
+        (Some(token), None) => Request::Connect {
+            token,
             target: request.target,
         },
-    )
-    .await
+        (None, Some(subdomain)) => Request::Save {
+            subdomain,
+            target: request.target,
+        },
+        _ => {
+            return Err(AppError::validation(
+                std::collections::BTreeMap::from([(
+                    "token".into(),
+                    "Provide a connection token or select a saved address to edit".into(),
+                )]),
+                request_id.0,
+            ));
+        }
+    };
+    firecrab_request(state, request_id, intent).await
 }
 /// Remove one owned address and its exclusively managed connector.
 pub async fn delete_firecrab_tunnel(

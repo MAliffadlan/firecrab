@@ -2190,7 +2190,3 @@ table.image-table .image-package-url a:hover {
 .named-tunnel-addresses .pipe-url > a { font: .85rem var(--font-mono); }
 
 .pipe-domain-note { margin: 0 0 1rem; color: var(--ink); font-size: .8rem; line-height: 1.6; }
-
-.firecrab-domain-input { display: flex; align-items: center; min-width: 0; gap: .4rem; }
-.firecrab-domain-input input { min-width: 0; flex: 1; }
-.firecrab-domain-input > span { flex: none; font: .75rem var(--font-mono); color: var(--shell); }

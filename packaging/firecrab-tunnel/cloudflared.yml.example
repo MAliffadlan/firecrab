@@ -2,6 +2,9 @@
 tunnel: REPLACE-WITH-OPERATOR-TUNNEL-UUID
 credentials-file: /etc/cloudflared/firecrab-connection.json
 ingress:
+  - hostname: firecrab.dev
+    path: ^/dashboard(/.*)?$
+    service: http://127.0.0.1:8790
   - hostname: tunnel.firecrab.dev
     service: http://127.0.0.1:8790
   - hostname: "*.firecrab.dev"
