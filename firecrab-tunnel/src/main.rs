@@ -2,19 +2,23 @@
 use clap::Parser;
 use std::{net::SocketAddr, path::PathBuf};
 
+/// Operator settings for the listener, durable registry and trusted upstreams.
 #[derive(Parser)]
 struct Options {
     /// Read CF-Connecting-IP only from a local cloudflared connector.
     #[arg(long, env = "FIRECRAB_TUNNEL_TRUST_CLOUDFLARE_PROXY")]
     trust_cloudflare_proxy: bool,
+    /// Socket address on which the service accepts HTTP requests.
     #[arg(long, env = "FIRECRAB_TUNNEL_LISTEN", default_value = "127.0.0.1:8790")]
     listen: SocketAddr,
+    /// SQLite file that retains address ownership across restarts.
     #[arg(
         long,
         env = "FIRECRAB_TUNNEL_DATABASE",
         default_value = "firecrab-tunnel.db"
     )]
     database: PathBuf,
+    /// Public DNS suffix served by this registry.
     #[arg(long, env = "FIRECRAB_TUNNEL_DOMAIN", default_value = "firecrab.dev")]
     domain: String,
     /// Explicitly trusted direct Nginx origins; otherwise only HTTPS Quick Tunnel origins are accepted.
@@ -22,6 +26,7 @@ struct Options {
     nginx_origin: Vec<String>,
 }
 
+/// Start the registry and proxy, then drain the server on Ctrl-C.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Options::parse();

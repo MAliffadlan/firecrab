@@ -20,53 +20,76 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// Seconds a published target stays live without a host refresh.
 const LEASE_SECONDS: i64 = 180;
 
 /// One connection-service instance. SQLite serializes ownership and target updates.
 #[derive(Clone)]
 pub struct Service {
+    /// Accept the client-IP header only from a loopback connector.
     trusted_cloudflare_proxy: bool,
+    /// Durable address ownership and the latest target lease.
     db: Arc<Mutex<Connection>>,
+    /// Public DNS suffix used for tenant and control hostnames.
     domain: String,
+    /// Operator-approved direct HTTP or HTTPS origins.
     nginx_origins: Vec<String>,
+    /// New-address counts by peer IP, with each count scoped to a Unix hour.
     registrations: Arc<Mutex<HashMap<String, (i64, u32)>>>,
+    /// Shared upstream HTTP client with redirects disabled.
     client: reqwest::Client,
 }
 
+/// Validated forwarding destination stored as JSON in the registry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Target {
+    /// Source type that determines whether the Nginx allowlist applies.
     kind: Kind,
+    /// Origin URL without credentials, paths, queries or fragments.
     url: String,
 }
+/// Supported source types for a published address.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Kind {
+    /// Anonymous HTTPS origin under trycloudflare.com.
     QuickTunnel,
+    /// Nginx source served through a connector or an approved direct origin.
     Nginx,
 }
+/// Authenticated request to refresh an address lease and its target.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Publish {
+    /// Current forwarding destination, absent when no target is published.
     target: Option<Target>,
+    /// Whether the owner permits traffic to this address.
     enabled: bool,
 }
+/// Registry snapshot used to decide whether an address can receive traffic.
 #[derive(Debug)]
 struct Binding {
+    /// Current forwarding destination, absent when no target is published.
     target: Option<Target>,
+    /// Whether the owner permits traffic to this address.
     enabled: bool,
+    /// Unix timestamp of the latest successful publication.
     seen: i64,
 }
 
+/// Current Unix time in seconds for lease and registration limits.
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
 }
+/// Return a stable JSON error code with the selected HTTP status.
 fn error(status: StatusCode, code: &str) -> Response {
     (status, axum::Json(serde_json::json!({"error":code}))).into_response()
 }
+/// Read the request Host header without its optional port.
 fn host(request: &Request<Body>) -> Option<&str> {
     request
         .headers()
@@ -139,6 +162,7 @@ impl Service {
         self
     }
 
+    /// Load an address lease; malformed target JSON becomes an offline target.
     fn binding(&self, name: &str) -> rusqlite::Result<Option<Binding>> {
         self.db
             .lock()
@@ -158,6 +182,7 @@ impl Service {
             .optional()
     }
 
+    /// Allow bounded Quick Tunnel origins or explicitly approved Nginx origins.
     fn valid_target(&self, target: &Target) -> bool {
         let Ok(url) = reqwest::Url::parse(&target.url) else {
             return false;
@@ -189,6 +214,7 @@ impl Service {
                     .contains(&url.origin().ascii_serialization()))
     }
 
+    /// Authenticate ownership before publishing, refreshing or deleting an address.
     async fn control(&self, request: Request<Body>) -> Response {
         if request.uri().path() == "/health" && request.method() == "GET" {
             return StatusCode::NO_CONTENT.into_response();
@@ -327,6 +353,7 @@ impl Service {
     }
 }
 
+/// Route control requests and forward only enabled, unexpired tenant targets.
 async fn dispatch(State(service): State<Service>, request: Request<Body>) -> Response {
     let hostname = host(&request).unwrap_or("").to_ascii_lowercase();
     if hostname == format!("tunnel.{}", service.domain) {

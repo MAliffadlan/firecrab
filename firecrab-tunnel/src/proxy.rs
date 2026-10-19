@@ -11,6 +11,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::{Message as UpstreamMessage, client::IntoClientRequest};
 
+/// Remove hop-by-hop headers and headers nominated by Connection.
 fn clean(headers: &mut HeaderMap) {
     let nominated = headers
         .get("connection")
@@ -37,6 +38,7 @@ fn clean(headers: &mut HeaderMap) {
     }
 }
 
+/// Stream HTTP or WebSocket traffic while preserving the public forwarding host.
 pub(super) async fn forward(
     client: reqwest::Client,
     request: Request<Body>,
