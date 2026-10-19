@@ -242,7 +242,6 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
             get(handlers::pipe::inspect).put(handlers::pipe::apply),
         )
         .route("/api/pipe/disable", post(handlers::pipe::disable))
-        .route("/api/pipe/service", post(handlers::pipe::control))
         // GET and POST share one path, matching this router's existing shape
         // for "read this resource / start work on it" pairs such as
         // `/api/images/{alias}/install`.
@@ -388,10 +387,11 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
             enforce_limits,
         ));
 
-    // Recovery and anonymous tunnel setup retain the REST protections except
+    // Recovery, tunnel setup and service controls retain the REST protections except
     // the short deadline. Their helper clients have their own bounded waits;
     // dropping setup during engine installation would return an early 504.
     let recovery = Router::new()
+        .route("/api/pipe/service", post(handlers::pipe::control))
         .route(
             "/api/pipe/cloudflare/zones",
             post(handlers::cloudflare::zones),
@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipe_service_preserves_origin_checks_and_forwards_only_the_selected_action() {
+    async fn pipe_service_preserves_origin_checks_and_outlasts_the_rest_deadline() {
         use firecrab_helper_protocol::framing::{read_frame, write_frame};
         use firecrab_helper_protocol::network::{
             NetworkRequest, NetworkRequestEnvelope, NetworkResponseEnvelope,
@@ -1016,6 +1016,7 @@ mod tests {
                         request: Operation::Control { request }
                     }
                 );
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 write_frame(
                     &mut stream,
                     &NetworkResponseEnvelope {
@@ -1031,7 +1032,8 @@ mod tests {
         });
         let mut state = test_state(directory.path()).await;
         state.network = crate::network::NetworkClient::with_socket_path(socket);
-        let config = HttpConfig::from_values("127.0.0.1:3000", "", false, false).unwrap();
+        let mut config = HttpConfig::from_values("127.0.0.1:3000", "", false, false).unwrap();
+        config.request_timeout = Duration::from_millis(10);
         let app = build_router(state, &config);
         for (origin, expected_status) in [
             (
