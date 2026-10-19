@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent } from "react";
 import { applyPipe, controlPipeService, getPipe, type PipeConfig, type PipeRoute, type PipeService, type PipeServiceAction, type PipeSnapshot } from "../api/pipe";
 import { useI18n } from "../i18n";
+import CloudflareConnect from "./CloudflareConnect";
 import NamedCloudflareTunnel from "./NamedCloudflareTunnel";
 import FirecrabTunnel from "./FirecrabTunnel";
 import type { VmResponse } from "../bindings";
@@ -26,6 +27,7 @@ export default function Pipe({ vms, vmsLoading, vmsUnavailable, onUnsavedChange 
   const [path, setPath] = useState("/");
   const [upstreams, setUpstreams] = useState<string[]>([]);
   const [editing, setEditing] = useState<number | "new" | null>(null);
+  const [quickDirty, setQuickDirty] = useState(false);
   const [namedDirty, setNamedDirty] = useState(false);
   const [firecrabDirty, setFirecrabDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +42,7 @@ export default function Pipe({ vms, vmsLoading, vmsUnavailable, onUnsavedChange 
   const preserved = typeof editing === "number" ? draft.routes[editing]?.upstreams ?? [] : [];
   const appsReady = !vmsLoading && !vmsUnavailable && canUsePipeApps(apps, upstreams, preserved);
   const editorPending = typeof editing === "number" || !!host.trim() || path !== "/" || upstreams.length > 0;
-  const hasUnsavedChanges = dirty || editorPending || namedDirty || firecrabDirty || (listenInput !== null && listenInput !== draft.listen);
+  const hasUnsavedChanges = dirty || editorPending || quickDirty || namedDirty || firecrabDirty || (listenInput !== null && listenInput !== draft.listen);
   const saveDisabled = busy || !snapshot?.nginxAvailable || (listenInput !== null && !listenInput.trim()) || (editorOpen && (!host.trim() || !path.startsWith("/") || !appsReady)) || ((draft.tunnel !== null || !!draft.quickTunnel || !!snapshot?.config?.quickTunnels?.length) && !snapshot.cloudflaredAvailable);
 
   useEffect(() => {
@@ -173,6 +175,17 @@ export default function Pipe({ vms, vmsLoading, vmsUnavailable, onUnsavedChange 
 
     <FirecrabTunnel snapshot={snapshot} busy={busy}
       onBusy={value => { mutating.current = value; setBusy(value); revision.current++; }} onUnsavedChange={setFirecrabDirty}
+      onConnected={next => {
+        setSnapshot(next);
+        if (next.config) {
+          const { tunnel, quickTunnel, quickTunnels } = next.config;
+          setDraft(current => ({ ...current, tunnel, quickTunnel, quickTunnels }));
+        }
+        setError(null);
+      }} />
+
+    <CloudflareConnect config={snapshot?.config ?? EMPTY} snapshot={snapshot} busy={busy} apps={apps} vmsLoading={vmsLoading} vmsUnavailable={vmsUnavailable}
+      onBusy={value => { mutating.current = value; setBusy(value); revision.current++; }} onUnsavedChange={setQuickDirty}
       onConnected={next => {
         setSnapshot(next);
         if (next.config) {

@@ -63,7 +63,7 @@ const CONNECTION_TOKEN = "a".repeat(64);
 async function expectExistingQuickChoice(page: Page, name: string, id: string) {
   const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
   await panel.getByRole("button", { name: "Add fixed address", exact: true }).click();
-  await expect(panel.getByLabel("Quick Tunnel", { exact: true }).locator(`option[value="${id}"]`)).toHaveText(name);
+  await expect(panel.getByLabel("Connection target", { exact: true }).locator(`option[value="${id}"]`)).toHaveText(name === "Quick Tunnel" ? name : "Quick Tunnel · " + name);
   await panel.getByRole("button", { name: "Cancel", exact: true }).click();
 }
 
@@ -205,12 +205,13 @@ test.describe("Pipe dashboard @dashboard", () => {
     const mock = await open(page, { quickTunnels: [webTunnel], savedRoutes: groupedRoutes });
     const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
     await panel.getByRole("button", { name: "Add fixed address" }).click();
-    await expect(page.getByRole("region", { name: "Quick Tunnel", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Quick Tunnel", exact: true })).toBeVisible();
+    await expect(panel.getByLabel("Quick Tunnel", { exact: true })).toHaveCount(0);
     await expect(panel.getByLabel("Subdomain", { exact: true })).toHaveCount(0);
     await expect(panel.getByRole("link", { name: "Get a token from the dashboard", exact: true })).toHaveAttribute("href", "https://firecrab.dev/dashboard/");
     await expect(panel.getByLabel("Connection token", { exact: true })).toHaveAttribute("type", "password");
     await panel.getByLabel("Connection token", { exact: true }).fill(CONNECTION_TOKEN);
-    await panel.getByLabel("Quick Tunnel", { exact: true }).selectOption(QUICK_ID);
+    await panel.getByLabel("Connection target", { exact: true }).selectOption(QUICK_ID);
     await panel.getByRole("button", { name: "Connect address", exact: true }).click();
     const url = "https://my-app.firecrab.dev";
     await expect(panel.getByRole("link", { name: url, exact: true })).toBeVisible();
@@ -260,7 +261,7 @@ test.describe("Pipe dashboard @dashboard", () => {
     const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
     await panel.getByRole("button", { name: "Add fixed address" }).click();
     await panel.getByLabel("Connection token", { exact: true }).fill(CONNECTION_TOKEN);
-    await panel.getByLabel("Quick Tunnel", { exact: true }).selectOption(QUICK_ID);
+    await panel.getByLabel("Connection target", { exact: true }).selectOption(QUICK_ID);
     await panel.getByRole("button", { name: "Connect address", exact: true }).click();
     await expect(panel.getByRole("alert")).toContainText("Connection token is invalid or revoked");
     await expect(panel.getByLabel("Connection token", { exact: true })).toHaveValue(CONNECTION_TOKEN);
@@ -736,15 +737,15 @@ test.describe("Pipe dashboard @dashboard", () => {
     expect(mock.writes).toHaveLength(0);
   });
 
-  test("keeps saved Quick Tunnel selections when the standalone panel is absent", async ({ page }) => {
+  test("keeps Cloudflare Quick Tunnel controls and the Firecrab target choice", async ({ page }) => {
     const mock = await open(page, { configuredLegacyQuick: true });
-    await expect(page.getByRole("region", { name: "Quick Tunnel", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Quick Tunnel", exact: true }).getByRole("button", { name: "Add tunnel", exact: true })).toBeVisible();
     await expectExistingQuickChoice(page, "Quick Tunnel", LEGACY_QUICK_ID);
     expect(mock.quickSaves).toHaveLength(0);
     expect(mock.quickDeletes).toHaveLength(0);
   });
 
-  test("keeps referenced route protection after removing the Quick Tunnel panel", async ({ page }) => {
+  test("keeps referenced route protection with independent Quick Tunnel controls", async ({ page }) => {
     const routed: QuickEntry = { id: QUICK_ID, name: "Routed web", target: { type: "routes", host: "app.example.com" } };
     const mock = await open(page, { quickTunnels: [routed] });
     const routes = page.getByRole("region", { name: "Routes", exact: true });
@@ -759,8 +760,9 @@ test.describe("Pipe dashboard @dashboard", () => {
     await open(page, { savedRoutes: groupedRoutes });
     const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
     await panel.getByRole("button", { name: "Add fixed address" }).click();
-    await expect(panel.getByLabel("Connection target").locator("option")).toHaveText(["Quick Tunnel", "Nginx routes"]);
-    await expect(panel.getByLabel("Quick Tunnel", { exact: true })).toBeDisabled();
+    await expect(panel.getByLabel("Connection target").locator("option")).toHaveText(["Select a target", "Quick Tunnel", "Nginx routes"]);
+    await expect(panel.getByRole("option", { name: "Quick Tunnel", exact: true })).toBeDisabled();
+    await expect(panel.getByLabel("Quick Tunnel", { exact: true })).toHaveCount(0);
     await panel.getByLabel("Connection target").selectOption("nginx");
     await panel.getByLabel("Nginx route domain").selectOption("app.example.com");
     await expect(panel.getByRole("button", { name: "Connect address" })).toBeDisabled();
@@ -865,15 +867,15 @@ test.describe("Named Cloudflare Tunnel @dashboard", () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await panel.screenshot({ path: info.outputPath("named-tunnel-form-mobile-ko.png") });
     await expect(page.getByText("저장하지 않은 변경", { exact: true })).toHaveCount(0);
-    await expect(page.getByRole("region", { name: "Quick Tunnel", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Quick Tunnel", exact: true })).toBeVisible();
   });
 });
 
 
-test("preserves an existing legacy connector without displaying its standalone panel @dashboard", async ({ page }) => {
+test("preserves an existing legacy connector in both tunnel panels @dashboard", async ({ page }) => {
   const mock = await open(page, { configuredLegacyQuick: true, savedRoutes: groupedRoutes });
   await expectExistingQuickChoice(page, "Quick Tunnel", LEGACY_QUICK_ID);
-  await expect(page.getByRole("region", { name: "Quick Tunnel", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Quick Tunnel", exact: true })).toBeVisible();
   expect(mock.quickSaves).toHaveLength(0);
   expect(mock.quickDeletes).toHaveLength(0);
 });

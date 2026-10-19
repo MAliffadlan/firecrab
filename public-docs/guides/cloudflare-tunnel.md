@@ -20,16 +20,16 @@ On macOS and Windows, the connector runs inside the managed Linux guest.
 
 ## Existing connectors and Firecrab tokens
 
-The standalone Quick Tunnel panel is removed. Existing connector services and
-management APIs remain available. In **Pipe → Firecrab Tunnel**, paste a token
+Use **Pipe → Cloudflare Quick Tunnel** to create, edit and control temporary
+connectors. In **Pipe → Firecrab Tunnel**, paste a token
 from [the Firecrab dashboard](https://firecrab.dev/dashboard/) and select an
 existing **Quick Tunnel** or saved **Nginx routes**. See the
 [Firecrab Tunnel guide](firecrab-tunnel.md) for token issuance and revocation.
 
 Quick Tunnel selection reuses the existing connector's app pool or route group.
 Nginx selection automatically manages a dedicated connector for every saved path
-of its selected domain. A legacy single connector remains selectable. Removing
-the old panel does not stop or delete existing connector services.
+of its selected domain. A legacy single connector remains selectable. Choose the
+connector in **Connection target**; there is no separate Quick Tunnel input.
 
 Use the API below to provision or manage independent Quick Tunnels. Each has a
 name, target, unit and temporary public URL. Saving an existing ID changes only

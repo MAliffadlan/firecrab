@@ -134,9 +134,9 @@ Polling preserves local edits. API connection failure clears stale service badge
 
 Open [the connection dashboard](https://firecrab.dev/dashboard/) to issue a token.
 Under **Firecrab Tunnel → Add fixed address**, paste it and select an existing
-**Quick Tunnel** or saved **Nginx routes**. There is no subdomain input and no
-standalone Quick Tunnel panel. Existing connectors and their management API
-remain available; they are not stopped or deleted by the panel change.
+**Quick Tunnel** or saved **Nginx routes** in **Connection target**. There is no
+subdomain input or separate Quick Tunnel input in Firecrab Tunnel. Use the
+**Cloudflare Quick Tunnel** panel to create and manage temporary connectors.
 
 The public address is assigned by the token service. Appending a saved path uses
 that route group; if it has `/api` but no `/`, the base address can return 404.

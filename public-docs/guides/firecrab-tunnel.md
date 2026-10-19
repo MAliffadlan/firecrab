@@ -38,16 +38,17 @@ must set an appropriate edge abuse policy before public rollout.
 1. Open **Pipe → Firecrab Tunnel → Add fixed address**.
 2. Paste the dashboard token into **Connection token**.
 3. Select one of the two connection targets:
-   - **Quick Tunnel**: select an existing connector.
+   - **Quick Tunnel**: select the existing connector directly in **Connection target**.
    - **Nginx routes**: select a saved route domain.
 4. Select **Connect address**. The host verifies the token with the connection
    service before changing local routes or saving its ownership secret.
 5. Wait for **Connected**, then open the returned public address and app paths.
 
-The separate Quick Tunnel panel is removed. Existing connectors, management APIs
-and saved targets remain available. The Firecrab Tunnel selector includes legacy
-single Quick Tunnels. If there are no existing connectors, select Nginx routes
-or provision a connector using the [Quick Tunnel API](cloudflare-tunnel.md#api).
+The **Cloudflare Quick Tunnel** panel creates and manages temporary connectors.
+Firecrab Tunnel has no separate Quick Tunnel input; its **Connection target**
+list includes each existing connector, including legacy single Quick Tunnels.
+If there are no connectors, create one in **Cloudflare Quick Tunnel** or select
+Nginx routes.
 
 Nginx mode publishes every saved path and app pool for its hostname. It manages
 a dedicated private connector automatically. Quick Tunnel mode reuses the

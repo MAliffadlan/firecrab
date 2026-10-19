@@ -37,11 +37,11 @@ are required for that provider-managed setup.
 
 ## Connect an existing Quick Tunnel
 
-The standalone Quick Tunnel panel is removed. Existing connectors and their API
-remain available. Get a connection token from
+Create and manage temporary connectors in **Pipe → Cloudflare Quick Tunnel**.
+To give an existing connector a fixed address, get a connection token from
 [the dashboard](https://firecrab.dev/dashboard/), then open **Pipe → Firecrab
 Tunnel → Add fixed address**. Paste the token and choose an existing **Quick
-Tunnel**, or choose **Nginx routes** to publish a saved domain/path group through
+Tunnel** in **Connection target**, or choose **Nginx routes** to publish a saved domain/path group through
 an automatically managed connector.
 
 The token supplies the fixed public address; no subdomain input is required.
