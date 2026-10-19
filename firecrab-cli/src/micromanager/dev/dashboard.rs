@@ -131,9 +131,22 @@ fn lock(home: &Path) -> Result<fs::File, Error> {
         .create(true)
         .truncate(false)
         .open(home.join("runtime/dev-dashboard.lock"))?;
-    file.try_lock_exclusive()
-        .map_err(|_| Error::Failed("another development dashboard operation is running".into()))?;
-    Ok(file)
+    // A process forked elsewhere can briefly share the lock until its exec closes the fd.
+    let started = Instant::now();
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(error) if error.kind() != fs2::lock_contended_error().kind() => {
+                return Err(error.into());
+            }
+            Err(_) if started.elapsed() > Duration::from_secs(1) => {
+                return Err(Error::Failed(
+                    "another development dashboard operation is running".into(),
+                ));
+            }
+            Err(_) => thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 /// Only a successful connection proves that a server is listening.
