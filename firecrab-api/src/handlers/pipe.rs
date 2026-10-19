@@ -9,7 +9,7 @@ use firecrab_helper_protocol::pipe::{
 };
 
 use crate::error::AppError;
-use crate::network::NetworkClient;
+use crate::network::{NetworkClient, NetworkError};
 use crate::server::RequestId;
 use crate::state::AppState;
 
@@ -19,8 +19,12 @@ pub(super) async fn call(
     operation: Operation,
     request_id: RequestId,
 ) -> Result<Json<Snapshot>, AppError> {
+    let firecrab = matches!(&operation, Operation::ManageFirecrabTunnel { .. });
     client.pipe(operation).await.map(Json).map_err(|error| {
         tracing::warn!(%error, "pipe helper command failed");
+        if firecrab && let Some(response) = firecrab_error(&error, request_id.0) {
+            return response;
+        }
         AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "pipe_unavailable",
@@ -28,6 +32,65 @@ pub(super) async fn call(
             request_id.0,
         )
     })
+}
+
+// Only fixed, non-secret connection errors may cross the helper boundary.
+// Unrecognized command output retains the generic failure response.
+fn firecrab_error(error: &NetworkError, request_id: uuid::Uuid) -> Option<AppError> {
+    use firecrab_helper_protocol::network::HelperFailure;
+    let NetworkError::Helper(HelperFailure::Internal { detail }) = error else {
+        return None;
+    };
+    let detail = detail.trim();
+    let detail = detail.strip_prefix("[ERROR] ").unwrap_or(detail);
+    for (message, status) in [
+        (
+            "The connection token is invalid or revoked",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "Selected Quick Tunnel no longer exists",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "Selected Nginx route no longer exists",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "The Firecrab address is suspended; check the dashboard",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "Token verification is rate limited; retry later",
+            StatusCode::TOO_MANY_REQUESTS,
+        ),
+        (
+            "Cannot verify the token with the Firecrab connection service",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "Firecrab connection API is unavailable; check the service deployment",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "The Firecrab connection service could not verify the token",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "Invalid token verification response",
+            StatusCode::BAD_GATEWAY,
+        ),
+    ] {
+        if detail == message {
+            return Some(AppError::new(
+                status,
+                "firecrab_connection_failed",
+                message,
+                request_id,
+            ));
+        }
+    }
+    None
 }
 
 /// Return the persisted manifest and live independent-unit states.

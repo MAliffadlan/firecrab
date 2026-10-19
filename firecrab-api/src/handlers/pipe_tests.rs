@@ -4,6 +4,37 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 
 #[tokio::test]
+async fn connection_failures_expose_only_fixed_safe_messages() {
+    use firecrab_helper_protocol::network::HelperFailure;
+    for (message, status) in [
+        (
+            "The connection token is invalid or revoked",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "Firecrab connection API is unavailable; check the service deployment",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let error = NetworkError::Helper(HelperFailure::Internal {
+            detail: format!("[ERROR] {message}\n"),
+        });
+        let response = firecrab_error(&error, uuid::Uuid::new_v4())
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), status);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"]["message"], message);
+    }
+    let error = NetworkError::Helper(HelperFailure::Internal {
+        detail: "[ERROR] private-command-output-and-secret".into(),
+    });
+    assert!(firecrab_error(&error, uuid::Uuid::new_v4()).is_none());
+}
+
+#[tokio::test]
 async fn invalid_config_credentials_and_oversized_requests_fail_before_helper_calls() {
     let config =
         json!({"routes":[{"host":"app.example.com","upstreams":["127.0.0.1:9000"]}],"tunnel":null});

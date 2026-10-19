@@ -20,6 +20,13 @@ use uuid::Uuid;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const UNIT: &str = "firecrab-address-updater.service";
 const TEMPLATE: &str = include_str!("../../../packaging/systemd/firecrab-address-updater.service");
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RegistryProtocol {
+    #[default]
+    AddressesV1,
+    RegisterV1,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Binding {
@@ -37,6 +44,8 @@ struct Binding {
 #[serde(deny_unknown_fields)]
 struct Store {
     endpoint: String,
+    #[serde(default)]
+    protocol: RegistryProtocol,
     bindings: Vec<Binding>,
 }
 fn seconds() -> u64 {
@@ -80,6 +89,7 @@ fn read() -> Result<Store> {
         endpoint: endpoint(
             &std::env::var("FIRECRAB_TUNNEL_ENDPOINT").unwrap_or_else(|_| ENDPOINT.into()),
         )?,
+        protocol: RegistryProtocol::default(),
         bindings: vec![],
     })
 }
@@ -261,7 +271,8 @@ pub(super) fn manage_request(request: Request) -> Result<()> {
     let mut store = read()?;
     match request {
         Request::Connect { token, target } => {
-            let subdomain = resolve_token(&store.endpoint, &token.0)?;
+            let (subdomain, protocol) = resolve_token(&store.endpoint, &token.0)?;
+            store.protocol = protocol;
             save(&mut store, subdomain, target, Some(token.0))?;
         }
         Request::Save { subdomain, target } => save(&mut store, subdomain, target, None)?,
@@ -272,22 +283,25 @@ pub(super) fn manage_request(request: Request) -> Result<()> {
                 .find(|b| b.subdomain == subdomain)
                 .cloned()
                 .ok_or("Firecrab address was not found")?;
-            let client = client()?;
-            let response = client
-                .delete(format!("{}/v1/addresses/{subdomain}", store.endpoint))
-                .header("host", "tunnel.firecrab.dev")
-                .bearer_auth(&binding.token)
-                .send()
-                .map_err(|_| {
-                    "Cannot reach the Firecrab connection service; address ownership is retained"
-                })?;
-            if !(response.status().is_success()
-                || response.status().as_u16() == 410
-                || (response.status().as_u16() == 409 && !binding.registered))
-            {
-                return Err(
-                    "Connection service rejected address removal; ownership is retained".into(),
-                );
+            // Dashboard-owned reservations are revoked only in the dashboard.
+            // Local removal stops their updater and exclusively owned connector.
+            if store.protocol == RegistryProtocol::AddressesV1 {
+                let response = client()?
+                    .delete(format!("{}/v1/addresses/{subdomain}", store.endpoint))
+                    .header("host", "tunnel.firecrab.dev")
+                    .bearer_auth(&binding.token)
+                    .send()
+                    .map_err(|_| {
+                        "Cannot reach the Firecrab connection service; address ownership is retained"
+                    })?;
+                if !(response.status().is_success()
+                    || response.status().as_u16() == 410
+                    || (response.status().as_u16() == 409 && !binding.registered))
+                {
+                    return Err(
+                        "Connection service rejected address removal; ownership is retained".into(),
+                    );
+                }
             }
             let _pipe_lock = super::host::lock()?;
             let mut config = config()?;
@@ -394,36 +408,79 @@ fn save(store: &mut Store, subdomain: String, target: Target, token: Option<Stri
 }
 
 /// Verify a token remotely before changing local routes or saving its secret.
-fn resolve_token(endpoint: &str, token: &str) -> Result<String> {
+fn resolve_token(endpoint: &str, token: &str) -> Result<(String, RegistryProtocol)> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Address {
         subdomain: String,
         public_url: String,
     }
-    let response = client()?
-        .get(format!("{endpoint}/v1/token"))
+    #[derive(Deserialize)]
+    struct Registration {
+        name: String,
+        url: String,
+        heartbeat_url: String,
+        suspended: bool,
+    }
+    let client = client()?;
+    // The deployed dashboard resolves ownership through registration. An empty
+    // body verifies its token without publishing or changing a tunnel URL.
+    let response = client
+        .post(format!("{endpoint}/v1/register"))
         .header("host", "tunnel.firecrab.dev")
         .bearer_auth(token)
+        .json(&serde_json::json!({}))
         .send()
         .map_err(|_| "Cannot verify the token with the Firecrab connection service")?;
+    let (response, protocol) = if matches!(response.status().as_u16(), 404 | 405) {
+        // Retain compatibility with the standalone Rust registry and saved hosts.
+        (
+            client
+                .get(format!("{endpoint}/v1/token"))
+                .header("host", "tunnel.firecrab.dev")
+                .bearer_auth(token)
+                .send()
+                .map_err(|_| "Cannot verify the token with the Firecrab connection service")?,
+            RegistryProtocol::AddressesV1,
+        )
+    } else {
+        (response, RegistryProtocol::RegisterV1)
+    };
     if !response.status().is_success() {
         return Err(match response.status().as_u16() {
-            401 | 404 | 410 => "The connection token is invalid or revoked",
+            401 | 410 => "The connection token is invalid or revoked",
+            404 | 405 => "Firecrab connection API is unavailable; check the service deployment",
             429 => "Token verification is rate limited; retry later",
             _ => "The Firecrab connection service could not verify the token",
         }
         .into());
     }
-    let address: Address = response
-        .json()
-        .map_err(|_| "Invalid token verification response")?;
+    let address = match protocol {
+        RegistryProtocol::AddressesV1 => response
+            .json::<Address>()
+            .map_err(|_| "Invalid token verification response")?,
+        RegistryProtocol::RegisterV1 => {
+            let registration: Registration = response
+                .json()
+                .map_err(|_| "Invalid token verification response")?;
+            if registration.heartbeat_url != format!("{}/__firecrab/heartbeat", registration.url) {
+                return Err("Invalid token verification response".into());
+            }
+            if registration.suspended {
+                return Err("The Firecrab address is suspended; check the dashboard".into());
+            }
+            Address {
+                subdomain: registration.name,
+                public_url: registration.url,
+            }
+        }
+    };
     if !firecrab_helper_protocol::firecrab_tunnel::subdomain(&address.subdomain)
         || address.public_url != format!("https://{}.{}", address.subdomain, DOMAIN)
     {
         return Err("Invalid token verification response".into());
     }
-    Ok(address.subdomain)
+    Ok((address.subdomain, protocol))
 }
 
 fn client() -> Result<reqwest::blocking::Client> {
@@ -450,19 +507,60 @@ fn sync_locked(store: &mut Store) -> Result<()> {
         } else {
             "quick_tunnel"
         };
-        let body = serde_json::json!({"target":url.map(|url|serde_json::json!({"kind":kind,"url":url})),"enabled":url.is_some()});
-        let result = client
-            .put(format!(
-                "{}/v1/addresses/{}",
-                store.endpoint, binding.subdomain
-            ))
-            .header("host", "tunnel.firecrab.dev")
-            .bearer_auth(&binding.token)
-            .json(&body)
-            .send();
         binding.connected = false;
+        let request = match store.protocol {
+            RegistryProtocol::AddressesV1 => client
+                .put(format!(
+                    "{}/v1/addresses/{}",
+                    store.endpoint, binding.subdomain
+                ))
+                .header("host", "tunnel.firecrab.dev")
+                .json(&serde_json::json!({"target":url.map(|url|serde_json::json!({"kind":kind,"url":url})),"enabled":url.is_some()})),
+            RegistryProtocol::RegisterV1 => {
+                let Some(url) = url else {
+                    binding.error = Some("Waiting for the selected connector URL".into());
+                    continue;
+                };
+                let origin = if store.endpoint == ENDPOINT {
+                    format!("https://{}.{}", binding.subdomain, DOMAIN)
+                } else {
+                    store.endpoint.clone()
+                };
+                client
+                    .post(format!("{origin}/__firecrab/heartbeat"))
+                    .header("host", format!("{}.{}", binding.subdomain, DOMAIN))
+                    .json(&serde_json::json!({"tunnel_url":url}))
+            }
+        };
+        let result = request.bearer_auth(&binding.token).send();
         match result {
             Ok(response) if response.status().is_success() => {
+                if store.protocol == RegistryProtocol::RegisterV1 {
+                    #[derive(Deserialize)]
+                    struct Heartbeat {
+                        ok: bool,
+                        url: String,
+                        suspended: bool,
+                    }
+                    match response.json::<Heartbeat>() {
+                        Ok(heartbeat)
+                            if heartbeat.ok
+                                && heartbeat.url
+                                    == format!("https://{}.{}", binding.subdomain, DOMAIN) =>
+                        {
+                            if heartbeat.suspended {
+                                binding.error = Some(
+                                    "The Firecrab address is suspended; check the dashboard".into(),
+                                );
+                                continue;
+                            }
+                        }
+                        _ => {
+                            binding.error = Some("Invalid Firecrab heartbeat response".into());
+                            continue;
+                        }
+                    }
+                }
                 binding.registered = true;
                 binding.connected = url.is_some();
                 binding.last_success = seconds();
@@ -476,6 +574,10 @@ fn sync_locked(store: &mut Store) -> Result<()> {
                 binding.error = Some(
                     match response.status().as_u16() {
                         401 | 410 => "The connection token is invalid or revoked",
+                        403 => "The Firecrab address is suspended; check the dashboard",
+                        404 | 405 => {
+                            "Firecrab connection API is unavailable; check the service deployment"
+                        }
                         409 => "This subdomain belongs to another host",
                         429 => "Address registration limit reached; retry later",
                         400 => "Connection service rejected the target",
@@ -509,6 +611,112 @@ pub(super) fn sync() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn registry(
+        responses: Vec<(u16, serde_json::Value)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut request = String::new();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                    request.push_str(&line);
+                    assert!(request.len() < 8192);
+                }
+                let mut payload = vec![0; length];
+                reader.read_exact(&mut payload).unwrap();
+                request.push_str(&String::from_utf8(payload).unwrap());
+                requests.push(request);
+                let body = body.to_string();
+                write!(stream, "HTTP/1.1 {status} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        (endpoint, server)
+    }
+
+    #[test]
+    fn dashboard_token_resolution_does_not_publish_a_target() {
+        let (endpoint, server) = registry(vec![(
+            200,
+            serde_json::json!({
+                "name":"pipe", "url":"https://pipe.firecrab.dev",
+                "heartbeat_url":"https://pipe.firecrab.dev/__firecrab/heartbeat", "suspended":false
+            }),
+        )]);
+        let (name, protocol) = resolve_token(&endpoint, &"a".repeat(64)).unwrap();
+        assert_eq!(name, "pipe");
+        assert!(protocol == RegistryProtocol::RegisterV1);
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("POST /v1/register HTTP/1.1\r\n"));
+        assert!(requests[0].ends_with("{}"));
+    }
+
+    #[test]
+    fn standalone_registry_falls_back_to_its_token_lookup() {
+        let (endpoint, server) = registry(vec![
+            (404, serde_json::json!({"error":"not_found"})),
+            (
+                200,
+                serde_json::json!({"subdomain":"pipe", "publicUrl":"https://pipe.firecrab.dev"}),
+            ),
+        ]);
+        let (name, protocol) = resolve_token(&endpoint, &"a".repeat(64)).unwrap();
+        assert_eq!(name, "pipe");
+        assert!(protocol == RegistryProtocol::AddressesV1);
+        assert!(server.join().unwrap()[1].starts_with("GET /v1/token HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn missing_apis_are_not_reported_as_invalid_tokens() {
+        let (endpoint, server) = registry(vec![
+            (404, serde_json::json!({"error":"not_found"})),
+            (404, serde_json::json!({"error":"not_found"})),
+        ]);
+        let error = resolve_token(&endpoint, &"a".repeat(64)).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Firecrab connection API is unavailable; check the service deployment"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn token_lookup_rejects_an_unexpected_heartbeat_destination() {
+        let (endpoint, server) = registry(vec![(
+            200,
+            serde_json::json!({
+                "name":"pipe", "url":"https://pipe.firecrab.dev",
+                "heartbeat_url":"https://another.example/heartbeat", "suspended":false
+            }),
+        )]);
+        assert_eq!(
+            resolve_token(&endpoint, &"a".repeat(64))
+                .err()
+                .unwrap()
+                .to_string(),
+            "Invalid token verification response"
+        );
+        server.join().unwrap();
+    }
+
     fn binding(name: &str, id: Uuid, owned: bool) -> Binding {
         Binding {
             subdomain: name.into(),
@@ -531,6 +739,7 @@ mod tests {
         let original = binding("first", id, true);
         let mut store = Store {
             endpoint: ENDPOINT.into(),
+            protocol: RegistryProtocol::default(),
             bindings: vec![original.clone(), binding("second", id, false)],
         };
         let mut config = config(id);
@@ -547,6 +756,7 @@ mod tests {
         let original = binding("first", id, false);
         let mut store = Store {
             endpoint: ENDPOINT.into(),
+            protocol: RegistryProtocol::default(),
             bindings: vec![original.clone()],
         };
         let mut config = config(id);
@@ -559,6 +769,7 @@ mod tests {
         let path = directory.path().join("addresses.json");
         let store = Store {
             endpoint: ENDPOINT.into(),
+            protocol: RegistryProtocol::default(),
             bindings: vec![binding("first", Uuid::new_v4(), false)],
         };
         write_at(&path, &store).unwrap();
