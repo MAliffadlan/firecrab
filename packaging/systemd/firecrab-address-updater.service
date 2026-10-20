@@ -6,6 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=CONFDIR=@CONFDIR@
+# Create boot-time locks outside the sandbox without replacing held inodes.
+ExecStartPre=+/usr/bin/touch /run/firecrab-pipe-apply.lock /run/firecrab-addresses.lock
+ExecStartPre=+/usr/bin/chmod 0600 /run/firecrab-pipe-apply.lock /run/firecrab-addresses.lock
 ExecStart=@CLI@ pipe firecrab-sync
 Restart=on-failure
 RestartSec=5
@@ -13,7 +16,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=@CONFDIR@/pipe /run/firecrab-pipe-apply.lock /run/firecrab-addresses.lock
+ReadWritePaths=@CONFDIR@/pipe -/run/firecrab-pipe-apply.lock -/run/firecrab-addresses.lock
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
 UMask=0077

@@ -35,7 +35,7 @@ pub struct Service {
     domain: String,
     /// Operator-approved direct HTTP or HTTPS origins.
     nginx_origins: Vec<String>,
-    /// New-address counts by peer IP, with each count scoped to a Unix hour.
+    /// New-address counts by peer IPv4 address or IPv6 /64, scoped to a Unix hour.
     registrations: Arc<Mutex<HashMap<String, (i64, u32)>>>,
     /// Shared upstream HTTP client with redirects disabled.
     client: reqwest::Client,
@@ -186,7 +186,12 @@ impl Service {
             };
         forwarded
             .or(socket_peer)
-            .map(|ip| ip.to_string())
+            .map(|ip| match ip.to_canonical() {
+                std::net::IpAddr::V4(ip) => ip.to_string(),
+                std::net::IpAddr::V6(ip) => {
+                    std::net::Ipv6Addr::from(u128::from(ip) & (u128::MAX << 64)).to_string()
+                }
+            })
             .unwrap_or_else(|| "local".into())
     }
 
@@ -198,7 +203,7 @@ impl Service {
         let mut limits = self.registrations.lock().unwrap();
         let hour = now() / 3600;
         limits.retain(|_, v| v.0 == hour);
-        if limits.len() >= 10000 {
+        if limits.values().map(|(_, count)| count).sum::<u32>() >= 10000 {
             return Some(error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "registration_rate_limit",

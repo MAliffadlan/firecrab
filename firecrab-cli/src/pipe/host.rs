@@ -704,7 +704,7 @@ fn snapshot_with(
         }
     }
     Ok(Snapshot {
-        firecrab_tunnels: super::firecrab::addresses()?,
+        firecrab_tunnels: super::firecrab::addresses().unwrap_or_default(),
         config,
         units: vec![ingress, legacy],
         quick_tunnel,

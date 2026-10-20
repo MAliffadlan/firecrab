@@ -6,6 +6,7 @@ No production token, Cloudflare account, DNS or public connection is used.
 """
 
 import argparse
+import fcntl
 import hashlib
 import http.client
 import http.server
@@ -28,7 +29,7 @@ USER_ID = "11111111-1111-4111-8111-111111111111"
 def main(args):
     assert os.geteuid() == 0 and Path("/run/systemd/system").is_dir()
     unit_root = Path("/run/systemd/system")
-    units = ["firecrab-ingress.service", "firecrab-tunnel.service", "firecrab-address-updater.service"]
+    units = ["firecrab-ingress.service", "firecrab-tunnel.service", "firecrab-address-updater.service", "firecrab-address-lock-test.service"]
 
     def systemctl(*arguments, check=True):
         return subprocess.run(["systemctl", *arguments], check=check, capture_output=True, text=True)
@@ -139,6 +140,40 @@ def main(args):
         store_path = root / "config/pipe/firecrab-addresses.json"
         saved_manifest = root / "config/pipe/manifest.json"
         dropin = unit_root / "firecrab-address-updater.service.d/90-test-coverage.conf"
+        release_sync_lock = threading.Event()
+        sync_restarted = root / "sync-restarted"
+        sync_blocked = root / "sync-blocked"
+        sync_trigger = root / "block-first-sync"
+        systemctl_binary = shutil.which("systemctl")
+        wrapper = binaries / "systemctl"
+        wrapper.write_text(f'''#!/usr/bin/python3
+import os, pathlib, subprocess, sys, time
+command = [{systemctl_binary!r}, *sys.argv[1:]]
+trigger = pathlib.Path({str(sync_trigger)!r})
+if sys.argv[1:] == ["restart", "firecrab-address-updater.service"] and trigger.exists():
+    trigger.unlink()
+    subprocess.run(command, check=True)
+    pathlib.Path({str(sync_restarted)!r}).touch()
+    deadline = time.monotonic() + 5
+    while not pathlib.Path({str(sync_blocked)!r}).exists():
+        assert time.monotonic() < deadline, "fixture did not block the first sync"
+        time.sleep(.01)
+    sys.exit(0)
+os.execv(command[0], command)
+''')
+        wrapper.chmod(0o755)
+
+        def block_first_sync():
+            while not sync_restarted.exists():
+                if release_sync_lock.wait(.01):
+                    return
+            with open("/run/firecrab-pipe-apply.lock", "a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                sync_blocked.touch()
+                release_sync_lock.wait(30)
+
+        sync_thread = threading.Thread(target=block_first_sync, daemon=True)
+        sync_thread.start()
 
         def pipe(*arguments, body=None, success=True):
             payload = body if isinstance(body, str) else json.dumps(body) if body is not None else None
@@ -202,6 +237,42 @@ def main(args):
             pipe("apply", "--config", str(manifest), "--cloudflared", str(connector))
             original = saved_manifest.read_bytes()
             user_pid = pid(connector_unit(USER_ID))
+            boot_locks = [root / "boot-apply.lock", root / "boot-address.lock"]
+            boot_result = root / "config/pipe/boot-locks.json"
+            probe = binaries / "check-boot-locks"
+            probe.write_text(f'''#!/usr/bin/python3
+import json, pathlib, signal
+paths = [pathlib.Path(value) for value in {list(map(str, boot_locks))!r}]
+for path in paths:
+    with path.open("a"):
+        assert path.stat().st_mode & 0o777 == 0o600
+result = pathlib.Path({str(boot_result)!r})
+result.with_suffix(".tmp").write_text(json.dumps([path.stat().st_ino for path in paths]))
+result.with_suffix(".tmp").replace(result)
+signal.pause()
+''')
+            probe.chmod(0o755)
+            boot_unit = (source / "packaging/systemd/firecrab-address-updater.service").read_text().replace("@CLI@", str(probe)).replace("@CONFDIR@", str(root / "config"))
+            for original_path, private_path in zip(["/run/firecrab-pipe-apply.lock", "/run/firecrab-addresses.lock"], boot_locks):
+                boot_unit = boot_unit.replace(original_path, str(private_path))
+            (unit_root / units[3]).write_text(boot_unit)
+            systemctl("daemon-reload")
+            systemctl("start", units[3])
+            deadline = time.monotonic() + 5
+            while not boot_result.exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            inodes = json.loads(boot_result.read_text())
+            with boot_locks[0].open("a") as first_lock, boot_locks[1].open("a") as second_lock:
+                for lock in [first_lock, second_lock]:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                boot_result.unlink()
+                systemctl("restart", units[3])
+                deadline = time.monotonic() + 5
+                while not boot_result.exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                assert json.loads(boot_result.read_text()) == inodes
+            systemctl("stop", units[3])
+            print("PASS updater sandbox creates missing private locks and preserves held lock inodes on restart", flush=True)
             pipe("firecrab-manage", body="x" * 4097, success=False)
             pipe("firecrab-manage", body={"action": "connect", "token": "f" * 64, "target": {"type": "apps", "upstreams": upstreams}}, success=False)
             for failure in [(429, {}), (503, {}), (200, {"name": "alpha", "url": "https://alpha.firecrab.dev", "heartbeat_url": "https://other.invalid/", "suspended": False})]:
@@ -214,7 +285,14 @@ def main(args):
             token_file = root / "token"
             token_file.write_text("a" * 64)
             token_file.chmod(0o600)
-            pipe("address", "connect", "--token-file", str(token_file), "--app", upstreams[0], "--app", upstreams[1])
+            sync_trigger.touch()
+            try:
+                pipe("address", "connect", "--token-file", str(token_file), "--app", upstreams[0], "--app", upstreams[1])
+                assert sync_blocked.exists() and binding("alpha")["target"] == {"type": "apps", "upstreams": upstreams}
+            finally:
+                release_sync_lock.set()
+                sync_thread.join(timeout=5)
+            print("PASS a committed address succeeds when its immediate sync is blocked", flush=True)
             first = wait_binding("alpha")
             identity = first["connectorId"]
             assert first["target"] == {"type": "apps", "upstreams": upstreams}
@@ -223,6 +301,21 @@ def main(args):
             assert store()["protocol"] == "register_v1"
             assert all(token not in json.dumps(snapshot()) for token in TOKENS)
             print("PASS dashboard token connects a private VM app pool; status omits protected ownership secrets", flush=True)
+
+            unprivileged = subprocess.run(["runuser", "-u", "nobody", "--", cli, "pipe", "status"], env=environment, capture_output=True, text=True, timeout=10)
+            assert unprivileged.returncode == 0 and "Nginx" in unprivileged.stdout, unprivileged.stderr
+            with open("/run/firecrab-addresses.lock", "a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                original_store = store_path.read_bytes()
+                try:
+                    store_path.write_text("corrupt JSON")
+                    degraded = snapshot()
+                    assert degraded.get("firecrabTunnels", []) == [] and degraded["config"]["routes"] == routes
+                    assert degraded["units"][0]["mainPid"] > 0
+                finally:
+                    store_path.write_bytes(original_store)
+            assert snapshot()["firecrabTunnels"][0]["subdomain"] == "alpha"
+            print("PASS private or corrupt address stores preserve Pipe status and readable stores retain addresses", flush=True)
 
             lookup_count = sum(event[1] == "/v1/register" for event in registry.events)
             pipe("address", "connect", "alpha", "--nginx", "pipe.test")
@@ -275,9 +368,11 @@ def main(args):
             pipe("address", "delete", "missing", success=False)
             print("PASS standalone API fallback retains ownership after rejection and permits revoked-token cleanup", flush=True)
         except BaseException:
-            print(subprocess.run(["journalctl", "--no-pager", "-n", "40", "-u", units[0], "-u", units[2]], capture_output=True, text=True).stdout)
+            print(subprocess.run(["journalctl", "--no-pager", "-n", "40", "-u", units[0], "-u", units[2], "-u", units[3]], capture_output=True, text=True).stdout)
             raise
         finally:
+            release_sync_lock.set()
+            sync_thread.join(timeout=5)
             owned = [path for path in unit_root.glob("firecrab-*.service") if str(root) in path.read_text()]
             systemctl("disable", "--now", *(path.name for path in owned), check=False)
             if any(path.name == units[0] for path in owned):

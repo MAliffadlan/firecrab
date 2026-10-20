@@ -28,7 +28,10 @@ export default function FirecrabTunnel({ snapshot, busy, apps, vmsLoading, vmsUn
   const original = addresses.find(address => address.subdomain === editor?.original);
   const originalTarget = original ? addressTarget(original) : null;
   const preserved = originalTarget?.type === "apps" ? originalTarget.upstreams : [];
-  const changed = !!editor && (!!editor.token || !!editor.source || editor.addresses.length > 0);
+  const draftTarget = editor ? (editor.kind === "apps" ? { type: "apps", upstreams: editor.addresses } : { type: "nginx", host: editor.source }) : null;
+  const changed = !!editor && (editor.original
+    ? JSON.stringify(draftTarget) !== JSON.stringify(originalTarget)
+    : !!editor.token || !!editor.source || editor.addresses.length > 0);
   const sourceValid = !!editor && (editor.kind === "apps" ? !vmsLoading && !vmsUnavailable && canUsePipeApps(apps, editor.addresses, preserved) : hosts.includes(editor.source));
   const valid = !!editor && (!!editor.original || /^[a-fA-F0-9]{64}$/.test(editor.token.trim())) && sourceValid;
   useEffect(() => { onUnsavedChange(changed); return () => onUnsavedChange(false); }, [changed, onUnsavedChange]);

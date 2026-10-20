@@ -429,7 +429,8 @@ fn save(store: &mut Store, subdomain: String, target: Target, token: Option<Stri
     write(store)?;
     drop(pipe_lock);
     unit(true)?;
-    sync_locked(store)?;
+    // Ownership is committed; the updater retries if this first refresh fails.
+    let _ = sync_locked(store);
     Ok(())
 }
 

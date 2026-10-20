@@ -26,7 +26,7 @@ or saved Nginx domain/path groups to a fixed public address.
 
 An existing public domain or a generated Quick Tunnel URL connects to the local
 Nginx ingress. Nginx applies the saved domain/path routes and app pools.
-[Public address setup](firecrab-tunnel.md) covers direct DNS with an existing
+[Public address setup](public-addresses.md) covers direct DNS with an existing
 public ingress and real Cloudflare Tunnel setup for the private listener.
 [Firecrab Tunnel](firecrab-tunnel.md) provides fixed `*.firecrab.dev` subdomains
 through its separate registration/forwarding service. It supports both existing

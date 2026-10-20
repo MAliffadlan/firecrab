@@ -309,6 +309,52 @@ test.describe("Pipe dashboard @dashboard", () => {
     await expect(page.getByLabel("Domain", { exact: true })).toHaveValue("draft.test");
   });
 
+  for (const kind of ["apps", "nginx", "legacy"] as const) test(`only warns about modified Firecrab ${kind} targets`, async ({ page }) => {
+    await page.clock.install();
+    const mock = await open(page, { savedRoutes: groupedRoutes, quickTunnels: [webTunnel] });
+    mock.snapshot.firecrabTunnels = [{
+      subdomain: "my-app", publicUrl: "https://my-app.firecrab.dev", connectorId: QUICK_ID, connected: true, error: null,
+      target: kind === "nginx" ? { type: "nginx", host: "app.example.com" } : kind === "legacy" ? { type: "quick_tunnel", id: QUICK_ID } : { type: "apps", upstreams: ["172.30.36.2:80"] },
+    }];
+    await page.clock.runFor(8_100);
+    const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
+    const edit = async () => {
+      await panel.getByRole("button", { name: "my-app actions", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    };
+    const dialogs: string[] = [];
+    page.on("dialog", async dialog => { dialogs.push(dialog.message()); await dialog.dismiss(); });
+    await edit();
+    await page.getByRole("button", { name: "MicroVM", exact: true }).click();
+    await expect(page).toHaveURL(/#\/vms$/);
+    expect(dialogs).toEqual([]);
+    await page.getByRole("button", { name: "Pipe", exact: true }).click();
+    await edit();
+    if (kind === "nginx") await panel.getByLabel("Nginx route domain", { exact: true }).selectOption("other.example.com");
+    else await panel.getByRole("checkbox", { name: "web-b · TCP 80", exact: true }).check();
+    await page.getByRole("button", { name: "MicroVM", exact: true }).click();
+    await expect(page).toHaveURL(/#\/pipe$/);
+    expect(dialogs).toEqual(["Pipe changes have not been saved. Leave without saving?"]);
+    if (kind === "nginx") await panel.getByLabel("Nginx route domain", { exact: true }).selectOption("app.example.com");
+    else await panel.getByRole("checkbox", { name: "web-b · TCP 80", exact: true }).uncheck();
+    await page.getByRole("button", { name: "MicroVM", exact: true }).click();
+    await expect(page).toHaveURL(/#\/vms$/);
+    expect(dialogs).toHaveLength(1);
+    expect(mock.firecrabSaves).toEqual([]);
+  });
+
+  test("shows Firecrab field validation details through the common API error message", async ({ page }) => {
+    await open(page);
+    const reason = "The Firecrab subdomain is reserved";
+    await page.route("**/api/pipe/firecrab-tunnels", route => route.fulfill({ status: 400, json: { error: { message: "request validation failed", fields: { firecrabTunnel: reason } } } }));
+    const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
+    await panel.getByRole("button", { name: "Add fixed address" }).click();
+    await panel.getByLabel("Connection token", { exact: true }).fill(CONNECTION_TOKEN);
+    await panel.getByRole("checkbox", { name: "web-a · TCP 80", exact: true }).check();
+    await panel.getByRole("button", { name: "Connect address", exact: true }).click();
+    await expect(panel.getByRole("alert")).toHaveText(`request validation failed (firecrabTunnel: ${reason})`);
+  });
+
   test("controls Nginx from its menu without applying configuration", async ({ page }) => {
     const mock = await open(page, { ingressState: "inactive" });
     const panel = page.getByRole("region", { name: "Pipe", exact: true });

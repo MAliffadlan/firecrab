@@ -486,6 +486,99 @@ async fn dashboard_rejects_cross_origin_issuance_and_applies_registration_quota(
 }
 
 #[tokio::test]
+async fn ipv6_rotation_within_one_prefix_shares_the_issuance_quota() {
+    let directory = tempfile::tempdir().unwrap();
+    let service =
+        Service::open(&directory.path().join("db"), "firecrab.dev".into(), vec![]).unwrap();
+    let app = service.router();
+    for host in 1..=17 {
+        let mut request = dashboard_request(
+            "/dashboard/tokens",
+            serde_json::json!({}),
+            "https://firecrab.dev",
+        );
+        request.extensions_mut().insert(ConnectInfo(
+            format!("[2001:db8:1:2::{host:x}]:1234")
+                .parse::<SocketAddr>()
+                .unwrap(),
+        ));
+        let expected = if host <= 16 {
+            StatusCode::CREATED
+        } else {
+            StatusCode::TOO_MANY_REQUESTS
+        };
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn peer_keys_canonicalize_addresses_and_only_trust_local_proxy_headers() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = Service::open(&directory.path().join("db"), "firecrab.dev".into(), vec![])
+        .unwrap()
+        .with_cloudflare_proxy();
+    let peer = |address: &str, forwarded: &str| {
+        let mut request = Request::builder()
+            .header("cf-connecting-ip", forwarded)
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(address.parse::<SocketAddr>().unwrap()));
+        service.peer(&request)
+    };
+    assert_eq!(peer("192.0.2.1:1234", "198.51.100.1"), "192.0.2.1");
+    assert_eq!(peer("[::ffff:192.0.2.1]:1234", "198.51.100.1"), "192.0.2.1");
+    assert_eq!(peer("127.0.0.1:1234", "::ffff:192.0.2.1"), "192.0.2.1");
+    assert_eq!(
+        peer("127.0.0.1:1234", "2001:db8:1:2:ffff::1"),
+        "2001:db8:1:2::"
+    );
+    assert_eq!(
+        peer("[2001:0db8:1:2::2]:1234", "2001:db8:1:3::1"),
+        "2001:db8:1:2::"
+    );
+    assert_eq!(peer("127.0.0.1:1234", "2001:db8:1:3::1"), "2001:db8:1:3::");
+}
+
+#[test]
+fn hourly_quota_counts_all_issuances_and_keeps_the_registry_capacity_guard() {
+    let directory = tempfile::tempdir().unwrap();
+    let service =
+        Service::open(&directory.path().join("db"), "firecrab.dev".into(), vec![]).unwrap();
+    let hour = now() / 3600;
+    {
+        let mut limits = service.registrations.lock().unwrap();
+        for peer in 0..624 {
+            limits.insert(peer.to_string(), (hour, 16));
+        }
+        limits.insert("last".into(), (hour, 15));
+        limits.insert("expired".into(), (hour - 1, 10000));
+    }
+    assert!(service.registration_limit("new-peer", 0).is_none());
+    for peer in ["new-peer", "another-peer"] {
+        assert_eq!(
+            service.registration_limit(peer, 0).unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+    assert_eq!(
+        service
+            .registration_limit("another-peer", 10000)
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    for quota in service.registrations.lock().unwrap().values_mut() {
+        quota.0 = hour - 1;
+    }
+    assert!(service.registration_limit("new-peer", 0).is_none());
+}
+
+#[tokio::test]
 async fn issued_tokens_resolve_disconnect_reconnect_and_cannot_revive_after_revocation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("db");
