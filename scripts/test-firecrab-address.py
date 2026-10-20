@@ -197,7 +197,9 @@ def main(args):
                 dropin.parent.mkdir()
                 escaped = profile.replace("%", "%%").replace('"', '\\"')
                 dropin.write_text(f'[Service]\nEnvironment="LLVM_PROFILE_FILE={escaped}"\nBindPaths={Path(profile).parent}\nUMask=0022\n')
-            pipe("apply", "--config", str(manifest), "--nginx", str(binaries / "nginx"), "--cloudflared", str(connector))
+            # Address edits use the default engine resolver; bootstrap with it
+            # too, including on CI hosts that already have /usr/sbin/nginx.
+            pipe("apply", "--config", str(manifest), "--cloudflared", str(connector))
             original = saved_manifest.read_bytes()
             user_pid = pid(connector_unit(USER_ID))
             pipe("firecrab-manage", body="x" * 4097, success=False)
