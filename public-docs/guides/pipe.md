@@ -19,8 +19,8 @@ incompatible VM protocol upgrades.
 
 This slice routes to existing reachable app addresses. The MicroService model,
 app deployment automation, secret store, and automatic VM replacement are separate
-#335 work. The dashboard can publish VM app pools or saved Nginx domain/path groups through
-multiple independent Cloudflare Quick Tunnels.
+#335 work. Firecrab Tunnel uses a dashboard token to connect VM apps
+or saved Nginx domain/path groups to a fixed public address.
 
 ## Public address connections
 
@@ -28,8 +28,9 @@ An existing public domain or a generated Quick Tunnel URL connects to the local
 Nginx ingress. Nginx applies the saved domain/path routes and app pools.
 [Public address setup](public-addresses.md) covers direct DNS with an existing
 public ingress and real Cloudflare Tunnel setup for the private listener.
-There is no Firecrab subdomain-registration service or proprietary connection
-token in this scope.
+[Firecrab Tunnel](firecrab-tunnel.md) provides fixed `*.firecrab.dev` subdomains
+through its separate registration/forwarding service. It supports both existing
+VM apps and saved Nginx routes. The operator must deploy that service.
 
 ## Requirements
 
@@ -131,31 +132,19 @@ Select **Edit** on an existing row to open its editor, or **Cancel** to discard
 the editor's inputs. Removed routes stay in the local draft until **Save**.
 Polling preserves local edits. API connection failure clears stale service badges.
 
-Cloudflare is optional. In **Cloudflare Quick Tunnel**, select **Add tunnel**,
-enter a name, and choose **VM apps** or **Nginx routes**. App mode selects one or
-more registered VM TCP ports. Route mode selects a saved domain and publishes
-all of its saved paths. Select **Create temporary URL** to add the entry.
+Open [the connection dashboard](https://firecrab.dev/dashboard/) to issue a token.
+Under **Firecrab Tunnel → Add fixed address**, paste it and select
+**VM apps** or saved **Nginx routes** in **Connection target**. There is no
+subdomain input or separate Quick Tunnel input in Firecrab Tunnel. Use the
+**Cloudflare Quick Tunnel** panel to create and manage temporary connectors.
 
-The list keeps each tunnel's name, target, URL, and service state. Its **⋯** menu
-provides **Edit**, **Start**, **Stop**, **Restart**, and **Delete**. The copy icon
-beside each address copies its current URL.
-Editing or deleting one entry keeps other tunnels and saved Nginx routes.
-Save/delete operations retain unfinished route and listen-address drafts.
-Quick Tunnels require no domain, API token, UUID, or credential JSON.
-
-The public link and copied URL are base addresses. Append the desired saved
-path when using a route group. If the selected domain has `/api` but no `/`, the
-base address returns 404 while `/api` reaches the API app.
-
-Refreshing restores each running connector's current URL. Inactive or failed
-entries hide their old links. Starting or restarting one connector creates a
-new address for that entry. Updating its target reloads Nginx and keeps its URL.
-
-See [Publish apps and Nginx routes with Quick Tunnels](cloudflare-tunnel.md).
-Existing single Quick Tunnel definitions appear in the list and remain compatible.
+The public address is assigned by the token service. Appending a saved path uses
+that route group; if it has `/api` but no `/`, the base address can return 404.
+Saved legacy Quick Tunnels remain available in their Cloudflare panel. See
+[Firecrab Tunnel](firecrab-tunnel.md) for issuance, revocation and continuity.
 The **Cloudflare Tunnel** panel also connects an owned Cloudflare domain using
 a scoped API token and a saved Nginx route. It creates DNS and retains a stable
-public address. Its regular connector runs alongside the Quick Tunnel list.
+public address. Its connector runs alongside the existing Quick Tunnels.
 Existing named tunnel manifests remain compatible with the CLI.
 
 The API uses the authenticated helper socket for apply, inspect, service control, and disable.

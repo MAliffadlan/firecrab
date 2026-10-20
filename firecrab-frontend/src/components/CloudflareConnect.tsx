@@ -119,19 +119,19 @@ export default function CloudflareConnect({ config, snapshot, busy, apps, vmsLoa
         </tr></thead><tbody>{tunnels.map(tunnel => {
           const state = tunnel.unit.activeState;
           const url = state === "active" ? tunnel.publicUrl : null;
-          const changing = ["activating", "deactivating", "reloading"].includes(state);
+          const changing = ["activating", "deactivating", "reloading"].includes(state) && tunnel.unit.subState !== "auto-restart";
           const available = tunnel.unit.loadState === "loaded" && snapshot.cloudflaredAvailable;
           return <tr key={tunnel.id}>
             <td>{tunnel.name}</td>
             <td>{tunnel.target.type === "routes" ? <><div>{t("Nginx routes", "Nginx 라우트")}</div><div className="quick-tunnel-target">{tunnel.target.host}</div><div className="poll-note">{config.routes.filter(route => route.host === (tunnel.target.type === "routes" ? tunnel.target.host : "")).map(route => route.pathPrefix).join(", ")}</div></>
               : <><div>{t("VM apps", "VM 앱")}</div>{tunnel.target.upstreams.map(address => <div className="quick-tunnel-target" key={address}>{appLabel(address)}</div>)}</>}</td>
             <td>{url ? <div className="pipe-url"><a className="quick-tunnel-link" href={url} target="_blank" rel="noreferrer">{url}</a><PipeCopyButton url={url} onError={setError} /></div>
-              : <span className="poll-note">{state === "active" || state === "activating" ? t("Preparing URL…", "주소 발급 중…") : "—"}</span>}</td>
-            <td><span className={"state-badge" + (state === "active" ? " running" : state === "failed" ? " error" : "")}>{state}</span></td>
+              : tunnel.error ? <span className="field-error">{tunnel.error}</span> : <span className="poll-note">{state === "active" || state === "activating" ? t("Preparing URL…", "주소 발급 중…") : "—"}</span>}</td>
+            <td><span className={"state-badge" + (tunnel.error || state === "failed" ? " error" : state === "active" ? " running" : "")}>{state}</span></td>
             <td className="actions"><PipeServiceMenu label={t(tunnel.name + " actions", tunnel.name + " 작업")} disabled={busy || changing} items={[
               { label: t("Edit", "수정"), disabled: !!editor, onSelect: () => edit(tunnel) },
               { label: t("Start", "시작"), disabled: !available || state === "active", onSelect: () => void mutate(() => controlQuickTunnel(tunnel.id, "start")) },
-              { label: t("Stop", "중지"), disabled: tunnel.unit.loadState !== "loaded" || !["active", "failed"].includes(state), danger: true, onSelect: () => void mutate(() => controlQuickTunnel(tunnel.id, "stop")) },
+              { label: t("Stop", "중지"), disabled: tunnel.unit.loadState !== "loaded" || !(["active", "failed"].includes(state) || tunnel.unit.subState === "auto-restart"), danger: true, onSelect: () => void mutate(() => controlQuickTunnel(tunnel.id, "stop")) },
               { label: t("Restart", "재시작"), disabled: !available, onSelect: () => void mutate(() => controlQuickTunnel(tunnel.id, "restart")) },
               { label: t("Delete", "삭제"), danger: true, onSelect: () => void mutate(() => deleteQuickTunnel(tunnel.id), () => { if (editor?.id === tunnel.id) setEditor(null); }) },
             ]} /></td>

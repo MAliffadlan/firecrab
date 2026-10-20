@@ -239,6 +239,9 @@ fn apply_mode_locked(
     verify: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let config = Config::read(config_file)?;
+    if mode == ApplyMode::Configuration {
+        super::firecrab::validate_config(&config)?;
+    }
     let env = ServiceEnv::from_process_env();
     let nginx_path = nginx.map(Path::to_path_buf).unwrap_or_else(|| {
         super::engines::nginx_binary().unwrap_or_else(|| PathBuf::from("/usr/sbin/nginx"))
@@ -664,6 +667,11 @@ fn snapshot_with(
         .and_then(|config| config.quick_tunnel.as_ref())
         .map(|quick| {
             let public_url = super::quick::public_url(runner, &legacy, &invocation);
+            let error = if public_url.is_none() {
+                super::quick::error(runner, &legacy, &invocation)
+            } else {
+                None
+            };
             quick_tunnels.push(QuickTunnelSnapshot {
                 id: LEGACY_QUICK_TUNNEL_ID,
                 name: "Quick Tunnel".into(),
@@ -672,6 +680,7 @@ fn snapshot_with(
                 },
                 unit: legacy.clone(),
                 public_url: public_url.clone(),
+                error,
             });
             firecrab_helper_protocol::pipe::QuickTunnelStatus { public_url }
         });
@@ -679,16 +688,23 @@ fn snapshot_with(
         for entry in &config.quick_tunnels {
             let (unit, invocation) = unit_snapshot(runner, &quick_tunnel_unit(entry.id))?;
             let public_url = super::quick::public_url(runner, &unit, &invocation);
+            let error = if public_url.is_none() {
+                super::quick::error(runner, &unit, &invocation)
+            } else {
+                None
+            };
             quick_tunnels.push(QuickTunnelSnapshot {
                 id: entry.id,
                 name: entry.name.clone(),
                 target: entry.target.clone(),
                 unit,
                 public_url,
+                error,
             });
         }
     }
     Ok(Snapshot {
+        firecrab_tunnels: super::firecrab::addresses().unwrap_or_default(),
         config,
         units: vec![ingress, legacy],
         quick_tunnel,

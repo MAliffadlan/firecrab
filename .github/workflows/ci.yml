@@ -84,6 +84,7 @@ jobs:
           cloudflared=/var/lib/firecrab-pipe-qa/pipe/cloudflared
           python3 scripts/test-pipe-runtime.py --firecrab "$bin/firecrab" --nginx /usr/sbin/nginx
           sudo --preserve-env=LLVM_PROFILE_FILE python3 scripts/test-pipe-cli.py --firecrab "$bin/firecrab" --nginx /usr/sbin/nginx --cloudflared "$cloudflared"
+          sudo --preserve-env=LLVM_PROFILE_FILE python3 scripts/test-firecrab-address.py --firecrab "$bin/firecrab" --nginx /usr/sbin/nginx
           sudo --preserve-env=LLVM_PROFILE_FILE python3 scripts/test-pipe-api.py --api "$bin/firecrab-api" --helper "$bin/firecrab-helper"
           cp "$profiles"/*.profraw "$CARGO_LLVM_COV_TARGET_DIR/"
           cargo llvm-cov report --lcov --output-path lcov.info

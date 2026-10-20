@@ -10,12 +10,29 @@ export interface PipeConfig {
   quickTunnels?: QuickTunnelEntry[];
 }
 export interface PipeSnapshot {
+  firecrabTunnels?: FirecrabAddress[];
   config: PipeConfig | null;
   units: { unit: string; loadState: string; activeState: string; subState: string; mainPid: number }[];
   nginxAvailable: boolean;
   cloudflaredAvailable: boolean;
   quickTunnel?: { publicUrl: string | null } | null;
   quickTunnels?: QuickTunnelSnapshot[];
+}
+
+export type FirecrabTarget = { type: "apps"; upstreams: string[] } | { type: "nginx"; host: string };
+export interface FirecrabAddress {
+  subdomain: string;
+  publicUrl: string;
+  target: FirecrabTarget | { type: "quick_tunnel"; id: string };
+  connectorId: string;
+  connected: boolean;
+  error: string | null;
+}
+export function saveFirecrabAddress(ownership: { token: string } | { subdomain: string }, target: FirecrabTarget): Promise<PipeSnapshot> {
+  return fetchJson("/api/pipe/firecrab-tunnels", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...ownership, target }) });
+}
+export function deleteFirecrabAddress(subdomain: string): Promise<PipeSnapshot> {
+  return fetchJson("/api/pipe/firecrab-tunnels/" + encodeURIComponent(subdomain), { method: "DELETE" });
 }
 export function getPipe(signal?: AbortSignal): Promise<PipeSnapshot> {
   return fetchJson("/api/pipe", { signal });
@@ -42,6 +59,7 @@ export interface QuickTunnelEntry { id: string; name: string; target: QuickTunne
 export interface QuickTunnelSnapshot extends QuickTunnelEntry {
   unit: PipeSnapshot["units"][number];
   publicUrl: string | null;
+  error?: string | null;
 }
 export function saveQuickTunnel(tunnel: { id: string | null; name: string; target: QuickTunnelTarget }): Promise<PipeSnapshot> {
   return fetchJson("/api/pipe/quick-tunnels", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(tunnel) });

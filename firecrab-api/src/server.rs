@@ -393,6 +393,14 @@ pub fn build_router(state: AppState, config: &HttpConfig) -> Router {
     let recovery = Router::new()
         .route("/api/pipe/service", post(handlers::pipe::control))
         .route(
+            "/api/pipe/firecrab-tunnels",
+            post(handlers::pipe::save_firecrab_tunnel),
+        )
+        .route(
+            "/api/pipe/firecrab-tunnels/{subdomain}",
+            delete(handlers::pipe::delete_firecrab_tunnel),
+        )
+        .route(
             "/api/pipe/cloudflare/zones",
             post(handlers::cloudflare::zones),
         )
@@ -855,6 +863,7 @@ mod tests {
         .unwrap();
         let expected_request = request.clone();
         let snapshot = Snapshot {
+            firecrab_tunnels: Vec::new(),
             config: Some(request.config.clone()),
             units: Vec::new(),
             nginx_available: true,
@@ -998,6 +1007,7 @@ mod tests {
             .collect::<Vec<_>>();
         let expected_requests = requests.clone();
         let snapshot = Snapshot {
+            firecrab_tunnels: Vec::new(),
             config: None,
             units: Vec::new(),
             nginx_available: true,

@@ -18,81 +18,29 @@ connector service, and its own current URL.
 
 On macOS and Windows, the connector runs inside the managed Linux guest.
 
-## Create a tunnel
+## Existing connectors and Firecrab tokens
 
-1. Open **Pipe** and find **Cloudflare Quick Tunnel**.
-2. Select **Add tunnel**.
-3. Enter a **Name** that identifies this public entry.
-4. Choose a **Target**:
-   - **VM apps**: select one or more registered VM app ports. Requests are
-     distributed between the selected apps.
-   - **Nginx routes**: select a saved **Route domain**. Firecrab publishes every
-     saved path in that domain group. The form previews those paths.
-5. Select **Create temporary URL**.
-6. Wait for the HTTPS link in the list. The first response can arrive before the
-   connector has obtained its URL.
-7. Repeat **Add tunnel** to publish another app or route group independently.
+Use **Pipe → Cloudflare Quick Tunnel** to create, edit and control temporary
+connectors. In **Pipe → Firecrab Tunnel**, paste a token
+from [the Firecrab dashboard](https://firecrab.dev/dashboard/) and select an
+**VM apps** or saved **Nginx routes**. See the
+[Firecrab Tunnel guide](firecrab-tunnel.md) for token issuance and revocation.
 
-Existing domain/path routes remain unchanged. Creating a tunnel does not deploy
-an app or register a personal DNS record.
+VM app selection publishes the chosen running apps and TCP ports. Nginx selection
+publishes every saved path of its selected domain. Firecrab Tunnel manages its
+own connector for either target. Temporary Cloudflare Quick Tunnels remain
+independent of the fixed-address target selection.
 
-A route domain such as `pipe.test` is a saved routing selector. It does not have
-to be registered in public DNS. The generated temporary hostname provides public
-access to that selected domain's paths.
+Use the API below to provision or manage independent Quick Tunnels. Each has a
+name, target, unit and temporary public URL. Saving an existing ID changes only
+that connector. Omitting the ID creates one. Targets are VM app addresses or a
+saved Nginx hostname. A route group must retain at least one saved path while
+referenced by its connector.
 
-## Use a route group's paths
-
-The list shows the selected domain and its paths. The public link and the copy
-icon beside it contain the base address. Append the required path when accessing a routed app.
-
-| Saved paths in the selected domain | Public request | Result |
-| --- | --- | --- |
-| `/` and `/api` | `https://…trycloudflare.com/` | Root route's app pool |
-| `/` and `/api` | `https://…trycloudflare.com/api` | API route's app pool |
-| `/api` only | `https://…trycloudflare.com/api` | API route's app pool |
-| `/api` only | `https://…trycloudflare.com/` | HTTP 404 |
-| `/api` only | `https://…trycloudflare.com/apiculture` | HTTP 404 |
-
-Nginx keeps the saved path boundaries and longest-path selection. It does not
-strip the path. Updating a saved route updates its tunnel destinations through
-Nginx reload while keeping the current connector URL.
-
-## Edit, copy, and delete
-
-Open **⋯** in the selected tunnel row:
-
-- **Edit** opens its name and target. Select **Save** once to apply changes, or
-  **Cancel** to discard its form inputs. Editing an entry keeps other tunnels.
-- **Delete** stops and removes that tunnel's local service and configuration.
-  It leaves other tunnels, app VMs, and saved Nginx routes in place.
-
-Use the copy icon beside an address to copy it. A check mark confirms success.
-A tunnel's save or delete operation does not save unfinished route or Nginx
-listen-address changes. Those drafts remain until saved in their own section.
-
-A route-target tunnel requires its selected domain to retain at least one saved
-route. Change or delete the tunnel before removing that domain's last route.
-
-An existing single Quick Tunnel appears in the list as **Quick Tunnel**. Its
-first edit/save migrates it to an individual service and can change its URL.
-Existing named Cloudflare tunnel manifests remain compatible with the CLI.
-
-## Control one tunnel
-
-Each row's **⋯** menu also provides **Start**, **Stop**, and **Restart**.
-
-- **Stop** ends that tunnel's public access. Its row and target remain saved.
-- **Start** runs its saved target and obtains a new temporary address.
-- **Restart** replaces only that connector and obtains a new temporary address.
-
-Other tunnels keep their current running or stopped state. Editing or deleting
-another entry does not start a stopped connector. Stopping a connector keeps Nginx available for local
-requests. API process restarts leave Nginx and the connectors under systemd
-ownership. A connector restart can interrupt its existing requests.
-
-Refreshing the dashboard restores the list and each running connector's current
-URL. Inactive or failed entries hide their old link. The URL is runtime state,
-rather than a permanent saved address.
+Stop/start/restart operate on one saved connector. Starting it again changes its
+temporary URL. Other connectors and Nginx routes remain. An exclusively owned
+Firecrab Nginx connector is managed through its Firecrab address; user connectors
+referenced by an address cannot be deleted directly.
 
 ## Troubleshooting
 
@@ -103,8 +51,15 @@ rather than a permanent saved address.
 | No route domains | Save a Nginx domain/path route before selecting this target mode. |
 | Base link returns 404 | Append a path listed for that route domain, such as `/api`. |
 | Preparing URL | Check that row's service state and logs. Wait for the next poll. |
+| Cloudflare rate limited URL creation (HTTP 429) | Wait for automatic retries. Repeated manual restarts can prolong the limit. Use **Stop** to pause retries. |
 | Old link fails after restart | Copy the new URL from that tunnel's row. |
 | Removing a domain is rejected | Change or delete tunnels targeting that domain first. |
+
+Failed provisioning retries start after 60 seconds. On systemd 254 or later,
+the delay increases to at most 15 minutes. Older systemd versions use the
+60-second delay. Connector failures also appear on any Firecrab address that
+depends on that connector. Once a URL is issued, the address updater retries
+its registration automatically.
 
 ## API
 
@@ -121,6 +76,8 @@ configuration and retain unrelated tunnels and routes.
 
 `GET /api/pipe` includes `quickTunnels` entries with their name, target, unit
 state, and current `publicUrl`. A URL can be null while it is being issued.
+An optional `error` contains a sanitized provisioning failure for the current
+connector invocation. Stopped connectors do not retain earlier failures.
 The saved manifest stores definitions in `config.quickTunnels`. The legacy
 `quickTunnel` field remains compatible.
 

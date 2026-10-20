@@ -597,6 +597,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "firecrab-tunnel"
+version = "0.3.1"
+dependencies = [
+ "axum",
+ "clap",
+ "firecrab-helper-protocol",
+ "futures-util",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tower",
+ "uuid",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

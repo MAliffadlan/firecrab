@@ -104,6 +104,11 @@ fn hostname(host: &str) -> bool {
         })
 }
 
+/// Validate a user-selected saved Nginx hostname without allowing generated connector names.
+pub fn valid_route_hostname(host: &str) -> bool {
+    hostname(host) && !reserved_quick_host(host)
+}
+
 /// Reserve generated anonymous-connector hosts from editable local route groups.
 fn reserved_quick_host(host: &str) -> bool {
     host == QUICK_TUNNEL_HOST
@@ -123,7 +128,7 @@ fn path(path: &str) -> bool {
 }
 
 /// Apply the same literal app-address rules to saved routes and anonymous access.
-fn validate_upstreams(
+pub(crate) fn validate_upstreams(
     upstreams: &[SocketAddr],
     listen: Option<SocketAddr>,
     host: &str,
@@ -461,6 +466,11 @@ pub struct ServiceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Operation {
+    /// Register, retarget or delete one stable Firecrab public address.
+    ManageFirecrabTunnel {
+        /// Non-secret local resource intent.
+        request: crate::firecrab_tunnel::Request,
+    },
     /// Read persisted configuration, engine availability and systemd state.
     Inspect,
     /// Apply a complete configuration with rollback on verification failure.
@@ -522,6 +532,9 @@ pub struct QuickTunnelStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    /// Stable public addresses, with ownership credentials removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub firecrab_tunnels: Vec<crate::firecrab_tunnel::Address>,
     /// Last installed manifest, absent before the first successful apply.
     pub config: Option<Config>,
     /// Ingress and tunnel unit states, independent of API process lifetime.
