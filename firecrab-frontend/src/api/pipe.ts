@@ -59,6 +59,7 @@ export interface QuickTunnelEntry { id: string; name: string; target: QuickTunne
 export interface QuickTunnelSnapshot extends QuickTunnelEntry {
   unit: PipeSnapshot["units"][number];
   publicUrl: string | null;
+  error?: string | null;
 }
 export function saveQuickTunnel(tunnel: { id: string | null; name: string; target: QuickTunnelTarget }): Promise<PipeSnapshot> {
   return fetchJson("/api/pipe/quick-tunnels", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(tunnel) });

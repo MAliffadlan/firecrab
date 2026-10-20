@@ -195,11 +195,50 @@ async function open(page: Page, options: { unavailable?: boolean; firecrabFailur
   });
   await page.addInitScript(locale => localStorage.setItem("firecrab.locale", locale), options.locale ?? "en");
   await page.goto("/#/pipe");
-  return { firecrabSaves, firecrabDeletes, namedConnections, zoneRequests, get namedDisconnects() { return namedDisconnects; }, writes, actions, quickSaves, quickDeletes, quickActions, finishConnection, unavailable: () => { unavailable = true; }, setVms: (next: VmResponse[]) => { vms = next; }, failVms: () => { vmsUnavailable = true; }, publishQuickUrl: (id = QUICK_ID) => { snapshot.quickTunnels!.find(value => value.id === id)!.publicUrl = QUICK_URL; }, failTunnel: (id = QUICK_ID) => { const unit = snapshot.quickTunnels!.find(value => value.id === id)!.unit; unit.activeState = "failed"; unit.subState = "failed"; unit.mainPid = 0; } };
+  return { get snapshot() { return snapshot; }, firecrabSaves, firecrabDeletes, namedConnections, zoneRequests, get namedDisconnects() { return namedDisconnects; }, writes, actions, quickSaves, quickDeletes, quickActions, finishConnection, unavailable: () => { unavailable = true; }, setVms: (next: VmResponse[]) => { vms = next; }, failVms: () => { vmsUnavailable = true; }, publishQuickUrl: (id = QUICK_ID) => { snapshot.quickTunnels!.find(value => value.id === id)!.publicUrl = QUICK_URL; }, failTunnel: (id = QUICK_ID) => { const unit = snapshot.quickTunnels!.find(value => value.id === id)!.unit; unit.activeState = "failed"; unit.subState = "failed"; unit.mainPid = 0; } };
 }
 
 test.describe("Pipe dashboard @dashboard", () => {
   test.describe.configure({ timeout: 45_000 });
+  test("shows provisioning errors on both tunnels and allows stopping automatic retries", async ({ page }) => {
+    await page.clock.install();
+    const mock = await open(page, { quickTunnels: [webTunnel] });
+    const failure = "Cloudflare rate limited URL creation (HTTP 429). Automatic retries use increasing delays; wait before restarting.";
+    const tunnel = mock.snapshot.quickTunnels![0];
+    tunnel.publicUrl = null;
+    tunnel.error = failure;
+    tunnel.unit.activeState = "activating";
+    tunnel.unit.subState = "auto-restart";
+    tunnel.unit.mainPid = 0;
+    mock.snapshot.firecrabTunnels = [{
+      subdomain: "my-app", publicUrl: "https://my-app.firecrab.dev", target: { type: "apps", upstreams: ["172.30.36.2:80"] },
+      connectorId: tunnel.id, connected: false, error: failure,
+    }];
+    await page.clock.runFor(8_100);
+    const quick = page.getByRole("region", { name: "Quick Tunnel", exact: true });
+    const fixed = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });
+    await expect(quick.getByText(failure, { exact: true })).toBeVisible();
+    await expect(quick.getByText("Preparing URL…", { exact: true })).toHaveCount(0);
+    await expect(fixed.getByText(failure, { exact: true })).toBeVisible();
+    await expect(fixed.getByText("Pending", { exact: true })).toBeVisible();
+    await quick.getByRole("button", { name: webTunnel.name + " actions" }).click();
+    await expect(page.getByRole("menuitem", { name: "Stop", exact: true })).toBeEnabled();
+    await page.getByRole("menuitem", { name: "Stop", exact: true }).click();
+    expect(mock.quickActions).toEqual([{ id: webTunnel.id, action: "stop" }]);
+
+    tunnel.error = null;
+    tunnel.unit.activeState = "active";
+    tunnel.unit.subState = "running";
+    tunnel.unit.mainPid = 402;
+    tunnel.publicUrl = QUICK_URL;
+    mock.snapshot.firecrabTunnels[0].connected = true;
+    mock.snapshot.firecrabTunnels[0].error = null;
+    await page.clock.runFor(8_100);
+    await expect(quick.getByRole("link", { name: QUICK_URL, exact: true })).toBeVisible();
+    await expect(fixed.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(page.getByText(failure, { exact: true })).toHaveCount(0);
+  });
+
   test("connects a dashboard token to VM apps and retargets it to Nginx", async ({ page }, info) => {
     const mock = await open(page, { quickTunnels: [webTunnel], savedRoutes: groupedRoutes });
     const panel = page.getByRole("region", { name: "Firecrab Tunnel", exact: true });

@@ -7,6 +7,67 @@ use firecrab_helper_protocol::pipe::{
 };
 
 const URL_FILTER: &str = "--grep=https://[A-Za-z0-9-]+[.]trycloudflare[.]com";
+const ERROR_FILTER: &str = "--grep=quick tunnel provisioning failed|failed to request quick Tunnel|failed to unmarshal quick Tunnel";
+
+/// Only fixed messages cross the helper boundary; raw logs can contain secrets.
+pub(super) fn error(
+    runner: &dyn CommandRunner,
+    unit: &UnitStatus,
+    invocation: &str,
+) -> Option<String> {
+    if !managed_unit(&unit.unit)
+        || !["active", "activating", "failed"].contains(&unit.active_state.as_str())
+        || invocation.len() != 32
+        || !invocation.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let output = runner.run(
+        "journalctl",
+        &[
+            "--unit",
+            &unit.unit,
+            "--no-pager",
+            "--output=json",
+            "--lines=20",
+            ERROR_FILTER,
+            &format!("_SYSTEMD_INVOCATION_ID={invocation}"),
+        ],
+    );
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines().rev() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if record["_SYSTEMD_INVOCATION_ID"].as_str() != Some(invocation)
+                || record["_SYSTEMD_UNIT"].as_str() != Some(unit.unit.as_str())
+            {
+                continue;
+            }
+            let Some(message) = record["MESSAGE"].as_str() else {
+                continue;
+            };
+            if message.contains("quick tunnel provisioning failed") {
+                return Some(if message.contains("status 429") {
+                    "Cloudflare rate limited URL creation (HTTP 429). Automatic retries use increasing delays; wait before restarting."
+                } else {
+                    "Cloudflare could not create a public URL. The connector will retry automatically."
+                }.into());
+            }
+            if message.contains("failed to request quick Tunnel") {
+                return Some("Cannot reach the Cloudflare URL service. Check the host network and DNS; the connector will retry automatically.".into());
+            }
+            if message.contains("failed to unmarshal quick Tunnel") {
+                return Some("Cloudflare returned an invalid URL response. The connector will retry automatically.".into());
+            }
+        }
+    }
+    (unit.active_state == "failed" || unit.sub_state == "auto-restart").then(|| {
+        "The Cloudflare connector failed. Check its service logs or restart the tunnel.".into()
+    })
+}
 
 /// Install a verified connector if needed, then apply its independent unit.
 #[cfg(target_os = "linux")]
@@ -369,6 +430,84 @@ mod tests {
             let runner = runner(&records, "active", INVOCATION);
             assert_eq!(public_url(&runner, &unit(), INVOCATION), None);
         }
+    }
+
+    fn error_runner(records: &str) -> FakeCommandRunner {
+        let mut runner = FakeCommandRunner::new();
+        runner.set(
+            "journalctl",
+            &[
+                "--unit",
+                TUNNEL_UNIT,
+                "--no-pager",
+                "--output=json",
+                "--lines=20",
+                ERROR_FILTER,
+                &format!("_SYSTEMD_INVOCATION_ID={INVOCATION}"),
+            ],
+            0,
+            records,
+            "",
+        );
+        runner
+    }
+
+    #[test]
+    fn reports_rate_limiting_during_the_restart_delay_without_exposing_logs() {
+        let mut retrying = unit();
+        retrying.active_state = "activating".into();
+        retrying.sub_state = "auto-restart".into();
+        retrying.main_pid = 0;
+        let records = journal(
+            INVOCATION,
+            "quick tunnel provisioning failed with status 429: private upstream response",
+        );
+        let runner = error_runner(&records);
+        let failure = error(&runner, &retrying, INVOCATION).unwrap();
+        assert!(failure.contains("HTTP 429"));
+        assert!(failure.contains("Automatic retries"));
+        assert!(!failure.contains("private upstream response"));
+        assert_eq!(public_url(&runner, &retrying, INVOCATION), None);
+    }
+
+    #[test]
+    fn connector_errors_only_use_the_selected_units_current_invocation() {
+        for record in [
+            journal(OTHER, "quick tunnel provisioning failed with status 429"),
+            serde_json::json!({"_SYSTEMD_UNIT":"unrelated.service", "_SYSTEMD_INVOCATION_ID":INVOCATION, "MESSAGE":"quick tunnel provisioning failed with status 429"}).to_string(),
+        ] {
+            assert_eq!(error(&error_runner(&record), &unit(), INVOCATION), None);
+        }
+        let mut stopped = unit();
+        stopped.active_state = "inactive".into();
+        let runner = FakeCommandRunner::new();
+        assert_eq!(error(&runner, &stopped, INVOCATION), None);
+        assert_eq!(error(&runner, &unit(), "invalid"), None);
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn reports_network_and_provisioning_failures_with_fixed_messages() {
+        for (message, expected) in [
+            (
+                "failed to request quick Tunnel: private network details",
+                "Check the host network and DNS",
+            ),
+            (
+                "quick tunnel provisioning failed with status 503",
+                "Cloudflare could not create a public URL",
+            ),
+            (
+                "failed to unmarshal quick Tunnel: private response",
+                "Cloudflare returned an invalid URL response",
+            ),
+        ] {
+            let runner = error_runner(&journal(INVOCATION, message));
+            let failure = error(&runner, &unit(), INVOCATION).unwrap();
+            assert!(failure.contains(expected));
+            assert!(!failure.contains("private"));
+        }
+        assert_eq!(error(&error_runner(""), &unit(), INVOCATION), None);
     }
 
     fn saved_config() -> Config {

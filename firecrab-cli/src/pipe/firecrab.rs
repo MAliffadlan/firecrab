@@ -521,13 +521,38 @@ fn sync_locked(store: &mut Store) -> Result<()> {
         let _lock = super::host::lock()?;
         super::host::snapshot(true)?
     };
+    refresh_bindings(store, &snapshot)?;
+    write(store)
+}
+
+fn connector_error(
+    connector: Option<&firecrab_helper_protocol::pipe::QuickTunnelSnapshot>,
+) -> String {
+    let Some(connector) = connector else {
+        return "Selected Quick Tunnel no longer exists".into();
+    };
+    if let Some(error) = &connector.error {
+        return error.clone();
+    }
+    match connector.unit.active_state.as_str() {
+        "inactive" => "The Cloudflare connector is stopped; start the tunnel",
+        "failed" => "The Cloudflare connector failed; check its service logs or restart the tunnel",
+        _ => "Waiting for the selected connector URL",
+    }
+    .into()
+}
+
+fn refresh_bindings(
+    store: &mut Store,
+    snapshot: &firecrab_helper_protocol::pipe::Snapshot,
+) -> Result<()> {
     let client = client()?;
     for binding in &mut store.bindings {
-        let url = snapshot
+        let connector = snapshot
             .quick_tunnels
             .iter()
-            .find(|q| q.id == binding.connector_id)
-            .and_then(|q| q.public_url.as_ref());
+            .find(|q| q.id == binding.connector_id);
+        let url = connector.and_then(|q| q.public_url.as_ref());
         let kind = if matches!(binding.target, Target::Nginx { .. }) {
             "nginx"
         } else {
@@ -544,7 +569,7 @@ fn sync_locked(store: &mut Store) -> Result<()> {
                 .json(&serde_json::json!({"target":url.map(|url|serde_json::json!({"kind":kind,"url":url})),"enabled":url.is_some()})),
             RegistryProtocol::RegisterV1 => {
                 let Some(url) = url else {
-                    binding.error = Some("Waiting for the selected connector URL".into());
+                    binding.error = Some(connector_error(connector));
                     continue;
                 };
                 let origin = if store.endpoint == ENDPOINT {
@@ -591,7 +616,7 @@ fn sync_locked(store: &mut Store) -> Result<()> {
                 binding.connected = url.is_some();
                 binding.last_success = seconds();
                 binding.error = if url.is_none() {
-                    Some("Waiting for the selected connector URL".into())
+                    Some(connector_error(connector))
                 } else {
                     None
                 };
@@ -617,7 +642,7 @@ fn sync_locked(store: &mut Store) -> Result<()> {
             }
         }
     }
-    write(store)
+    Ok(())
 }
 
 /// Continuously refresh current target URLs and leases without depending on the API process.
@@ -755,6 +780,74 @@ mod tests {
             last_success: seconds(),
             error: None,
         }
+    }
+
+    #[test]
+    fn connector_failure_reaches_the_address_and_a_later_url_refresh_connects_it() {
+        let id = Uuid::new_v4();
+        let mut snapshot: firecrab_helper_protocol::pipe::Snapshot = serde_json::from_value(
+            serde_json::json!({
+                "config":null, "units":[], "nginxAvailable":true, "cloudflaredAvailable":true,
+                "quickTunnels":[{
+                    "id":id, "name":"managed", "target":{"type":"apps","upstreams":["127.0.0.1:9000"]},
+                    "unit":{"unit":firecrab_helper_protocol::pipe::quick_tunnel_unit(id),"loadState":"loaded","activeState":"activating","subState":"auto-restart","mainPid":0},
+                    "publicUrl":null, "error":"Cloudflare rate limited URL creation (HTTP 429)"
+                }]
+            }),
+        ).unwrap();
+        let (endpoint, server) = registry(vec![(
+            200,
+            serde_json::json!({
+                "ok":true, "url":"https://first.firecrab.dev", "suspended":false
+            }),
+        )]);
+        let mut store = Store {
+            endpoint,
+            protocol: RegistryProtocol::RegisterV1,
+            bindings: vec![binding("first", id, true)],
+        };
+        refresh_bindings(&mut store, &snapshot).unwrap();
+        assert!(!store.bindings[0].connected);
+        assert_eq!(store.bindings[0].error, snapshot.quick_tunnels[0].error);
+
+        snapshot.quick_tunnels[0].error = None;
+        snapshot.quick_tunnels[0].unit.active_state = "active".into();
+        snapshot.quick_tunnels[0].public_url =
+            Some("https://recovered-crab.trycloudflare.com".into());
+        refresh_bindings(&mut store, &snapshot).unwrap();
+        assert!(store.bindings[0].connected);
+        assert!(store.bindings[0].error.is_none());
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /__firecrab/heartbeat HTTP/1.1"));
+        assert!(
+            requests[0].ends_with(r#"{"tunnel_url":"https://recovered-crab.trycloudflare.com"}"#)
+        );
+    }
+
+    #[test]
+    fn standalone_refresh_disables_a_failed_target_and_preserves_its_error() {
+        let id = Uuid::new_v4();
+        let snapshot: firecrab_helper_protocol::pipe::Snapshot = serde_json::from_value(
+            serde_json::json!({
+                "config":null,"units":[],"nginxAvailable":true,"cloudflaredAvailable":true,
+                "quickTunnels":[{
+                    "id":id,"name":"managed","target":{"type":"apps","upstreams":["127.0.0.1:9000"]},
+                    "unit":{"unit":firecrab_helper_protocol::pipe::quick_tunnel_unit(id),"loadState":"loaded","activeState":"failed","subState":"failed","mainPid":0},
+                    "publicUrl":null,"error":"Cannot reach the Cloudflare URL service"
+                }]
+            }),
+        ).unwrap();
+        let (endpoint, server) = registry(vec![(200, serde_json::json!({}))]);
+        let mut store = Store {
+            endpoint,
+            protocol: RegistryProtocol::AddressesV1,
+            bindings: vec![binding("first", id, true)],
+        };
+        refresh_bindings(&mut store, &snapshot).unwrap();
+        assert!(!store.bindings[0].connected);
+        assert_eq!(store.bindings[0].error, snapshot.quick_tunnels[0].error);
+        assert!(server.join().unwrap()[0].ends_with(r#"{"enabled":false,"target":null}"#));
     }
     fn config(id: Uuid) -> Config {
         serde_json::from_value(serde_json::json!({"routes":[],"quickTunnels":[{"id":id,"name":"managed","target":{"type":"apps","upstreams":["127.0.0.1:9000"]}}]})).unwrap()

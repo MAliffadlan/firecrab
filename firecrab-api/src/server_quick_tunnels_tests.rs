@@ -123,6 +123,7 @@ async fn multiple_quick_tunnels_forward_only_the_requested_intent_and_preserve_o
                 main_pid: 42,
             },
             public_url: Some("https://test-app.trycloudflare.com".into()),
+            error: None,
         }],
     };
     let expected = cases

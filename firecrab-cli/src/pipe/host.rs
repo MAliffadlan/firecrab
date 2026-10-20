@@ -667,6 +667,11 @@ fn snapshot_with(
         .and_then(|config| config.quick_tunnel.as_ref())
         .map(|quick| {
             let public_url = super::quick::public_url(runner, &legacy, &invocation);
+            let error = if public_url.is_none() {
+                super::quick::error(runner, &legacy, &invocation)
+            } else {
+                None
+            };
             quick_tunnels.push(QuickTunnelSnapshot {
                 id: LEGACY_QUICK_TUNNEL_ID,
                 name: "Quick Tunnel".into(),
@@ -675,6 +680,7 @@ fn snapshot_with(
                 },
                 unit: legacy.clone(),
                 public_url: public_url.clone(),
+                error,
             });
             firecrab_helper_protocol::pipe::QuickTunnelStatus { public_url }
         });
@@ -682,12 +688,18 @@ fn snapshot_with(
         for entry in &config.quick_tunnels {
             let (unit, invocation) = unit_snapshot(runner, &quick_tunnel_unit(entry.id))?;
             let public_url = super::quick::public_url(runner, &unit, &invocation);
+            let error = if public_url.is_none() {
+                super::quick::error(runner, &unit, &invocation)
+            } else {
+                None
+            };
             quick_tunnels.push(QuickTunnelSnapshot {
                 id: entry.id,
                 name: entry.name.clone(),
                 target: entry.target.clone(),
                 unit,
                 public_url,
+                error,
             });
         }
     }

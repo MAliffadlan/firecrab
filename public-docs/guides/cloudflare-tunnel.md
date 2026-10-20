@@ -51,8 +51,15 @@ referenced by an address cannot be deleted directly.
 | No route domains | Save a Nginx domain/path route before selecting this target mode. |
 | Base link returns 404 | Append a path listed for that route domain, such as `/api`. |
 | Preparing URL | Check that row's service state and logs. Wait for the next poll. |
+| Cloudflare rate limited URL creation (HTTP 429) | Wait for automatic retries. Repeated manual restarts can prolong the limit. Use **Stop** to pause retries. |
 | Old link fails after restart | Copy the new URL from that tunnel's row. |
 | Removing a domain is rejected | Change or delete tunnels targeting that domain first. |
+
+Failed provisioning retries start after 60 seconds. On systemd 254 or later,
+the delay increases to at most 15 minutes. Older systemd versions use the
+60-second delay. Connector failures also appear on any Firecrab address that
+depends on that connector. Once a URL is issued, the address updater retries
+its registration automatically.
 
 ## API
 
@@ -69,6 +76,8 @@ configuration and retain unrelated tunnels and routes.
 
 `GET /api/pipe` includes `quickTunnels` entries with their name, target, unit
 state, and current `publicUrl`. A URL can be null while it is being issued.
+An optional `error` contains a sanitized provisioning failure for the current
+connector invocation. Stopped connectors do not retain earlier failures.
 The saved manifest stores definitions in `config.quickTunnels`. The legacy
 `quickTunnel` field remains compatible.
 

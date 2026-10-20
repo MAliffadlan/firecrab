@@ -96,6 +96,9 @@ pub struct QuickTunnelSnapshot {
     pub unit: UnitStatus,
     /// HTTPS URL from the unit's current invocation, absent while stopped or starting.
     pub public_url: Option<String>,
+    /// Sanitized connector failure, absent while starting normally or connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Dashboard save input; unrelated Pipe configuration is never submitted here.

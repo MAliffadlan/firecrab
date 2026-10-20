@@ -402,6 +402,7 @@ fn quick_tunnel_uses_its_own_nonsecret_config_and_independent_unit() {
     let pipe = directory.path().join("config/pipe");
     let unit = fs::read_to_string(directory.path().join("units").join(TUNNEL_UNIT)).unwrap();
     assert!(unit.contains("Type=simple"));
+    assert!(unit.contains("RestartSec=60\nRestartSteps=4\nRestartMaxDelaySec=15min"));
     assert!(
         unit.contains("--url http://127.0.0.1:8080 --http-host-header quick.firecrab.internal")
     );
