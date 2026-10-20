@@ -160,7 +160,8 @@ if [ "$profile" != restore ]; then
     *) echo 'Linux ARM64 or x86_64 guest required' >&2; exit 1 ;;
   esac
   echo '[BUILD] preparing Debian compiler and pinned Rust toolchain'
-  if ! command -v cc >/dev/null || ! command -v pkg-config >/dev/null || ! command -v cmake >/dev/null; then
+  if ! command -v cc >/dev/null || ! command -v pkg-config >/dev/null || ! command -v cmake >/dev/null \
+    || ! command -v objcopy >/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y build-essential pkg-config cmake ca-certificates curl
@@ -210,10 +211,32 @@ if [ "$profile" != restore ]; then
   check_filesystems || exit 74
 
   phase=stage
+  # The OS disk holds the running build for rollback while the new one is
+  # staged. A build directory other than the running one was left by an
+  # interrupted deployment; the lock guarantees no other deployment owns it.
+  for stale in "$bin_root"/build.*; do
+    if [ -d "$stale" ] && [ "$stale" != "$previous_bin" ]; then rm -rf "$stale"; fi
+  done
+  # Debug executables are mostly DWARF. Compressing it on the data disk keeps
+  # backtrace file:line output and roughly halves what the OS disk must hold.
+  compressed=$(mktemp -d "$backup/stage.XXXXXX")
+  for binary in firecrab-api firecrab-helper firecrab; do
+    objcopy --compress-debug-sections=zlib \
+      "$CARGO_TARGET_DIR/$target/$profile/$binary" "$compressed/$binary"
+  done
+  # Fail before touching the OS disk instead of with a partial install.
+  need_kib=$(du -sk "$compressed" | cut -f1)
+  free_kib=$(df -Pk "$bin_root" | awk 'NR == 2 { print $4 }')
+  reserve_kib=$((64 * 1024))
+  if [ $((need_kib + reserve_kib)) -gt "$free_kib" ]; then
+    echo "[FAIL] guest OS disk has $((free_kib / 1024)) MiB free; staging needs $((need_kib / 1024)) MiB plus $((reserve_kib / 1024)) MiB reserve" >&2
+    echo '[HINT] free space: firecrab service shell -- sh -c "journalctl --vacuum-size=64M; apt-get clean; apt-get autoremove --purge -y"' >&2
+    exit 1
+  fi
   binaries=$(mktemp -d "$bin_root/build.XXXXXX")
   chmod 0755 "$binaries"
   for binary in firecrab-api firecrab-helper firecrab; do
-    install -m 0755 "$CARGO_TARGET_DIR/$target/$profile/$binary" "$binaries/$binary"
+    install -m 0755 "$compressed/$binary" "$binaries/$binary"
   done
   # The API resolves these runtime tools next to its executable. The source
   # snapshot is root-only, so its compile-time fallback path is not accessible.
